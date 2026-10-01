@@ -153,9 +153,6 @@ async function refresh() {
 
 function dashboard() {
   const lights = realLights();
-  const bridge = data.hue.paired
-    ? el("b", {}, el("span", { class: "dot" }), data.hue.running ? "Running" : "Stopped")
-    : el("b", {}, el("span", { class: "dot off" }), "Not paired");
   const first = data.groups[0];
   const stat = (title, value, note) => el("div", { class: "card stat" },
     el("span", { class: "muted" }, title), el("b", {}, value), el("span", { class: "muted" }, note));
@@ -166,8 +163,8 @@ function dashboard() {
       stat("Lights", String(lights.length), lights.filter((l) => l.state === "on").length + " on"),
       stat("Scenes", String(scenes().length), "from the Hue Bridge"),
       stat("Groups", String(data.groups.length), data.groups.filter((g) => g.expose_light).length + " with an all-lights switch"),
-      el("div", { class: "card stat" }, el("span", { class: "muted" }, "Hue Bridge"), bridge,
-        el("span", { class: "muted" }, data.hue.paired ? data.hue.ip : "Pair it in Settings"))),
+      stat("Hue Bridge", !data.hue.paired ? "Not paired" : data.hue.running ? "Connected" : "Disconnected",
+        data.hue.paired ? data.hue.ip : "Pair it in Settings")),
     el("div", { class: "card" },
       el("h3", {}, "Set up hasscontrol on the watch"),
       el("ol", { class: "steps" },
