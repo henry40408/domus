@@ -35,6 +35,11 @@ Home Assistant subset (`Authorization: Bearer <token>`):
 - `GET /api/states/{entity_id}` — lights (`light.hue_<8 hex>`) and `group.<name>`
 - `POST /api/services/light/turn_on` / `turn_off` — body `{"entity_id": "…"}`; also accepts
   `target.entity_id`, arrays, `group.*`, `brightness` (0–255) and `brightness_pct`
+- `POST /api/services/scene/turn_on` — recalls Hue scenes (`scene.hue_<8 hex>`)
+
+**Scenes.** Hue scenes appear as `scene.hue_<8 hex>`, named "Room: Scene". Add them as group members
+(next to lights) and hasscontrol lists them as scenes. Their state is `unknown` until activated, then
+the activation time; activating from the Hue app updates it too. Light calls on a group skip its scenes.
 
 **Group lights.** hasscontrol only imports a group's members and toggles them one by one. To get a
 single switch for several lights, tick "Add an all-lights switch to this group" on the group your

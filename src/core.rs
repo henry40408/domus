@@ -67,6 +67,11 @@ pub trait Integration: Send + Sync {
         entity_id: &'a str,
         action: &'a LightAction,
     ) -> BoxFut<'a, Result<(), String>>;
+
+    /// Recalls a scene. Integrations without scenes keep the default.
+    fn activate_scene<'a>(&'a self, _entity_id: &'a str) -> BoxFut<'a, Result<(), String>> {
+        Box::pin(async { Err("scenes are not supported".to_string()) })
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -296,17 +301,40 @@ impl Core {
         }
     }
 
+    fn owner_of(&self, entity_id: &str) -> Result<Arc<dyn Integration>, CallError> {
+        let map = self.integrations.read().unwrap_or_else(|e| e.into_inner());
+        map.values()
+            .find(|i| i.owns(entity_id))
+            .cloned()
+            .ok_or(CallError::NoIntegration)
+    }
+
+    /// Recalls a scene; its state becomes the activation time (HA convention).
+    pub async fn activate_scene(&self, entity_id: &str) -> Result<(), CallError> {
+        let integration = self.owner_of(entity_id)?;
+        integration
+            .activate_scene(entity_id)
+            .await
+            .map_err(CallError::Failed)?;
+        self.mark_scene_activated(entity_id);
+        Ok(())
+    }
+
+    /// Sets a scene's state to now, keeping its attributes.
+    pub fn mark_scene_activated(&self, entity_id: &str) {
+        if let Some(old) = self.get_state(entity_id) {
+            let now = rfc3339_micros(SystemTime::now());
+            self.set_state(entity_id, &now, old.attributes);
+        }
+    }
+
     /// Runs a light action through the owning integration, then applies it optimistically.
     async fn call_real_light(
         &self,
         entity_id: &str,
         action: &LightAction,
     ) -> Result<(), CallError> {
-        let integration = {
-            let map = self.integrations.read().unwrap_or_else(|e| e.into_inner());
-            map.values().find(|i| i.owns(entity_id)).cloned()
-        }
-        .ok_or(CallError::NoIntegration)?;
+        let integration = self.owner_of(entity_id)?;
         integration
             .call_light(entity_id, action)
             .await

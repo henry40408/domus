@@ -79,18 +79,52 @@ fn requested_brightness(body: &Value) -> Option<u8> {
         .map(|p| (p / 100.0 * 255.0).round().clamp(0.0, 255.0) as u8)
 }
 
+/// Empty bodies count as `null`; anything else must be valid JSON.
+fn parse_body(body: &Bytes) -> Result<Value, &'static str> {
+    if body.is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_slice(body).map_err(|_| "Invalid JSON.")
+}
+
+async fn scene_service(
+    State(app): State<AppState>,
+    Path(service): Path<String>,
+    body: Bytes,
+) -> Response {
+    let body = match parse_body(&body) {
+        Ok(b) => b,
+        Err(e) => return message(StatusCode::BAD_REQUEST, e),
+    };
+    if service != "turn_on" {
+        return message(StatusCode::NOT_FOUND, "Service not found.");
+    }
+    let ids = match requested_entities(&body) {
+        Ok(ids) => ids,
+        Err(e) => return message(StatusCode::BAD_REQUEST, e),
+    };
+    let mut changed = Vec::new();
+    for id in ids.iter().filter(|i| i.starts_with("scene.")) {
+        match app.core.activate_scene(id).await {
+            Ok(()) => changed.extend(app.core.lookup(id)),
+            Err(CallError::NoIntegration) => {}
+            Err(CallError::Failed(e)) => {
+                tracing::warn!("scene call for {id} failed: {e}");
+                return message(StatusCode::BAD_GATEWAY, &format!("Call to {id} failed."));
+            }
+        }
+    }
+    Json(changed).into_response()
+}
+
 async fn light_service(
     State(app): State<AppState>,
     Path(service): Path<String>,
     body: Bytes,
 ) -> Response {
-    let body: Value = if body.is_empty() {
-        Value::Null
-    } else {
-        match serde_json::from_slice(&body) {
-            Ok(v) => v,
-            Err(_) => return message(StatusCode::BAD_REQUEST, "Invalid JSON."),
-        }
+    let body = match parse_body(&body) {
+        Ok(b) => b,
+        Err(e) => return message(StatusCode::BAD_REQUEST, e),
     };
     let action = match service.as_str() {
         "turn_on" => LightAction::TurnOn {
@@ -105,7 +139,8 @@ async fn light_service(
     };
 
     let mut changed = Vec::new();
-    for id in &ids {
+    // A group may also hold scenes; those are not lights.
+    for id in ids.iter().filter(|i| !i.starts_with("scene.")) {
         match app.core.call_light(id, &action).await {
             Ok(()) => {
                 if let Some(s) = app.core.lookup(id) {
@@ -127,6 +162,7 @@ pub fn router(app: AppState) -> Router {
     Router::new()
         .route("/api/states/{entity_id}", get(get_state))
         .route("/api/services/light/{service}", post(light_service))
+        .route("/api/services/scene/{service}", post(scene_service))
         .layer(middleware::from_fn_with_state(app.clone(), require_token))
         .with_state(app)
 }
@@ -146,7 +182,16 @@ mod tests {
     struct Fake(Mutex<Vec<(String, LightAction)>>);
     impl Integration for Fake {
         fn owns(&self, id: &str) -> bool {
-            id.starts_with("light.hue_")
+            id.starts_with("light.hue_") || id.starts_with("scene.hue_")
+        }
+        fn activate_scene<'a>(&'a self, id: &'a str) -> BoxFut<'a, Result<(), String>> {
+            Box::pin(async move {
+                if id.ends_with("bad") {
+                    Err("boom".into())
+                } else {
+                    Ok(())
+                }
+            })
         }
         fn call_light<'a>(
             &'a self,
@@ -349,6 +394,64 @@ mod tests {
                 .0,
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    #[tokio::test]
+    async fn scene_turn_on_stamps_state_and_light_calls_skip_scenes() {
+        let (r, app, fake) = setup();
+        app.core.set_state("scene.hue_a", "unknown", Map::new());
+        app.core.set_state("scene.hue_bad", "unknown", Map::new());
+
+        let (_, v) = call(&r, "GET", "/api/states/scene.hue_a", Some(TOKEN), "").await;
+        assert_eq!(v["state"], "unknown");
+
+        let body = r#"{"entity_id":"scene.hue_a"}"#;
+        let (s, v) = call(&r, "POST", "/api/services/scene/turn_on", Some(TOKEN), body).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v[0]["entity_id"], "scene.hue_a");
+        assert!(v[0]["state"].as_str().unwrap().contains('T'));
+        let (_, v) = call(&r, "GET", "/api/states/scene.hue_a", Some(TOKEN), "").await;
+        assert!(v["state"].as_str().unwrap().contains('T'));
+
+        // unknown scenes are ignored, failures are 502, other services 404
+        let ghost = r#"{"target":{"entity_id":["scene.ghost"]}}"#;
+        let (s, v) = call(
+            &r,
+            "POST",
+            "/api/services/scene/turn_on",
+            Some(TOKEN),
+            ghost,
+        )
+        .await;
+        assert_eq!((s, v), (StatusCode::OK, json!([])));
+        let bad = r#"{"entity_id":"scene.hue_bad"}"#;
+        assert_eq!(
+            call(&r, "POST", "/api/services/scene/turn_on", Some(TOKEN), bad)
+                .await
+                .0,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            call(&r, "POST", "/api/services/scene/create", Some(TOKEN), "{}")
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+
+        // a group holding a scene lists it, and light calls on the group leave it alone
+        app.core
+            .store()
+            .group_set("Mixed", &["light.hue_a".into(), "scene.hue_a".into()])
+            .unwrap();
+        let (_, v) = call(&r, "GET", "/api/states/group.Mixed", Some(TOKEN), "").await;
+        assert_eq!(
+            v["attributes"]["entity_id"],
+            json!(["light.hue_a", "scene.hue_a"])
+        );
+        let body = r#"{"entity_id":"group.Mixed"}"#;
+        let (_, v) = call(&r, "POST", "/api/services/light/turn_on", Some(TOKEN), body).await;
+        assert_eq!(v.as_array().unwrap().len(), 1);
+        assert_eq!(fake.0.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

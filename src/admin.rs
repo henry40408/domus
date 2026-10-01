@@ -185,7 +185,7 @@ async fn lights(State(app): State<AppState>) -> Json<Value> {
         .all_states()
         .into_iter()
         .chain(app.core.group_lights())
-        .filter(|s| s.entity_id.starts_with("light."))
+        .filter(|s| s.entity_id.starts_with("light.") || s.entity_id.starts_with("scene."))
         .map(|s| {
             json!({
                 "entity_id": s.entity_id,
@@ -240,8 +240,15 @@ async fn group_put(
             "Group name: letters, digits, _ and - only (max 64).",
         );
     }
-    if body.members.iter().any(|m| !m.starts_with("light.")) {
-        return message(StatusCode::BAD_REQUEST, "Members must be light entities.");
+    if body
+        .members
+        .iter()
+        .any(|m| !m.starts_with("light.") && !m.starts_with("scene."))
+    {
+        return message(
+            StatusCode::BAD_REQUEST,
+            "Members must be light or scene entities.",
+        );
     }
     if body.members.contains(&group_light_id(&name)) {
         return message(
@@ -363,6 +370,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
     use http_body_util::BodyExt;
+    use serde_json::Map;
     use std::sync::Arc;
     use tower::ServiceExt;
 
@@ -686,6 +694,29 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|x| x["entity_id"] == "light.domus_group_Garmin" && x["state"] == "on")
+        );
+        // scenes are accepted as members and offered in the picker; other domains are not
+        app.core.set_state("scene.hue_s", "unknown", Map::new());
+        let sc = r#"{"members":["light.hue_a","scene.hue_s"]}"#;
+        assert_eq!(
+            call(&r, "PUT", "/api/domus/groups/Garmin", Some(&c), sc)
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let (_, _, l) = call(&r, "GET", "/api/domus/lights", Some(&c), "").await;
+        assert!(
+            l.as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x["entity_id"] == "scene.hue_s")
+        );
+        let sw = r#"{"members":["switch.x"]}"#;
+        assert_eq!(
+            call(&r, "PUT", "/api/domus/groups/Garmin", Some(&c), sw)
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
         );
         let own = r#"{"members":["light.domus_group_Garmin"]}"#;
         assert_eq!(

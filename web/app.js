@@ -137,7 +137,7 @@ async function groupSection() {
   const items = groups.map((g) => el("details", {}, el("summary", {}, g.name + " (" + g.members.length + ")"), editor(g.name, g.members, g.expose_light, g.light_entity_id)));
   return el("section", {},
     el("h2", {}, "Groups"),
-    el("p", { class: "muted" }, "In the hasscontrol watch settings, enter the exact group name below. Keep groups small (about a dozen lights) so older watches can parse them."),
+    el("p", { class: "muted" }, "In the hasscontrol watch settings, enter the exact group name below. Keep groups small (about a dozen entries) so older watches can parse them. Members can be lights and Hue scenes."),
     lights.length === 0 ? el("p", { class: "muted" }, "No lights yet. Pair the Hue Bridge first.") : "",
     ...items,
     el("details", {}, el("summary", {}, "New group"), editor("", [], false, "")),
