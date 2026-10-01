@@ -18,6 +18,7 @@ use crate::util::{hash_password, random_hex, sha256_hex, verify_password};
 
 const COOKIE: &str = "domus_session";
 const MIN_PASSWORD_LEN: usize = 8;
+const TOKEN_PREFIX: &str = "domus_";
 
 #[derive(RustEmbed)]
 #[folder = "web/"]
@@ -298,7 +299,8 @@ async fn token_create(State(app): State<AppState>, Json(body): Json<TokenBody>) 
             "Give the token a name (max 64 characters).",
         );
     }
-    let token = random_hex(32);
+    // 128 bits of entropy; the prefix makes the token recognisable to people and secret scanners.
+    let token = format!("{TOKEN_PREFIX}{}", random_hex(16));
     match app.core.store().create_token(name, &sha256_hex(&token)) {
         // The plaintext is returned exactly once; only its hash is stored.
         Some(id) => Json(json!({"id": id, "name": name, "token": token})).into_response(),
@@ -589,6 +591,10 @@ mod tests {
         .await;
         assert_eq!(s, StatusCode::OK);
         let token = v["token"].as_str().unwrap().to_string();
+        assert!(
+            token.starts_with("domus_") && token.len() == 6 + 32,
+            "{token}"
+        );
         assert!(app.core.store().token_valid(&sha256_hex(&token)));
         let (_, _, list) = call(&r, "GET", "/api/domus/tokens", Some(&c), "").await;
         assert_eq!(list[0]["name"], "watch");

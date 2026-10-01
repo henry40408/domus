@@ -12,5 +12,6 @@ label { display: block; padding: .15rem 0; }
 .msg { min-height: 1.5rem; }
 .err { color: #c33; }
 .ok { color: #2a7; }
+code.tok { display: block; user-select: all; -webkit-user-select: all; margin: .5rem 0; padding: .5rem .6rem; }
 code { background: #8883; padding: .1rem .3rem; border-radius: .25rem; word-break: break-all; }
 .muted { opacity: .7; font-size: .9rem; }

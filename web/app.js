@@ -78,6 +78,22 @@ async function hueSection() {
     ip, btn, msg);
 }
 
+// navigator.clipboard only exists on https/localhost; domus is often opened over plain http.
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return true;
+  }
+  const ta = el("textarea", { value: text });
+  ta.style.cssText = "position:fixed;opacity:0";
+  document.body.append(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { /* fall through */ }
+  ta.remove();
+  return ok;
+}
+
 async function tokenSection() {
   const tokens = await api("GET", "/tokens");
   const name = el("input", { type: "text", placeholder: "Token name, e.g. watch" });
@@ -93,9 +109,14 @@ async function tokenSection() {
     onclick: () => guarded(msg, async () => {
       const t = await api("POST", "/tokens", { name: name.value });
       shown.className = "msg ok";
+      const copied = el("span", {});
       shown.replaceChildren(
-        "Copy this token now; it is shown only once: ",
-        el("code", {}, t.token));
+        "Copy this token now; it is shown only once. Click it to select all.",
+        el("code", { class: "tok" }, t.token),
+        el("button", {
+          onclick: async () => { copied.textContent = (await copyText(t.token)) ? " Copied" : " Select the token and copy it manually"; },
+        }, "Copy token"),
+        copied);
       name.value = "";
     }),
   }, "Create token");

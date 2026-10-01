@@ -23,7 +23,7 @@ Everything else is configured in the admin page at `/`:
 1. Set the admin password (first start only).
 2. Pair the Hue Bridge: enter its IP, press the bridge's link button, click **Pair**.
 3. Create a group (e.g. `Garmin`) and tick the lights in it.
-4. Create a long-lived access token (shown once; only its hash is stored).
+4. Create a long-lived access token (shown once; only its hash is stored). Tokens look like `domus_` + 32 hex characters.
 
 In hasscontrol, set the server URL, paste the token, and set **group** to the same group name.
 Keep groups small (about a dozen lights): older Garmin watches have very little memory.
