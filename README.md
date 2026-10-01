@@ -18,12 +18,13 @@ Configuration is environment variables only:
 | `DOMUS_DATA_DIR`  | `./data`         | SQLite location (dir mode `0700`, `domus.db` `0600`) |
 | `DOMUS_LOG`       | `info`           | Log filter (`tracing` env-filter syntax)            |
 
-Everything else is configured in the admin page at `/`:
+Everything else is configured in the admin page at `/` (tabs: Dashboard, Groups, Devices, Tokens, Settings; it works on phones too):
 
 1. Set the admin password (first start only).
-2. Pair the Hue Bridge: enter its IP, press the bridge's link button, click **Pair**.
-3. Create a group (e.g. `Garmin`) and tick the lights in it.
-4. Create a long-lived access token (shown once; only its hash is stored). Tokens look like `domus_` + 32 hex characters.
+2. Pair the Hue Bridge (Settings): enter its IP, press the bridge's link button, click **Pair**.
+3. Create a group (e.g. `Garmin`, Groups), tick lights and scenes, order them, and save. A watch preview shows what hasscontrol will list.
+4. Create a long-lived access token (Tokens; shown once, only its hash is stored; "last used" is tracked). Tokens look like `domus_` + 32 hex characters.
+5. Devices lets you toggle lights and activate scenes to test the setup without the watch.
 
 In hasscontrol, set the server URL, paste the token, and set **group** to the same group name.
 Keep groups small (about a dozen lights): older Garmin watches have very little memory.
@@ -49,7 +50,7 @@ another group. It is on if any member is on, so toggling an on/off mix turns eve
 members in parallel and succeed if at least one member did. Group lights are not expanded inside other
 group lights (one level only), so groups cannot loop.
 
-Admin API lives under `/api/domus/*` (session cookie, used by the admin page).
+Admin API lives under `/api/domus/*` (session cookie, used by the admin page), including `POST /api/domus/devices/test` (`{"entity_id", "on"}`).
 
 ## TLS / reverse proxy
 

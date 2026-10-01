@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::api::AppState;
-use crate::core::group_light_id;
+use crate::core::{CallError, LightAction, group_light_id};
 use crate::hue::{PairError, bridge_base, pair};
 use crate::store::{HueBridge, SESSION_TTL_SECS};
 use crate::util::{hash_password, random_hex, sha256_hex, verify_password};
@@ -192,10 +192,46 @@ async fn lights(State(app): State<AppState>) -> Json<Value> {
                 "entity_id": s.entity_id,
                 "name": s.attributes.get("friendly_name").cloned().unwrap_or(Value::Null),
                 "state": s.state,
+                "brightness": s.attributes.get("brightness").cloned().unwrap_or(Value::Null),
             })
         })
         .collect();
     Json(Value::Array(list))
+}
+
+#[derive(Deserialize)]
+struct TestBody {
+    entity_id: String,
+    /// Lights only: true turns on, false turns off.
+    on: Option<bool>,
+}
+
+/// Runs a light or scene action from the admin page, so the setup can be tested without a watch.
+async fn device_test(State(app): State<AppState>, Json(body): Json<TestBody>) -> Response {
+    let id = body.entity_id;
+    let result = if id.starts_with("scene.") {
+        app.core.activate_scene(&id).await
+    } else if id.starts_with("light.") {
+        let action = if body.on.unwrap_or(true) {
+            LightAction::TurnOn { brightness: None }
+        } else {
+            LightAction::TurnOff
+        };
+        app.core.call_light(&id, &action).await
+    } else {
+        return message(
+            StatusCode::BAD_REQUEST,
+            "Only lights and scenes can be tested.",
+        );
+    };
+    match result {
+        Ok(()) => Json(json!({"state": app.core.lookup(&id).map(|s| s.state)})).into_response(),
+        Err(CallError::NoIntegration) => message(StatusCode::NOT_FOUND, "Unknown entity."),
+        Err(CallError::Failed(e)) => {
+            tracing::warn!("test call for {id} failed: {e}");
+            message(StatusCode::BAD_GATEWAY, "The bridge rejected the request.")
+        }
+    }
 }
 
 async fn groups(State(app): State<AppState>) -> Json<Value> {
@@ -349,6 +385,7 @@ pub fn router(app: AppState) -> Router {
         .route("/hue", get(hue_status))
         .route("/hue/pair", post(hue_pair))
         .route("/lights", get(lights))
+        .route("/devices/test", post(device_test))
         .route("/groups", get(groups))
         .route("/groups/{name}", put(group_put))
         .route("/groups/{name}", delete(group_delete))
@@ -641,7 +678,7 @@ mod tests {
         let (_, _, l) = call(&r, "GET", "/api/domus/lights", Some(&c), "").await;
         assert_eq!(
             l,
-            json!([{"entity_id": "light.hue_a", "name": "Desk", "state": "on"}])
+            json!([{"entity_id": "light.hue_a", "name": "Desk", "state": "on", "brightness": null}])
         );
 
         // groups
@@ -789,5 +826,78 @@ mod tests {
             static_files("/nope.txt".parse().unwrap()).await.status(),
             StatusCode::NOT_FOUND
         );
+    }
+
+    struct Bridge;
+    impl crate::core::Integration for Bridge {
+        fn owns(&self, id: &str) -> bool {
+            id.starts_with("light.hue_") || id.starts_with("scene.hue_")
+        }
+        fn call_light<'a>(
+            &'a self,
+            id: &'a str,
+            _a: &'a LightAction,
+        ) -> crate::core::BoxFut<'a, Result<(), String>> {
+            Box::pin(async move {
+                if id.ends_with("bad") {
+                    Err("boom".into())
+                } else {
+                    Ok(())
+                }
+            })
+        }
+        fn activate_scene<'a>(
+            &'a self,
+            _id: &'a str,
+        ) -> crate::core::BoxFut<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn device_test_endpoint_controls_lights_and_scenes() {
+        let (r, app) = setup_app();
+        app.core.set_integration("bridge", Arc::new(Bridge));
+        app.core.set_state("light.hue_a", "off", Map::new());
+        app.core.set_state("light.hue_bad", "off", Map::new());
+        app.core.set_state("scene.hue_s", "unknown", Map::new());
+        let body = r#"{"password":"correct horse"}"#;
+        let (_, h, _) = call(&r, "POST", "/api/domus/setup", None, body).await;
+        let c = cookie_of(&h);
+        let post = |b: &'static str| {
+            let (r, c) = (r.clone(), c.clone());
+            async move { call(&r, "POST", "/api/domus/devices/test", Some(&c), b).await }
+        };
+
+        let (s, _, v) = post(r#"{"entity_id":"light.hue_a","on":true}"#).await;
+        assert_eq!((s, v["state"].as_str()), (StatusCode::OK, Some("on")));
+        let (_, _, v) = post(r#"{"entity_id":"light.hue_a","on":false}"#).await;
+        assert_eq!(v["state"], "off");
+        let (s, _, v) = post(r#"{"entity_id":"scene.hue_s"}"#).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(v["state"].as_str().unwrap().contains('T'));
+        assert_eq!(
+            post(r#"{"entity_id":"light.hue_bad"}"#).await.0,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            post(r#"{"entity_id":"light.ghost"}"#).await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            post(r#"{"entity_id":"switch.x"}"#).await.0,
+            StatusCode::BAD_REQUEST
+        );
+
+        // requires a session
+        let (s, ..) = call(
+            &r,
+            "POST",
+            "/api/domus/devices/test",
+            None,
+            r#"{"entity_id":"light.hue_a"}"#,
+        )
+        .await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
     }
 }

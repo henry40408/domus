@@ -14,6 +14,8 @@ pub struct TokenInfo {
     pub id: i64,
     pub name: String,
     pub created: i64,
+    /// Unix seconds of the last authenticated request (coarse: refreshed at most once a minute).
+    pub last_used: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +69,13 @@ impl Store {
                  PRIMARY KEY (group_name, entity_id)
              );",
         )?;
+        // Databases created before token usage tracking lack this column.
+        let has_last_used = conn
+            .prepare("SELECT 1 FROM pragma_table_info('tokens') WHERE name = 'last_used'")?
+            .exists([])?;
+        if !has_last_used {
+            conn.execute("ALTER TABLE tokens ADD COLUMN last_used INTEGER", [])?;
+        }
         // Databases created before group lights existed lack this column.
         let has_expose = conn
             .prepare("SELECT 1 FROM pragma_table_info('groups') WHERE name = 'expose_light'")?
@@ -157,7 +166,9 @@ impl Store {
 
     pub fn list_tokens(&self) -> Vec<TokenInfo> {
         let conn = self.conn();
-        let Ok(mut stmt) = conn.prepare("SELECT id, name, created FROM tokens ORDER BY id") else {
+        let Ok(mut stmt) =
+            conn.prepare("SELECT id, name, created, last_used FROM tokens ORDER BY id")
+        else {
             return Vec::new();
         };
         stmt.query_map([], |r| {
@@ -165,6 +176,7 @@ impl Store {
                 id: r.get(0)?,
                 name: r.get(1)?,
                 created: r.get(2)?,
+                last_used: r.get(3)?,
             })
         })
         .map(|rows| rows.filter_map(Result::ok).collect())
@@ -179,7 +191,8 @@ impl Store {
     }
 
     pub fn token_valid(&self, token_hash: &str) -> bool {
-        self.conn()
+        let conn = self.conn();
+        let valid = conn
             .query_row(
                 "SELECT 1 FROM tokens WHERE token_hash = ?1",
                 params![token_hash],
@@ -187,7 +200,17 @@ impl Store {
             )
             .optional()
             .map(|o| o.is_some())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if valid {
+            // Throttled so a polling client does not write on every request.
+            let now = now_secs();
+            let _ = conn.execute(
+                "UPDATE tokens SET last_used = ?2
+                 WHERE token_hash = ?1 AND (last_used IS NULL OR last_used < ?3)",
+                params![token_hash, now, now - 60],
+            );
+        }
+        valid
     }
 
     // Hue bridge
@@ -333,7 +356,9 @@ mod tests {
     fn token_lifecycle() {
         let s = Store::open_memory().unwrap();
         let id = s.create_token("watch", "h1").unwrap();
+        assert!(s.list_tokens()[0].last_used.is_none());
         assert!(s.token_valid("h1"));
+        assert!(s.list_tokens()[0].last_used.is_some());
         assert!(!s.token_valid("h2"));
         assert_eq!(s.list_tokens().len(), 1);
         assert_eq!(s.list_tokens()[0].name, "watch");
