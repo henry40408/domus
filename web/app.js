@@ -15,6 +15,7 @@ const ICONS = {
   key: [circle(8, 15, 4), "M10.8 12.2L20 3", "M16 7l3 3", "M14 9l2 2"],
   users: ["M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2", circle(9, 7, 4), "M22 21v-2a4 4 0 0 0-3-3.9", "M16 3.1a4 4 0 0 1 0 7.8"],
   settings: ["M4 6h6", "M14 6h6", "M4 12h12", "M20 12h0", "M4 18h2", "M10 18h10", circle(12, 6, 2), circle(18, 12, 2), circle(8, 18, 2)],
+  logout: ["M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4", "M16 17l5-5-5-5", "M21 12H9"],
   plus: ["M12 5v14", "M5 12h14"],
   alert: ["M12 3l10 18H2z", "M12 10v5", "M12 18h0"],
   lock: ["M5 11h14v10H5z", "M8 11V7a4 4 0 0 1 8 0v4"],
@@ -166,6 +167,14 @@ function authScreen(setupDone) {
 
 // ------------------------------------------------------------------ shell
 
+async function logout() {
+  await guarded(async () => {
+    await api("POST", "/logout");
+    ui.draft = null;
+    await start();
+  });
+}
+
 function shell() {
   const main = el("main", {});
   const nav = el("nav", {}, el("h1", {}, icon("home"), " domus"),
@@ -176,7 +185,9 @@ function shell() {
     data.hue ? el("div", { class: "bridge muted" },
       el("span", { class: "dot" + (data.hue.paired && data.hue.running ? "" : " off") }),
       !data.hue.paired ? "Bridge not paired" : data.hue.running ? "Bridge connected" : "Bridge disconnected") : "",
-    el("div", { class: "bridge muted" }, "Signed in as " + me.username));
+    el("div", { class: "account" },
+      el("span", { class: "who muted" }, me.username),
+      el("button", { class: "logout", title: "Log out", onclick: logout }, icon("logout"), "Log out")));
   root.replaceChildren(el("div", { class: "app" }, nav, main));
   return main;
 }
@@ -568,8 +579,7 @@ function accountCard() {
     el("h3", {}, "Account"),
     el("p", {}, "Signed in as ", el("b", {}, me.username), me.is_admin ? " (admin)" : ""),
     el("div", { class: "row" }, el("div", { class: "grow" }, current), el("div", { class: "grow" }, next),
-      el("button", { onclick: change }, "Change password")),
-    el("p", {}, el("button", { onclick: async () => { await api("POST", "/logout"); ui.draft = null; await start(); } }, "Log out")));
+      el("button", { onclick: change }, "Change password")));
 }
 
 function settings() {
