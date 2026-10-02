@@ -7,6 +7,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
+use tokio::sync::broadcast;
 
 use crate::store::{Scope, Store};
 use crate::util::{random_hex, rfc3339_micros};
@@ -84,6 +85,8 @@ pub struct Core {
     states: RwLock<HashMap<String, State>>,
     integrations: RwLock<HashMap<&'static str, Arc<dyn Integration>>>,
     store: Arc<Store>,
+    /// Entity ids whose state changed or vanished, for the admin page's live updates.
+    changes: broadcast::Sender<String>,
 }
 
 impl Core {
@@ -92,7 +95,14 @@ impl Core {
             states: RwLock::new(HashMap::new()),
             integrations: RwLock::new(HashMap::new()),
             store,
+            changes: broadcast::channel(256).0,
         })
+    }
+
+    /// Entity ids as they change. A slow receiver may lag and miss some; it should then
+    /// treat everything as changed.
+    pub fn subscribe(&self) -> broadcast::Receiver<String> {
+        self.changes.subscribe()
     }
 
     pub fn store(&self) -> &Arc<Store> {
@@ -121,6 +131,9 @@ impl Core {
             Some(old) if old.state == state => old.last_changed.clone(),
             _ => now.clone(),
         };
+        let changed = states
+            .get(entity_id)
+            .is_none_or(|old| old.state != state || old.attributes != attributes);
         states.insert(
             entity_id.to_string(),
             State {
@@ -132,13 +145,22 @@ impl Core {
                 context: Context::new(),
             },
         );
+        drop(states);
+        if changed {
+            let _ = self.changes.send(entity_id.to_string());
+        }
     }
 
     pub fn remove_state(&self, entity_id: &str) {
-        self.states
+        let removed = self
+            .states
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(entity_id);
+            .remove(entity_id)
+            .is_some();
+        if removed {
+            let _ = self.changes.send(entity_id.to_string());
+        }
     }
 
     pub fn get_state(&self, entity_id: &str) -> Option<State> {
@@ -401,6 +423,21 @@ impl Core {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn state_changes_are_broadcast_once() {
+        let core = Core::new(Arc::new(Store::open_memory().await.unwrap()));
+        let mut rx = core.subscribe();
+        core.set_state("light.a", "on", Map::new());
+        core.set_state("light.a", "on", Map::new()); // identical: no event
+        core.set_state("light.a", "off", Map::new());
+        core.remove_state("light.a");
+        core.remove_state("light.a"); // already gone: no event
+        for _ in 0..3 {
+            assert_eq!(rx.try_recv().unwrap(), "light.a");
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
     use super::*;
 
     async fn core() -> Arc<Core> {
