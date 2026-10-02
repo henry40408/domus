@@ -59,7 +59,12 @@ async fn main() {
     };
     info!("listening on http://{}", env.bind);
     let shutdown = async {
-        let _ = tokio::signal::ctrl_c().await;
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
         info!("shutting down");
     };
     if let Err(e) = axum::serve(listener, app)

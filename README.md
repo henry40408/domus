@@ -10,6 +10,14 @@ Hue Bridge (CLIP v2). The MVP implements just the REST subset needed by
 cargo run --release
 ```
 
+Or with Docker (multi-arch image published to GHCR; `main` tracks the default branch, releases get semver tags):
+
+```sh
+docker run -d -p 8123:8123 -v domus-data:/data ghcr.io/henry40408/domus:main
+```
+
+The image defaults to `DOMUS_BIND=0.0.0.0:8123` and `DOMUS_DATA_DIR=/data`.
+
 Configuration is environment variables only:
 
 | Variable          | Default          | Meaning                                             |
