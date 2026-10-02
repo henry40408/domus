@@ -63,7 +63,7 @@ Admin page tabs: Dashboard, Groups, Devices, Tokens, Settings.
 1. Set the admin password (first start only).
 2. Pair the Hue Bridge (Settings): enter its IP, press the bridge's link button, click **Pair**.
 3. Create a group (e.g. `Garmin`, Groups), tick lights and scenes, order them, and save. A watch preview shows what hasscontrol will list.
-4. Create a long-lived access token (Tokens; shown once, only its hash is stored; "last used" is tracked). Tokens look like `domus_` + 32 hex characters.
+4. Create a long-lived access token (Tokens; shown once, only its hash is stored; "last used" is tracked). Tokens look like `domus_` + 32 hex characters. Optionally limit a token to chosen groups: it can then only reach those groups, their members and the group's light switch. Out-of-scope reads return 404 and out-of-scope service targets are skipped. Tokens without a scope keep full access.
 5. Devices lets you toggle lights and activate scenes to test the setup without the watch.
 
 In hasscontrol, set the server URL, paste the token, and set **group** to the same group name.

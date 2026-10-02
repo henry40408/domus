@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
-use crate::store::Store;
+use crate::store::{Scope, Store};
 use crate::util::{random_hex, rfc3339_micros};
 
 /// Entity id prefix of the light that stands for a whole group (see `Store::group_exposed`).
@@ -283,6 +283,34 @@ impl Core {
             }
         }
         out
+    }
+
+    /// Whether a token with this scope may read or control the entity: the scoped groups
+    /// (`group.<name>`), their all-lights switches, and every member of those groups.
+    pub async fn allowed(&self, scope: &Scope, entity_id: &str) -> bool {
+        let Some(groups) = scope else {
+            return true;
+        };
+        if let Some(name) = entity_id.strip_prefix("group.") {
+            return groups.iter().any(|g| g == name);
+        }
+        if let Some(name) = entity_id.strip_prefix(GROUP_LIGHT_PREFIX)
+            && groups.iter().any(|g| g == name)
+        {
+            return true;
+        }
+        for g in groups {
+            if self
+                .store
+                .group_members(g)
+                .await
+                .iter()
+                .any(|m| m == entity_id)
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// Runs a light action. A group light fans out to its real members in parallel and succeeds

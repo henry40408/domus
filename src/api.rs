@@ -1,5 +1,6 @@
 //! Home Assistant compatible REST subset (what hasscontrol needs).
 
+use axum::Extension;
 use axum::body::Bytes;
 use axum::extract::{Path, Request, State};
 use axum::http::{StatusCode, header};
@@ -12,6 +13,7 @@ use std::sync::Arc;
 
 use crate::core::{CallError, Core, LightAction};
 use crate::hue::HueManager;
+use crate::store::Scope;
 use crate::util::sha256_hex;
 
 #[derive(Clone)]
@@ -30,20 +32,33 @@ fn bearer(req: &Request) -> Option<&str> {
     scheme.eq_ignore_ascii_case("bearer").then(|| token.trim())
 }
 
-async fn require_token(State(app): State<AppState>, req: Request, next: Next) -> Response {
+async fn require_token(State(app): State<AppState>, mut req: Request, next: Next) -> Response {
     let hash = bearer(&req).map(sha256_hex);
-    let ok = match hash {
-        Some(h) => app.core.store().token_valid(&h).await,
-        None => false,
+    let scope = match hash {
+        Some(h) => app.core.store().token_scope(&h).await,
+        None => None,
     };
-    if ok {
-        next.run(req).await
-    } else {
-        (StatusCode::UNAUTHORIZED, "401: Unauthorized").into_response()
+    match scope {
+        Some(scope) => {
+            req.extensions_mut().insert(TokenScope(scope));
+            next.run(req).await
+        }
+        None => (StatusCode::UNAUTHORIZED, "401: Unauthorized").into_response(),
     }
 }
 
-async fn get_state(State(app): State<AppState>, Path(entity_id): Path<String>) -> Response {
+/// The authenticated token's scope, attached to the request by `require_token`.
+#[derive(Clone)]
+struct TokenScope(Scope);
+
+async fn get_state(
+    State(app): State<AppState>,
+    Extension(TokenScope(scope)): Extension<TokenScope>,
+    Path(entity_id): Path<String>,
+) -> Response {
+    if !app.core.allowed(&scope, &entity_id).await {
+        return message(StatusCode::NOT_FOUND, "Entity not found.");
+    }
     match app.core.lookup(&entity_id).await {
         Some(s) => Json(s).into_response(),
         None => message(StatusCode::NOT_FOUND, "Entity not found."),
@@ -93,6 +108,7 @@ fn parse_body(body: &Bytes) -> Result<Value, &'static str> {
 
 async fn scene_service(
     State(app): State<AppState>,
+    Extension(TokenScope(scope)): Extension<TokenScope>,
     Path(service): Path<String>,
     body: Bytes,
 ) -> Response {
@@ -109,6 +125,10 @@ async fn scene_service(
     };
     let mut changed = Vec::new();
     for id in ids.iter().filter(|i| i.starts_with("scene.")) {
+        // Out-of-scope entities are ignored, like unknown ones.
+        if !app.core.allowed(&scope, id).await {
+            continue;
+        }
         match app.core.activate_scene(id).await {
             Ok(()) => changed.extend(app.core.lookup(id).await),
             Err(CallError::NoIntegration) => {}
@@ -123,6 +143,7 @@ async fn scene_service(
 
 async fn light_service(
     State(app): State<AppState>,
+    Extension(TokenScope(scope)): Extension<TokenScope>,
     Path(service): Path<String>,
     body: Bytes,
 ) -> Response {
@@ -145,6 +166,9 @@ async fn light_service(
     let mut changed = Vec::new();
     // A group may also hold scenes; those are not lights.
     for id in ids.iter().filter(|i| !i.starts_with("scene.")) {
+        if !app.core.allowed(&scope, id).await {
+            continue;
+        }
         match app.core.call_light(id, &action).await {
             Ok(()) => {
                 if let Some(s) = app.core.lookup(id).await {
@@ -213,7 +237,9 @@ mod tests {
 
     async fn setup() -> (Router, AppState, Arc<Fake>) {
         let core = Core::new(Arc::new(Store::open_memory().await.unwrap()));
-        core.store().create_token("t", &sha256_hex(TOKEN)).await;
+        core.store()
+            .create_token("t", &sha256_hex(TOKEN), None)
+            .await;
         let fake = Arc::new(Fake(Mutex::new(Vec::new())));
         core.set_integration("fake", fake.clone());
         core.set_state("light.hue_a", "off", Map::new());
@@ -479,5 +505,70 @@ mod tests {
         )
         .await;
         assert_eq!((s, v["state"].as_str()), (StatusCode::OK, Some("on")));
+    }
+
+    #[tokio::test]
+    async fn scoped_token_only_reaches_its_groups() {
+        let (r, app, fake) = setup().await;
+        app.core.set_state("light.hue_c", "off", Map::new());
+        app.core.set_state("scene.hue_a", "unknown", Map::new());
+        let store = app.core.store();
+        store
+            .group_set("Other", &["light.hue_c".into(), "scene.hue_a".into()])
+            .await
+            .unwrap();
+        store.group_set_exposed("Garmin", true).await;
+        let scope = ["Garmin".to_string()];
+        store
+            .create_token("scoped", &sha256_hex("scoped"), Some(&scope))
+            .await;
+        let t = Some("scoped");
+
+        for ok in [
+            "group.Garmin",
+            "light.hue_a",
+            "light.hue_b",
+            "light.domus_group_Garmin",
+        ] {
+            let uri = format!("/api/states/{ok}");
+            assert_eq!(call(&r, "GET", &uri, t, "").await.0, StatusCode::OK, "{ok}");
+        }
+        for denied in ["group.Other", "light.hue_c", "scene.hue_a", "group.None"] {
+            let uri = format!("/api/states/{denied}");
+            assert_eq!(
+                call(&r, "GET", &uri, t, "").await.0,
+                StatusCode::NOT_FOUND,
+                "{denied}"
+            );
+        }
+
+        // out-of-scope entities are skipped, in-scope ones still run
+        let body = r#"{"entity_id":["light.hue_a","light.hue_c","group.Other"]}"#;
+        let (s, v) = call(&r, "POST", "/api/services/light/turn_on", t, body).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v.as_array().unwrap().len(), 1);
+        assert_eq!(v[0]["entity_id"], "light.hue_a");
+        assert_eq!(fake.0.lock().unwrap().len(), 1);
+
+        let body = r#"{"entity_id":"scene.hue_a"}"#;
+        let (s, v) = call(&r, "POST", "/api/services/scene/turn_on", t, body).await;
+        assert_eq!((s, v), (StatusCode::OK, json!([])));
+        let (_, v) = call(&r, "GET", "/api/states/scene.hue_a", Some(TOKEN), "").await;
+        assert_eq!(v["state"], "unknown");
+
+        // the group's own light switch fans out to its members
+        let body = r#"{"entity_id":"light.domus_group_Garmin"}"#;
+        let (s, v) = call(&r, "POST", "/api/services/light/turn_off", t, body).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v[0]["entity_id"], "light.domus_group_Garmin");
+        assert_eq!(fake.0.lock().unwrap().len(), 3);
+
+        // an unrestricted token still reaches everything
+        assert_eq!(
+            call(&r, "GET", "/api/states/light.hue_c", Some(TOKEN), "")
+                .await
+                .0,
+            StatusCode::OK
+        );
     }
 }
