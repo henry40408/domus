@@ -460,9 +460,9 @@ function tokens() {
     ui.fresh = t.token;
     await refresh();
   });
-  const picker = boxes.length && el("div", { class: "scope" },
+  const picker = boxes.length ? el("div", { class: "scope" },
     el("p", { class: "muted" }, "Limit to groups (leave all unchecked for full access):"),
-    ...boxes.map((b) => el("label", {}, b.box, " " + b.g.name)));
+    ...boxes.map((b) => el("label", {}, b.box, " " + b.g.name))) : "";
   name.addEventListener("keydown", (e) => { if (e.key === "Enter") create(); });
   const fresh = ui.fresh && el("div", { class: "warn" },
     "Copy this token now; it is shown only once. Click it to select all.",
