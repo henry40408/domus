@@ -9,6 +9,11 @@ use std::str::FromStr;
 use crate::util::now_secs;
 
 pub const SESSION_TTL_SECS: i64 = 7 * 24 * 3600;
+/// A session unused for this long is dead, even before its absolute lifetime ends.
+pub const SESSION_IDLE_SECS: i64 = 24 * 3600;
+/// `last_seen` is refreshed at most this often, to avoid a write on every request.
+const SESSION_TOUCH_SECS: i64 = 60;
+const USER_AGENT_MAX: usize = 200;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct TokenInfo {
@@ -24,6 +29,16 @@ pub struct TokenInfo {
     pub expires: Option<i64>,
     pub user_id: Option<i64>,
     pub username: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SessionInfo {
+    /// Public id (the row id); the token hash never leaves the store.
+    pub id: i64,
+    pub created: i64,
+    pub last_seen: i64,
+    pub user_agent: String,
+    pub current: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -235,34 +250,99 @@ impl Store {
 
     // sessions
 
-    pub async fn create_session(&self, token_hash: &str, user_id: i64) {
-        let expires = now_secs() + SESSION_TTL_SECS;
-        let _ = sqlx::query("DELETE FROM sessions WHERE expires < ?1")
-            .bind(now_secs())
+    pub async fn create_session(&self, token_hash: &str, user_id: i64, user_agent: &str) {
+        let now = now_secs();
+        let _ = sqlx::query("DELETE FROM sessions WHERE expires < ?1 OR last_seen < ?2")
+            .bind(now)
+            .bind(now - SESSION_IDLE_SECS)
             .execute(&self.pool)
             .await;
+        let agent: String = user_agent.chars().take(USER_AGENT_MAX).collect();
         let _ = sqlx::query(
-            "INSERT OR REPLACE INTO sessions (token_hash, expires, user_id) VALUES (?1, ?2, ?3)",
+            "INSERT OR REPLACE INTO sessions (token_hash, expires, user_id, created, last_seen, user_agent)
+             VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
         )
         .bind(token_hash)
-        .bind(expires)
+        .bind(now + SESSION_TTL_SECS)
         .bind(user_id)
+        .bind(now)
+        .bind(agent)
         .execute(&self.pool)
         .await;
     }
 
+    /// The session's user, unless it expired or sat idle for too long.
     pub async fn session_user(&self, token_hash: &str) -> Option<User> {
-        sqlx::query(
+        let now = now_secs();
+        let user = sqlx::query(
             "SELECT u.id, u.username, u.is_admin, u.created, u.scope FROM sessions s
-             JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?1 AND s.expires > ?2",
+             JOIN users u ON u.id = s.user_id
+             WHERE s.token_hash = ?1 AND s.expires > ?2 AND s.last_seen > ?3",
         )
         .bind(token_hash)
-        .bind(now_secs())
+        .bind(now)
+        .bind(now - SESSION_IDLE_SECS)
         .fetch_optional(&self.pool)
         .await
         .ok()
         .flatten()
-        .map(|r| user_row(&r))
+        .map(|r| user_row(&r))?;
+        let _ = sqlx::query(
+            "UPDATE sessions SET last_seen = ?2 WHERE token_hash = ?1 AND last_seen < ?3",
+        )
+        .bind(token_hash)
+        .bind(now)
+        .bind(now - SESSION_TOUCH_SECS)
+        .execute(&self.pool)
+        .await;
+        Some(user)
+    }
+
+    /// The user's live sessions, newest first; `current_hash` marks the caller's own.
+    pub async fn list_sessions(&self, user_id: i64, current_hash: &str) -> Vec<SessionInfo> {
+        let now = now_secs();
+        sqlx::query(
+            "SELECT rowid, created, last_seen, user_agent, token_hash = ?2 FROM sessions
+             WHERE user_id = ?1 AND expires > ?3 AND last_seen > ?4 ORDER BY created DESC, rowid DESC",
+        )
+        .bind(user_id)
+        .bind(current_hash)
+        .bind(now)
+        .bind(now - SESSION_IDLE_SECS)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .map(|r| SessionInfo {
+            id: r.get(0),
+            created: r.get(1),
+            last_seen: r.get(2),
+            user_agent: r.get::<Option<String>, _>(3).unwrap_or_default(),
+            current: r.get(4),
+        })
+        .collect()
+    }
+
+    /// Ends one of the user's own sessions; false when it is not theirs or does not exist.
+    pub async fn delete_session_by_id(&self, user_id: i64, id: i64) -> bool {
+        sqlx::query("DELETE FROM sessions WHERE rowid = ?1 AND user_id = ?2")
+            .bind(id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            .map(|r| r.rows_affected() > 0)
+            .unwrap_or(false)
+    }
+
+    /// Ends every session of the user except the one with `keep_hash`; returns how many ended.
+    pub async fn delete_other_sessions(&self, user_id: i64, keep_hash: &str) -> u64 {
+        sqlx::query("DELETE FROM sessions WHERE user_id = ?1 AND token_hash <> ?2")
+            .bind(user_id)
+            .bind(keep_hash)
+            .execute(&self.pool)
+            .await
+            .map(|r| r.rows_affected())
+            .unwrap_or(0)
     }
 
     pub async fn delete_session(&self, token_hash: &str) {
@@ -579,7 +659,7 @@ mod tests {
         assert_eq!(s.user_hash(bob).await.as_deref(), Some("new"));
         assert_eq!(s.list_users().await.len(), 2);
 
-        s.create_session("sb", bob).await;
+        s.create_session("sb", bob, "").await;
         s.create_token(bob, "watch", "hb", None, false, None)
             .await
             .unwrap();
@@ -705,15 +785,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idle_sessions_expire_and_activity_is_throttled() {
+        let s = Store::open_memory().await.unwrap();
+        let id = s.create_user("u", "h", false).await.unwrap();
+        s.create_session("a", id, &"x".repeat(500)).await;
+        let list = s.list_sessions(id, "a").await;
+        assert_eq!(list.len(), 1);
+        assert!(list[0].current);
+        assert_eq!(list[0].user_agent.len(), 200, "user agent is truncated");
+
+        let set_seen = |secs_ago: i64| {
+            let pool = s.pool.clone();
+            async move {
+                sqlx::query("UPDATE sessions SET last_seen = ?1")
+                    .bind(now_secs() - secs_ago)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        };
+        let seen = || async { s.list_sessions(id, "a").await[0].last_seen };
+
+        // a recent request does not write again
+        set_seen(10).await;
+        let before = seen().await;
+        assert!(s.session_user("a").await.is_some());
+        assert_eq!(seen().await, before);
+        // after a minute it is refreshed
+        set_seen(120).await;
+        assert!(s.session_user("a").await.is_some());
+        assert!(seen().await >= now_secs() - 1);
+
+        // idle for a day: dead, hidden and swept by the next login
+        set_seen(SESSION_IDLE_SECS + 5).await;
+        assert!(s.session_user("a").await.is_none());
+        assert!(s.list_sessions(id, "a").await.is_empty());
+        s.create_session("b", id, "").await;
+        assert_eq!(s.list_sessions(id, "b").await.len(), 1);
+    }
+
+    #[tokio::test]
     async fn session_lifecycle() {
         let s = Store::open_memory().await.unwrap();
         let id = s.create_user("u", "h", false).await.unwrap();
         assert!(s.session_user("x").await.is_none());
-        s.create_session("x", id).await;
+        s.create_session("x", id, "").await;
         assert_eq!(s.session_user("x").await.unwrap().username, "u");
         s.delete_session("x").await;
         assert!(s.session_user("x").await.is_none());
-        s.create_session("y", id).await;
+        s.create_session("y", id, "").await;
         s.delete_user_sessions(id).await;
         assert!(s.session_user("y").await.is_none());
     }
