@@ -8,6 +8,7 @@ pub mod admin;
 pub mod api;
 pub mod core;
 pub mod env;
+pub mod health;
 pub mod hue;
 pub mod store;
 pub mod throttle;
@@ -31,7 +32,8 @@ async fn security_headers(req: Request, next: Next) -> Response {
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.eq_ignore_ascii_case("https"));
-    let admin_api = req.uri().path().starts_with("/api/domus");
+    // Neither the admin API nor a health verdict may be cached.
+    let no_store = req.uri().path().starts_with("/api/domus") || req.uri().path() == "/health";
     let mut resp = next.run(req).await;
     let h = resp.headers_mut();
     let mut set = |name: HeaderName, value: &'static str| {
@@ -41,7 +43,7 @@ async fn security_headers(req: Request, next: Next) -> Response {
     set(header::X_CONTENT_TYPE_OPTIONS, "nosniff");
     set(header::X_FRAME_OPTIONS, "DENY");
     set(header::REFERRER_POLICY, "no-referrer");
-    if admin_api {
+    if no_store {
         set(header::CACHE_CONTROL, "no-store");
     }
     if https {
@@ -55,7 +57,11 @@ async fn security_headers(req: Request, next: Next) -> Response {
 
 /// Builds the full HTTP application: HA REST API, admin API and the embedded admin page.
 pub fn build_app(app: AppState) -> Router {
+    let health = Router::new()
+        .route("/health", axum::routing::get(health::health))
+        .with_state(app.clone());
     Router::new()
+        .merge(health)
         .merge(api::router(app.clone()))
         .nest("/api/domus", admin::router(app))
         .fallback(admin::static_files)
@@ -74,6 +80,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
+    use axum::http::StatusCode;
     use tower::ServiceExt;
 
     #[test]
@@ -96,6 +103,34 @@ mod tests {
             .oneshot(b.body(Body::empty()).unwrap())
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn health_is_public_uncached_and_follows_the_database() {
+        let core = core::Core::new(Arc::new(store::Store::open_memory().await.unwrap()));
+        let store = core.store().clone();
+        let r = build_app(AppState::new(core.clone(), hue::HueManager::new(core)));
+
+        let resp = get(&r, "/health", None).await; // no cookie, no token
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-store");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"status": "ok", "version": GIT_VERSION})
+        );
+
+        store.close_for_test().await;
+        let resp = get(&r, "/health", None).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["status"], "error");
     }
 
     #[tokio::test]

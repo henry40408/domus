@@ -118,6 +118,19 @@ impl Store {
 
     // users
 
+    /// Whether the database answers a trivial query.
+    pub async fn ping(&self) -> bool {
+        sqlx::query_scalar::<_, i64>("SELECT 1")
+            .fetch_one(&self.pool)
+            .await
+            .is_ok()
+    }
+
+    #[cfg(test)]
+    pub async fn close_for_test(&self) {
+        self.pool.close().await;
+    }
+
     pub async fn user_count(&self) -> i64 {
         sqlx::query_scalar("SELECT COUNT(*) FROM users")
             .fetch_one(&self.pool)

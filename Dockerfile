@@ -56,4 +56,7 @@ ENV DOMUS_BIND=0.0.0.0:8123
 
 EXPOSE 8123
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD ["/domus", "healthcheck"]
+
 ENTRYPOINT ["/domus"]
