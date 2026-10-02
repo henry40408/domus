@@ -125,6 +125,10 @@ Static musl binary cross-compiled with cargo-zigbuild, on a distroless base.
 
 The version shown in the admin sidebar, `GET /api/domus/status` and the startup log comes from `git describe --tags --always --dirty` (set by `build.rs`). The image has no `.git`, so pass it in: `docker build --build-arg GIT_VERSION=v0.2.1 -t domus:local .` (CI does this for you); without it the image reports `dev`.
 
+### Caching behind a CDN
+
+The page is served with `Cache-Control: no-cache` and every asset URL in it carries `?v=<version>`, so a new release is picked up without purging a CDN such as Cloudflare. Only URLs stamped with the running version are cached for a year (`immutable`); `dev` and `-dirty` builds are never cached.
+
 ### Health check
 
 `GET /health` needs no login and answers `200 {"status":"ok","version":"..."}`, or `503` when the database does not respond. It does not look at the Hue Bridge, which being offline is normal. The image runs `domus healthcheck` (which calls that endpoint on `DOMUS_BIND`) as its `HEALTHCHECK`, so `docker ps` shows `healthy`; the same command works anywhere the binary does. Point load balancers and uptime monitors at `/health`.

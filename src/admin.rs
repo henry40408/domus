@@ -844,13 +844,44 @@ async fn token_revoke(
 
 // ----------------------------------------------------------------- static
 
+/// `index.html` stamps every asset URL with the build version, so a new release means new URLs
+/// and no cache (browser or CDN) can serve a stale file. Only a URL carrying the current
+/// version is cached for good; anything else, and the page itself, is revalidated every time.
+/// A `dev` or `-dirty` version does not change between edits, so it is never cached.
+const ASSET_VERSION_PLACEHOLDER: &str = "__ASSET_VERSION__";
+
+fn cache_control_for(uri: &Uri) -> &'static str {
+    let stamped = uri.query().is_some_and(|q| {
+        q.split('&')
+            .any(|kv| kv.strip_prefix("v=") == Some(crate::GIT_VERSION))
+    });
+    let stable = crate::GIT_VERSION != "dev" && !crate::GIT_VERSION.ends_with("-dirty");
+    if stamped && stable && uri.path() != "/" && uri.path() != "/index.html" {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    }
+}
+
 pub async fn static_files(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
     match Assets::get(path) {
         Some(file) => {
-            let mime = mime_for(path);
-            ([(header::CONTENT_TYPE, mime)], file.data.into_owned()).into_response()
+            let mut body = file.data.into_owned();
+            if path == "index.html" {
+                body = String::from_utf8_lossy(&body)
+                    .replace(ASSET_VERSION_PLACEHOLDER, crate::GIT_VERSION)
+                    .into_bytes();
+            }
+            (
+                [
+                    (header::CONTENT_TYPE, mime_for(path)),
+                    (header::CACHE_CONTROL, cache_control_for(&uri)),
+                ],
+                body,
+            )
+                .into_response()
         }
         None => StatusCode::NOT_FOUND.into_response(),
     }
@@ -2205,6 +2236,43 @@ mod tests {
         let icon = static_files("/favicon.svg".parse().unwrap()).await;
         assert_eq!(icon.status(), StatusCode::OK);
         assert_eq!(icon.headers()[header::CONTENT_TYPE], "image/svg+xml");
+    }
+
+    #[tokio::test]
+    async fn assets_are_stamped_and_cached_by_version() {
+        let body = |resp: Response| async {
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        };
+        let index = static_files("/".parse().unwrap()).await;
+        assert_eq!(index.headers()[header::CACHE_CONTROL], "no-cache");
+        let html = body(index).await;
+        assert!(!html.contains(ASSET_VERSION_PLACEHOLDER));
+        let stamped = format!("/app.js?v={}", crate::GIT_VERSION);
+        assert!(html.contains(&stamped));
+
+        // bare URLs are never pinned, so a stale reference cannot stick
+        let bare = static_files("/app.js".parse().unwrap()).await;
+        assert_eq!(bare.headers()[header::CACHE_CONTROL], "no-cache");
+
+        // stamped ones are pinned only for a build whose version identifies its content
+        let pinned = static_files(stamped.parse().unwrap()).await;
+        let stable = crate::GIT_VERSION != "dev" && !crate::GIT_VERSION.ends_with("-dirty");
+        assert_eq!(
+            pinned.headers()[header::CACHE_CONTROL],
+            if stable {
+                "public, max-age=31536000, immutable"
+            } else {
+                "no-cache"
+            }
+        );
+        let wrong = static_files("/app.js?v=other".parse().unwrap()).await;
+        assert_eq!(wrong.headers()[header::CACHE_CONTROL], "no-cache");
+        let index_stamped =
+            static_files(format!("/?v={}", crate::GIT_VERSION).parse().unwrap()).await;
+        assert_eq!(index_stamped.headers()[header::CACHE_CONTROL], "no-cache");
     }
 
     struct Bridge;

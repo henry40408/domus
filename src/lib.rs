@@ -160,11 +160,10 @@ mod tests {
             get(&r, "/api/domus/status", None).await.headers()[header::CACHE_CONTROL],
             "no-store"
         );
-        assert!(
-            !get(&r, "/", None)
-                .await
-                .headers()
-                .contains_key(header::CACHE_CONTROL)
+        // the page is revalidated (see admin::static_files), not forbidden from being stored
+        assert_eq!(
+            get(&r, "/", None).await.headers()[header::CACHE_CONTROL],
+            "no-cache"
         );
         let secure = get(&r, "/", Some("https")).await;
         assert!(
