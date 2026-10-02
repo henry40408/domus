@@ -40,6 +40,7 @@ code.tok { display: block; user-select: all; -webkit-user-select: all; word-brea
 nav { background: var(--panel); border-right: 1px solid var(--line); padding: 16px 10px; position: sticky; top: 0; height: 100vh; }
 nav { display: flex; flex-direction: column; }
 nav .bridge { margin-top: auto; padding: 10px; font-size: 13px; }
+nav .bridge + .bridge { margin-top: 0; padding-top: 0; }
 nav h1 { font-size: 18px; margin: 0 8px 16px; }
 nav a.tab { display: flex; gap: 10px; align-items: center; padding: 9px 10px; border-radius: 8px; color: var(--text); text-decoration: none; font-weight: 400; }
 nav a.tab.active { background: var(--accent-weak); color: var(--accent); font-weight: 600; }
