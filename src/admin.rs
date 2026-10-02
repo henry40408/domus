@@ -14,7 +14,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::convert::Infallible;
 use std::time::Duration;
-use tokio::sync::broadcast;
 
 use crate::api::AppState;
 use crate::core::{CallError, LightAction, group_light_id};
@@ -312,14 +311,11 @@ async fn sessions_revoke_others(
     Extension(me): Extension<User>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(token) = session_token(&headers) else {
-        return message(StatusCode::UNAUTHORIZED, "Login required.");
-    };
-    let n = app
-        .core
-        .store()
-        .delete_other_sessions(me.id, &sha256_hex(&token))
-        .await;
+    // `require_session` already proved there is a cookie.
+    let keep = session_token(&headers)
+        .map(|t| sha256_hex(&t))
+        .unwrap_or_default();
+    let n = app.core.store().delete_other_sessions(me.id, &keep).await;
     tracing::info!(target: "audit", user = %me.username, ended = n, "other sessions revoked");
     Json(json!({"ok": true, "ended": n})).into_response()
 }
@@ -356,8 +352,9 @@ async fn events(
                             }
                             id
                         }
-                        Err(broadcast::error::RecvError::Lagged(_)) => "*".to_string(),
-                        Err(broadcast::error::RecvError::Closed) => return None,
+                        // Lagged: events were missed. (The sender lives in `app.core`, which this
+                        // stream holds, so the channel never closes.)
+                        Err(_) => "*".to_string(),
                     },
                     _ = ticker.tick() => {
                         if app.core.store().session_valid(&hash).await {
