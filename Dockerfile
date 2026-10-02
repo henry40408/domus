@@ -26,7 +26,10 @@ RUN set -eux; \
 WORKDIR /app
 COPY . .
 
+# .git is excluded by .dockerignore, so build.rs reads the version from the GIT_VERSION build
+# arg the CI workflow passes.
 ARG TARGETARCH
+ARG GIT_VERSION=dev
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target,sharing=locked \
     set -eux; \
@@ -36,7 +39,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
       *) echo "unsupported target arch $TARGETARCH" >&2; exit 1 ;; \
     esac; \
     rustup target add "$target"; \
-    cargo zigbuild --release --locked --target "$target"; \
+    GIT_VERSION="${GIT_VERSION}" cargo zigbuild --release --locked --target "$target"; \
     install -Dm755 "target/${target}/release/domus" /out/domus
 
 # ---- runtime: minimal static image (CA certs + tzdata, no shell) ------------

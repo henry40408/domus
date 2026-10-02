@@ -118,6 +118,7 @@ async fn status(State(app): State<AppState>, headers: HeaderMap) -> Json<Value> 
         "logged_in": user.is_some(),
         "user": user,
         "hue_paired": app.core.store().hue_get().await.is_some(),
+        "version": crate::GIT_VERSION,
     }))
 }
 
@@ -962,7 +963,7 @@ mod tests {
         let (_, _, v) = call(&r, "GET", "/api/domus/status", None, "").await;
         assert_eq!(
             v,
-            json!({"setup_done": false, "setup_code_required": false, "logged_in": false, "user": null, "hue_paired": false})
+            json!({"setup_done": false, "setup_code_required": false, "logged_in": false, "user": null, "hue_paired": false, "version": crate::GIT_VERSION})
         );
 
         // bad username
