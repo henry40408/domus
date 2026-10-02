@@ -1,32 +1,63 @@
 # domus
 
-A lightweight, Home Assistant API-compatible server in Rust. It controls Philips Hue lights through a
-Hue Bridge (CLIP v2). The MVP implements just the REST subset needed by
-[hasscontrol](https://github.com/hatl/hasscontrol) (a Garmin watch widget).
+> A lightweight, Home Assistant API-compatible server in Rust for Philips Hue lights.
 
-## Run
+[![CI](https://github.com/henry40408/domus/actions/workflows/ci.yml/badge.svg)](https://github.com/henry40408/domus/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/henry40408/domus)](https://github.com/henry40408/domus/releases/latest)
+[![License](https://img.shields.io/github/license/henry40408/domus)](LICENSE.txt)
+[![Docker](https://img.shields.io/badge/docker-ghcr.io-blue.svg)](https://ghcr.io/henry40408/domus)
+[![Casual Maintenance Intended](https://casuallymaintained.tech/badge.svg)](https://casuallymaintained.tech/)
+[![Vibe Coded](https://img.shields.io/badge/vibe_coded-Claude-d97757?logo=anthropic&logoColor=white)](https://claude.com/claude-code)
+
+domus controls Philips Hue lights through a Hue Bridge (CLIP v2). The MVP implements just the REST
+subset needed by [hasscontrol](https://github.com/hatl/hasscontrol) (a Garmin watch widget).
+
+## Features
+
+- **Home Assistant REST subset** - Works with hasscontrol out of the box
+- **Hue CLIP v2** - Lights and scenes from your Hue Bridge
+- **Groups** - Pick and order the lights and scenes a watch sees; optional all-lights switch per group
+- **Admin page** - Pair the bridge, edit groups, manage tokens and test devices; works on phones too
+- **Docker Ready** - Single binary with all assets embedded, multi-platform images
+
+## Quick Start
+
+### Using Docker (Recommended)
 
 ```sh
+docker run -d \
+  --name domus \
+  -p 8123:8123 \
+  -v domus_data:/data \
+  ghcr.io/henry40408/domus:main
+```
+
+`main` tracks the default branch; releases also get semver tags (`0.1.0`, `0.1`).
+Open `http://localhost:8123` and set the admin password on first start, then continue with [Usage](#usage).
+
+### Building from Source
+
+```sh
+git clone https://github.com/henry40408/domus.git
+cd domus
 cargo run --release
 ```
 
-Or with Docker (multi-arch image published to GHCR; `main` tracks the default branch, releases get semver tags):
-
-```sh
-docker run -d -p 8123:8123 -v domus-data:/data ghcr.io/henry40408/domus:main
-```
-
-The image defaults to `DOMUS_BIND=0.0.0.0:8123` and `DOMUS_DATA_DIR=/data`.
+## Configuration
 
 Configuration is environment variables only:
 
 | Variable          | Default          | Meaning                                             |
 |-------------------|------------------|-----------------------------------------------------|
-| `DOMUS_BIND`      | `127.0.0.1:8123` | Listen address (plain HTTP)                         |
-| `DOMUS_DATA_DIR`  | `./data`         | SQLite location (dir mode `0700`, `domus.db` `0600`) |
+| `DOMUS_BIND`      | `127.0.0.1:8123` | Listen address (plain HTTP). The container image sets `0.0.0.0:8123`. |
+| `DOMUS_DATA_DIR`  | `./data`         | SQLite location (dir mode `0700`, `domus.db` `0600`). The container image sets `/data`. |
 | `DOMUS_LOG`       | `info`           | Log filter (`tracing` env-filter syntax)            |
 
-Everything else is configured in the admin page at `/` (tabs: Dashboard, Groups, Devices, Tokens, Settings; it works on phones too):
+Everything else is configured in the admin page at `/`.
+
+## Usage
+
+Admin page tabs: Dashboard, Groups, Devices, Tokens, Settings.
 
 1. Set the admin password (first start only).
 2. Pair the Hue Bridge (Settings): enter its IP, press the bridge's link button, click **Pair**.
@@ -59,6 +90,39 @@ members in parallel and succeed if at least one member did. Group lights are not
 group lights (one level only), so groups cannot loop.
 
 Admin API lives under `/api/domus/*` (session cookie, used by the admin page), including `POST /api/domus/devices/test` (`{"entity_id", "on"}`).
+
+## Docker
+
+### Docker Compose
+
+```yaml
+services:
+  domus:
+    image: ghcr.io/henry40408/domus:main
+    ports:
+      - "8123:8123"
+    volumes:
+      - domus_data:/data
+    restart: unless-stopped
+
+volumes:
+  domus_data:
+```
+
+### Building Docker Image
+
+```sh
+docker build -t domus:local .
+```
+
+Static musl binary cross-compiled with cargo-zigbuild, on a distroless base.
+
+### Production Notes
+
+- Mount `/data` so the SQLite database persists, and back it up: the Hue application key is stored in plaintext.
+- The container runs as root so a bind-mounted `/data` stays writable without a permissions change.
+- Terminate TLS at a reverse proxy; see [TLS / reverse proxy](#tls--reverse-proxy).
+- Port 8123 is also Home Assistant's default; change the published port (e.g. `-p 8124:8123`) if both run on one host.
 
 ## TLS / reverse proxy
 
@@ -95,7 +159,19 @@ WebSocket API, registries, HA OAuth/onboarding, the official HA frontend / Compa
 
 ## Development
 
+### Prerequisites
+
+- Rust (edition 2024)
+- [cargo-nextest](https://nexte.st/)
+
+### Running Tests
+
 ```sh
 cargo fmt
+cargo clippy --all-targets -- -D warnings
 cargo nextest run
 ```
+
+## License
+
+MIT, see [LICENSE.txt](LICENSE.txt).
