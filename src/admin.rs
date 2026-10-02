@@ -16,7 +16,10 @@ use crate::core::{CallError, LightAction, group_light_id};
 use crate::hue::{PairError, bridge_base, pair};
 use crate::store::{HueBridge, SESSION_TTL_SECS, User};
 use crate::throttle;
-use crate::util::{hash_password, now_secs, random_hex, sha256_hex, verify_dummy, verify_password};
+use crate::util::{
+    constant_time_eq, hash_password, now_secs, random_hex, sha256_hex, verify_dummy,
+    verify_password,
+};
 
 const COOKIE: &str = "domus_session";
 const MIN_PASSWORD_LEN: usize = 12;
@@ -100,6 +103,7 @@ async fn status(State(app): State<AppState>, headers: HeaderMap) -> Json<Value> 
     let user = current_user(&app, &headers).await;
     Json(json!({
         "setup_done": app.core.store().user_count().await > 0,
+        "setup_code_required": app.setup_code.lock().unwrap().is_some(),
         "logged_in": user.is_some(),
         "user": user,
         "hue_paired": app.core.store().hue_get().await.is_some(),
@@ -164,11 +168,39 @@ async fn same_origin(req: Request, next: Next) -> Response {
     }
 }
 
+#[derive(Deserialize)]
+struct SetupBody {
+    username: String,
+    password: String,
+    #[serde(default)]
+    setup_code: String,
+}
+
 async fn setup(
     State(app): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<Credentials>,
+    Json(body): Json<SetupBody>,
 ) -> Response {
+    let expected = app.setup_code.lock().unwrap().clone();
+    if let Some(expected) = expected {
+        let key = throttle::key("setup", "");
+        if let Some(wait) = app.guard.check(&key, now_secs()) {
+            return too_many(wait);
+        }
+        // Dashes are only for readability (`a1b2-c3d4`), so they are ignored on both sides.
+        let plain = |c: &str| c.trim().replace('-', "");
+        if !constant_time_eq(
+            plain(&body.setup_code).as_bytes(),
+            plain(&expected).as_bytes(),
+        ) {
+            app.guard.fail(&key, now_secs());
+            tracing::warn!(target: "audit", "setup refused: wrong setup code");
+            return message(
+                StatusCode::FORBIDDEN,
+                "Wrong setup code. Find it in the domus log.",
+            );
+        }
+    }
     let username = body.username.trim();
     if !valid_username(username) {
         return message(StatusCode::BAD_REQUEST, USERNAME_HINT);
@@ -183,6 +215,8 @@ async fn setup(
         .await
     {
         Some(id) => {
+            *app.setup_code.lock().unwrap() = None;
+            app.guard.succeed(&throttle::key("setup", ""));
             tracing::info!(target: "audit", user = username, "first admin created");
             start_session(&app, &headers, id).await
         }
@@ -741,7 +775,7 @@ mod tests {
         let (_, _, v) = call(&r, "GET", "/api/domus/status", None, "").await;
         assert_eq!(
             v,
-            json!({"setup_done": false, "logged_in": false, "user": null, "hue_paired": false})
+            json!({"setup_done": false, "setup_code_required": false, "logged_in": false, "user": null, "hue_paired": false})
         );
 
         // bad username
@@ -1588,6 +1622,62 @@ mod tests {
             send("GET", &[("origin", "https://evil.example")]).await,
             forbidden
         );
+    }
+
+    #[tokio::test]
+    async fn setup_needs_the_one_time_code() {
+        let core = Core::new(Arc::new(Store::open_memory().await.unwrap()));
+        let app = AppState::new(core.clone(), HueManager::new(core))
+            .with_setup_code(Some("abc123".into()));
+        let r = Router::new().nest("/api/domus", router(app));
+        let setup = |code: &str| {
+            let (r, body) = (
+                r.clone(),
+                format!(
+                    r#"{{"username":"admin","password":"correct horse","setup_code":"{code}"}}"#
+                ),
+            );
+            async move { call(&r, "POST", "/api/domus/setup", None, &body).await }
+        };
+        let (_, _, v) = call(&r, "GET", "/api/domus/status", None, "").await;
+        assert_eq!(v["setup_code_required"], true);
+
+        assert_eq!(setup("").await.0, StatusCode::FORBIDDEN);
+        assert_eq!(setup("nope").await.0, StatusCode::FORBIDDEN);
+        let missing = r#"{"username":"admin","password":"correct horse"}"#;
+        assert_eq!(
+            call(&r, "POST", "/api/domus/setup", None, missing).await.0,
+            StatusCode::FORBIDDEN
+        );
+        let (s, h, _) = setup(" abc-123 ").await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(h.contains_key("set-cookie"));
+
+        // the code is spent: it cannot be reused, and the page stops asking for it
+        assert_eq!(setup("abc123").await.0, StatusCode::CONFLICT);
+        let (_, _, v) = call(&r, "GET", "/api/domus/status", None, "").await;
+        assert_eq!(v["setup_code_required"], false);
+    }
+
+    #[tokio::test]
+    async fn wrong_setup_codes_are_throttled() {
+        let core = Core::new(Arc::new(Store::open_memory().await.unwrap()));
+        let app = AppState::new(core.clone(), HueManager::new(core))
+            .with_setup_code(Some("abc123".into()));
+        let r = Router::new().nest("/api/domus", router(app));
+        let body = |code: &str| {
+            format!(r#"{{"username":"admin","password":"correct horse","setup_code":"{code}"}}"#)
+        };
+        for _ in 0..5 {
+            let s = call(&r, "POST", "/api/domus/setup", None, &body("bad"))
+                .await
+                .0;
+            assert_eq!(s, StatusCode::FORBIDDEN);
+        }
+        // even the right code waits out the lock
+        let (s, h, _) = call(&r, "POST", "/api/domus/setup", None, &body("abc123")).await;
+        assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
+        assert!(h.contains_key("retry-after"));
     }
 
     #[tokio::test]

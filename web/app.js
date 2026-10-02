@@ -148,21 +148,22 @@ const label = (id) => { const e = find(id); return (e && e.name) || id; };
 
 // ------------------------------------------------------------ auth screen
 
-function authScreen(setupDone) {
+function authScreen(setupDone, needCode) {
   const user = el("input", { type: "text", placeholder: "Username", autocomplete: "username" });
   const pw = el("input", { type: "password", placeholder: "Password", autocomplete: setupDone ? "current-password" : "new-password" });
+  const code = el("input", { type: "text", placeholder: "Setup code (see the domus log)", autocomplete: "off" });
   const go = el("button", {
     class: "primary",
     onclick: () => guarded(async () => {
-      await api("POST", setupDone ? "/login" : "/setup", { username: user.value, password: pw.value });
+      await api("POST", setupDone ? "/login" : "/setup", { username: user.value, password: pw.value, setup_code: code.value });
       await start();
     }),
   }, setupDone ? "Log in" : "Create admin");
-  for (const input of [user, pw]) input.addEventListener("keydown", (e) => { if (e.key === "Enter") go.click(); });
+  for (const input of [user, pw, code]) input.addEventListener("keydown", (e) => { if (e.key === "Enter") go.click(); });
   root.replaceChildren(el("div", { class: "auth" },
     el("h2", {}, "domus"),
     el("p", { class: "sub" }, setupDone ? "Log in to continue." : "First-time setup: choose the admin username and password (at least 12 characters)."),
-    user, pw, go));
+    user, pw, !setupDone && needCode ? code : "", go));
 }
 
 // ------------------------------------------------------------------ shell
@@ -602,7 +603,7 @@ window.addEventListener("hashchange", () => { if (data) { tabFromHash(); render(
 
 async function start() {
   const s = await api("GET", "/status");
-  if (!s.setup_done) return authScreen(false);
+  if (!s.setup_done) return authScreen(false, s.setup_code_required);
   if (!s.logged_in) return authScreen(true);
   me = s.user;
   if (!visibleTabs().some(([id]) => id === ui.tab)) ui.tab = "dashboard";

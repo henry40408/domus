@@ -9,7 +9,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::core::{CallError, Core, LightAction};
 use crate::hue::HueManager;
@@ -22,6 +22,8 @@ pub struct AppState {
     pub core: Arc<Core>,
     pub hue: Arc<HueManager>,
     pub guard: Arc<LoginGuard>,
+    /// Required by `/setup` while set; cleared once the first admin exists.
+    pub setup_code: Arc<Mutex<Option<String>>>,
 }
 
 impl AppState {
@@ -31,7 +33,13 @@ impl AppState {
             core,
             hue,
             guard: Arc::default(),
+            setup_code: Arc::default(),
         }
+    }
+
+    pub fn with_setup_code(self, code: Option<String>) -> Self {
+        *self.setup_code.lock().unwrap() = code;
+        self
     }
 }
 

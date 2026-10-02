@@ -35,7 +35,7 @@ pub fn sha256_hex(input: &str) -> String {
     hex(digest.as_slice())
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
