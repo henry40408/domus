@@ -1,5 +1,9 @@
 //! domus: a lightweight Home Assistant compatible server (REST subset) for Hue lights.
 
+/// What this build is: the git tag (or `tag-N-hash`, or a bare hash) it was made from, set by
+/// `build.rs`; `dev` when no git information was available.
+pub const GIT_VERSION: &str = env!("GIT_VERSION");
+
 pub mod admin;
 pub mod api;
 pub mod core;
@@ -71,6 +75,12 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
     use tower::ServiceExt;
+
+    #[test]
+    fn build_knows_its_version() {
+        assert!(!GIT_VERSION.is_empty());
+        assert!(!GIT_VERSION.contains(char::is_whitespace));
+    }
 
     async fn app() -> Router {
         let core = core::Core::new(Arc::new(store::Store::open_memory().await.unwrap()));

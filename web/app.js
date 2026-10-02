@@ -124,6 +124,7 @@ const TABS = [
 
 /** the logged-in user: { id, username, is_admin } */
 let me = null;
+let version = "";
 const visibleTabs = () => TABS.filter(([, , , adminOnly]) => !adminOnly || me.is_admin);
 
 /** hue (admins only), entities (lights + scenes + group lights), groups, tokens, users (admins only) */
@@ -190,7 +191,8 @@ function shell() {
       !data.hue.paired ? "Bridge not paired" : data.hue.running ? "Bridge connected" : "Bridge disconnected") : "",
     el("div", { class: "account" },
       el("span", { class: "who muted" }, me.username),
-      el("button", { class: "logout", title: "Log out", onclick: logout }, icon("logout"), "Log out")));
+      el("button", { class: "logout", title: "Log out", onclick: logout }, icon("logout"), "Log out")),
+    version ? el("div", { class: "version muted", title: "domus " + version }, "domus " + version) : "");
   root.replaceChildren(el("div", { class: "app" }, nav, main));
   return main;
 }
@@ -707,6 +709,7 @@ async function start() {
   if (!s.setup_done) return authScreen(false, s.setup_code_required);
   if (!s.logged_in) return authScreen(true);
   me = s.user;
+  version = s.version || "";
   if (!visibleTabs().some(([id]) => id === ui.tab)) ui.tab = "dashboard";
   tabFromHash();
   await load();

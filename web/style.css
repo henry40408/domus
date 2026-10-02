@@ -42,6 +42,7 @@ nav { display: flex; flex-direction: column; }
 nav .bridge { margin-top: auto; padding: 10px; font-size: 13px; }
 nav .account { margin-top: auto; padding: 10px; display: flex; align-items: center; gap: 8px; font-size: 13px; }
 nav .bridge + .account { margin-top: 0; padding-top: 0; }
+nav .version { padding: 0 10px 10px; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 nav .account .who { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 nav .account .logout { display: flex; align-items: center; gap: 6px; padding: 4px 10px; white-space: nowrap; }
 nav h1 { font-size: 18px; margin: 0 8px 16px; }
@@ -102,7 +103,7 @@ details.wp > summary { cursor: pointer; color: var(--muted); font-size: 12px; te
   .app { grid-template-columns: minmax(0, 1fr); align-content: start; }
   nav { position: sticky; top: 0; z-index: 4; height: auto; display: flex; overflow-x: auto; padding: 6px; gap: 2px; border-right: 0; border-bottom: 1px solid var(--line); }
   nav { flex-direction: row; }
-  nav h1, nav .bridge, nav .account .who { display: none; }
+  nav h1, nav .bridge, nav .version, nav .account .who { display: none; }
   nav .account, nav .bridge + .account { margin-top: 0; padding: 0 0 0 4px; }
   nav .account .logout { min-height: 44px; }
   nav a.tab { white-space: nowrap; min-height: 44px; padding: 9px 8px; gap: 6px; }

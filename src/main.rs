@@ -72,7 +72,11 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    info!("listening on http://{}", env.bind);
+    info!(
+        "domus {} listening on http://{}",
+        domus::GIT_VERSION,
+        env.bind
+    );
     let shutdown = async {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("install SIGTERM handler");
