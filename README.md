@@ -159,6 +159,7 @@ For LAN-only use, get a certificate via DNS-01 (Let's Encrypt) for a name that r
 - Login throttling: after 5 failed attempts in a row for a username, further attempts are refused (HTTP 429, `Retry-After`) for 1 minute, doubling each time up to 15 minutes. A success resets it. It is kept in memory (a restart clears it), keyed by username rather than IP, and never locks an account permanently. Unknown usernames take the same time and are throttled the same way, so neither reveals which accounts exist. Add IP-based limits at the proxy if you expose the page to the internet.
 - State-changing admin requests from another site are refused (`Sec-Fetch-Site`, or `Origin` against `Host` / `X-Forwarded-Host`). Behind a proxy that rewrites `Host`, pass it through (see nginx above) or set `X-Forwarded-Host`.
 - Responses carry a CSP, `X-Frame-Options: DENY`, `nosniff` and `Referrer-Policy: no-referrer`; admin API responses are `no-store`, and HSTS is sent when the proxy sets `X-Forwarded-Proto: https`.
+- Sessions end after 24 hours without activity (7 days at most). Settings lists where you are signed in and can sign out one device or all others; session ids are row ids, the cookie value is never shown.
 - Security events (logins, lockouts, user and token changes) are logged at target `audit`, never with passwords or tokens.
 
 ## Not implemented (yet)

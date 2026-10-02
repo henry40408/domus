@@ -131,12 +131,13 @@ let data = null;
 const ui = { tab: "dashboard", draft: null, sub: "pick", fresh: null };
 
 async function load() {
-  const [hue, entities, groups, tokens, users] = await Promise.all([
+  const [hue, entities, groups, tokens, users, sessions] = await Promise.all([
     me.is_admin ? api("GET", "/hue") : null,
     api("GET", "/lights"), api("GET", "/groups"), api("GET", "/tokens"),
     me.is_admin ? api("GET", "/users") : [],
+    api("GET", "/sessions"),
   ]);
-  data = { hue, entities, groups, tokens, users };
+  data = { hue, entities, groups, tokens, users, sessions };
 }
 
 const isScene = (e) => e.entity_id.startsWith("scene.");
@@ -589,6 +590,43 @@ function hueCard() {
     el("p", { class: "muted" }, "Press the bridge's link button first."));
 }
 
+// "Mozilla/5.0 (Macintosh; ...) ... Firefox/130.0" -> "Firefox on macOS"
+function describeAgent(ua) {
+  if (!ua) return "Unknown device";
+  const browser = [["Edg/", "Edge"], ["OPR/", "Opera"], ["Firefox/", "Firefox"], ["Chrome/", "Chrome"], ["Safari/", "Safari"], ["curl/", "curl"]]
+    .find(([k]) => ua.includes(k));
+  const os = [["iPhone", "iOS"], ["iPad", "iPadOS"], ["Android", "Android"], ["Windows", "Windows"], ["Mac OS X", "macOS"], ["Linux", "Linux"]]
+    .find(([k]) => ua.includes(k));
+  if (!browser && !os) return ua.slice(0, 40);
+  return (browser ? browser[1] : "Browser") + (os ? " on " + os[1] : "");
+}
+
+function sessionsList() {
+  const others = data.sessions.filter((x) => !x.current).length;
+  return el("div", {},
+    el("div", { class: "section-title", style: "margin-top:16px" }, "Where you are signed in"),
+    el("ul", { class: "rows" }, ...data.sessions.map((x) => el("li", {},
+      el("span", { class: "name" }, describeAgent(x.user_agent) + (x.current ? " (this device)" : "")),
+      x.current ? "" : el("button", {
+        class: "danger act",
+        onclick: () => guarded(async () => {
+          await api("DELETE", "/sessions/" + x.id);
+          await refresh();
+        }),
+      }, "Sign out"),
+      el("span", { class: "meta" }, "Signed in " + fmtDate(x.created)),
+      el("span", { class: "meta" }, "Last active " + ago(x.last_seen))))),
+    others ? el("button", {
+      onclick: () => guarded(async () => {
+        if (!confirm("Sign out of " + others + " other " + (others === 1 ? "device" : "devices") + "?")) return;
+        await api("POST", "/sessions/revoke-others");
+        await refresh();
+        toast("Signed out of other devices", false);
+      }),
+    }, "Sign out other devices") : "",
+    el("p", { class: "muted" }, "Sessions end after 24 hours without activity, or 7 days at most."));
+}
+
 function accountCard() {
   const current = el("input", { type: "password", placeholder: "Current password", autocomplete: "current-password" });
   const next = el("input", { type: "password", placeholder: "New password (at least 12 characters)", autocomplete: "new-password" });
@@ -602,7 +640,8 @@ function accountCard() {
     el("h3", {}, "Account"),
     el("p", {}, "Signed in as ", el("b", {}, me.username), me.is_admin ? " (admin)" : ""),
     el("div", { class: "row" }, el("div", { class: "grow" }, current), el("div", { class: "grow" }, next),
-      el("button", { onclick: change }, "Change password")));
+      el("button", { onclick: change }, "Change password")),
+    sessionsList());
 }
 
 function settings() {

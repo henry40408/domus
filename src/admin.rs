@@ -47,6 +47,13 @@ async fn current_user(app: &AppState, headers: &HeaderMap) -> Option<User> {
     app.core.store().session_user(&sha256_hex(&t)).await
 }
 
+fn user_agent(headers: &HeaderMap) -> &str {
+    headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+}
+
 fn secure_request(headers: &HeaderMap) -> bool {
     headers
         .get("x-forwarded-proto")
@@ -66,7 +73,7 @@ async fn start_session(app: &AppState, headers: &HeaderMap, user_id: i64) -> Res
     let token = random_hex(32);
     app.core
         .store()
-        .create_session(&sha256_hex(&token), user_id)
+        .create_session(&sha256_hex(&token), user_id, user_agent(headers))
         .await;
     (
         [(
@@ -268,6 +275,48 @@ async fn logout(State(app): State<AppState>, headers: HeaderMap) -> Response {
         Json(json!({"ok": true})),
     )
         .into_response()
+}
+
+/// The caller's own live sessions; the one making this request is flagged `current`.
+async fn sessions(
+    State(app): State<AppState>,
+    Extension(me): Extension<User>,
+    headers: HeaderMap,
+) -> Json<Value> {
+    let current = session_token(&headers)
+        .map(|t| sha256_hex(&t))
+        .unwrap_or_default();
+    Json(json!(app.core.store().list_sessions(me.id, &current).await))
+}
+
+async fn session_revoke(
+    State(app): State<AppState>,
+    Extension(me): Extension<User>,
+    Path(id): Path<i64>,
+) -> Response {
+    if app.core.store().delete_session_by_id(me.id, id).await {
+        tracing::info!(target: "audit", user = %me.username, "session revoked");
+        Json(json!({"ok": true})).into_response()
+    } else {
+        message(StatusCode::NOT_FOUND, "No such session.")
+    }
+}
+
+async fn sessions_revoke_others(
+    State(app): State<AppState>,
+    Extension(me): Extension<User>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(token) = session_token(&headers) else {
+        return message(StatusCode::UNAUTHORIZED, "Login required.");
+    };
+    let n = app
+        .core
+        .store()
+        .delete_other_sessions(me.id, &sha256_hex(&token))
+        .await;
+    tracing::info!(target: "audit", user = %me.username, ended = n, "other sessions revoked");
+    Json(json!({"ok": true, "ended": n})).into_response()
 }
 
 #[derive(Deserialize)]
@@ -777,6 +826,9 @@ pub fn router(app: AppState) -> Router {
     let protected = Router::new()
         .route("/logout", post(logout))
         .route("/password", post(password_change))
+        .route("/sessions", get(sessions))
+        .route("/sessions/revoke-others", post(sessions_revoke_others))
+        .route("/sessions/{id}", delete(session_revoke))
         .route("/lights", get(lights))
         .route("/devices/test", post(device_test))
         .route("/groups", get(groups))
@@ -1078,6 +1130,76 @@ mod tests {
         assert_eq!(revoke(&admin, &b).await, StatusCode::OK);
         let hash = sha256_hex(a["token"].as_str().unwrap());
         assert!(app.core.store().token_auth(&hash).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn sessions_are_listed_and_revoked_per_user() {
+        let (r, _) = setup_app().await;
+        let (admin, bob) = admin_and_member(&r).await;
+        let login = r#"{"username":"bob","password":"bob's password"}"#;
+        let (_, h, _) = call(&r, "POST", "/api/domus/login", None, login).await;
+        let bob2 = cookie_of(&h);
+
+        let (st, _, list) = call(&r, "GET", "/api/domus/sessions", Some(&bob), "").await;
+        assert_eq!(st, StatusCode::OK);
+        let list = list.as_array().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list.iter().filter(|s| s["current"] == true).count(), 1);
+        assert!(list.iter().all(|s| s.get("token_hash").is_none()));
+        // the admin's own list holds only the admin's session
+        let (_, _, theirs) = call(&r, "GET", "/api/domus/sessions", Some(&admin), "").await;
+        assert_eq!(theirs.as_array().unwrap().len(), 1);
+        let admin_sid = theirs[0]["id"].as_i64().unwrap();
+
+        // someone else's session cannot be ended, and a bogus id is just as unknown
+        for id in [admin_sid, 9999] {
+            let uri = format!("/api/domus/sessions/{id}");
+            let (st, ..) = call(&r, "DELETE", &uri, Some(&bob), "").await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+        }
+        assert_eq!(
+            call(&r, "GET", "/api/domus/tokens", Some(&admin), "")
+                .await
+                .0,
+            StatusCode::OK
+        );
+
+        // ending the other bob session logs that browser out
+        let other = list.iter().find(|s| s["current"] == false).unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        let uri = format!("/api/domus/sessions/{other}");
+        assert_eq!(
+            call(&r, "DELETE", &uri, Some(&bob), "").await.0,
+            StatusCode::OK
+        );
+        let alive = |c: &str| {
+            let (r, c) = (r.clone(), c.to_string());
+            async move { call(&r, "GET", "/api/domus/tokens", Some(&c), "").await.0 }
+        };
+        let (a, b) = (alive(&bob).await, alive(&bob2).await);
+        assert!(
+            (a == StatusCode::OK) != (b == StatusCode::OK),
+            "exactly one of the two survives"
+        );
+
+        // revoke-others keeps the caller's session
+        let (_, h, _) = call(&r, "POST", "/api/domus/login", None, login).await;
+        let bob3 = cookie_of(&h);
+        let (st, _, v) = call(
+            &r,
+            "POST",
+            "/api/domus/sessions/revoke-others",
+            Some(&bob3),
+            "",
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(v["ended"], 1);
+        assert_eq!(alive(&bob3).await, StatusCode::OK);
+        assert_eq!(alive(&admin).await, StatusCode::OK);
+        let (_, _, list) = call(&r, "GET", "/api/domus/sessions", Some(&bob3), "").await;
+        assert_eq!(list.as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
