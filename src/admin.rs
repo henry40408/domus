@@ -325,7 +325,10 @@ async fn sessions_revoke_others(
 }
 
 /// How often an open event stream re-checks that its session is still alive.
+#[cfg(not(test))]
 const EVENTS_RECHECK: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const EVENTS_RECHECK: Duration = Duration::from_millis(100);
 
 /// Server-sent events for the admin page: one `change` event per entity the caller may see,
 /// carrying only the entity id (the page reloads the list). `*` means "events were missed,
@@ -1251,6 +1254,40 @@ mod tests {
         assert_eq!(
             next_event(&mut bob_stream).await,
             "event: change\ndata: light.a\n\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn events_report_missed_changes_and_end_with_the_session() {
+        let (r, app) = setup_app().await;
+        let (admin, bob) = admin_and_member(&r).await;
+
+        // a client that falls behind is told to reload everything
+        let mut slow = open_events(&r, Some(&admin)).await.into_body();
+        for i in 0..300 {
+            app.core.set_state(&format!("light.l{i}"), "on", Map::new());
+        }
+        assert_eq!(next_event(&mut slow).await, "event: change\ndata: *\n\n");
+
+        // the stream outlives rechecks while the session is alive, and ends once it is revoked
+        let mut stream = open_events(&r, Some(&bob)).await.into_body();
+        tokio::time::sleep(EVENTS_RECHECK * 3).await;
+        let (_, _, list) = call(&r, "GET", "/api/domus/sessions", Some(&bob), "").await;
+        let id = list[0]["id"].as_i64().unwrap();
+        let uri = format!("/api/domus/sessions/{id}");
+        assert_eq!(
+            call(&r, "DELETE", &uri, Some(&bob), "").await.0,
+            StatusCode::OK
+        );
+        let end = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(frame) = stream.frame().await {
+                frame.unwrap();
+            }
+        })
+        .await;
+        assert!(
+            end.is_ok(),
+            "the stream closes after the session is revoked"
         );
     }
 
