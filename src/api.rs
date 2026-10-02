@@ -14,12 +14,25 @@ use std::sync::Arc;
 use crate::core::{CallError, Core, LightAction};
 use crate::hue::HueManager;
 use crate::store::Scope;
+use crate::throttle::LoginGuard;
 use crate::util::sha256_hex;
 
 #[derive(Clone)]
 pub struct AppState {
     pub core: Arc<Core>,
     pub hue: Arc<HueManager>,
+    pub guard: Arc<LoginGuard>,
+}
+
+impl AppState {
+    pub fn new(core: Arc<Core>, hue: Arc<HueManager>) -> Self {
+        crate::util::warm_dummy();
+        Self {
+            core,
+            hue,
+            guard: Arc::default(),
+        }
+    }
 }
 
 fn message(status: StatusCode, msg: &str) -> Response {
@@ -248,10 +261,7 @@ mod tests {
             .group_set("Garmin", &["light.hue_a".into(), "light.hue_b".into()])
             .await
             .unwrap();
-        let app = AppState {
-            core: core.clone(),
-            hue: HueManager::new(core),
-        };
+        let app = AppState::new(core.clone(), HueManager::new(core));
         (router(app.clone()), app, fake)
     }
 

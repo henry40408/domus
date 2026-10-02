@@ -2,6 +2,7 @@
 
 use argon2::Argon2;
 use sha2::{Digest, Sha256};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn hex(bytes: &[u8]) -> String {
@@ -66,6 +67,19 @@ pub fn verify_password(password: &str, stored: &str) -> bool {
         hex(&derive(password, &salt)).as_bytes(),
         hash_hex.as_bytes(),
     )
+}
+
+/// Burns the same argon2 time as a real check, for usernames that do not exist,
+/// so response time does not reveal which usernames are valid.
+pub fn verify_dummy(password: &str) {
+    static DUMMY: OnceLock<String> = OnceLock::new();
+    let stored = DUMMY.get_or_init(|| hash_password("domus dummy password"));
+    verify_password(password, stored);
+}
+
+/// Computes the dummy hash up front so the first unknown-user login is not faster than later ones.
+pub fn warm_dummy() {
+    verify_dummy("");
 }
 
 fn unhex(s: &str) -> Option<Vec<u8>> {

@@ -2,7 +2,7 @@
 
 use axum::Extension;
 use axum::extract::{Path, Request, State};
-use axum::http::{HeaderMap, StatusCode, Uri, header};
+use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
@@ -15,10 +15,12 @@ use crate::api::AppState;
 use crate::core::{CallError, LightAction, group_light_id};
 use crate::hue::{PairError, bridge_base, pair};
 use crate::store::{HueBridge, SESSION_TTL_SECS, User};
-use crate::util::{hash_password, random_hex, sha256_hex, verify_password};
+use crate::throttle;
+use crate::util::{hash_password, now_secs, random_hex, sha256_hex, verify_dummy, verify_password};
 
 const COOKIE: &str = "domus_session";
-const MIN_PASSWORD_LEN: usize = 8;
+const MIN_PASSWORD_LEN: usize = 12;
+const MAX_PASSWORD_LEN: usize = 128;
 const TOKEN_PREFIX: &str = "domus_";
 
 #[derive(RustEmbed)]
@@ -119,7 +121,48 @@ fn valid_username(name: &str) -> bool {
 }
 
 const USERNAME_HINT: &str = "Username: letters, digits, _ - . and @ only (max 64).";
-const PASSWORD_HINT: &str = "Password must be at least 8 characters.";
+const PASSWORD_HINT: &str = "Password must be 12 to 128 characters and must not be the username.";
+
+fn valid_password(password: &str, username: &str) -> bool {
+    (MIN_PASSWORD_LEN..=MAX_PASSWORD_LEN).contains(&password.chars().count())
+        && !password.eq_ignore_ascii_case(username)
+}
+
+fn too_many(wait: i64) -> Response {
+    let mut resp = message(
+        StatusCode::TOO_MANY_REQUESTS,
+        &format!("Too many failed attempts. Try again in {wait} seconds."),
+    );
+    resp.headers_mut()
+        .insert(header::RETRY_AFTER, wait.to_string().parse().unwrap());
+    resp
+}
+
+/// Rejects cross-site state-changing requests (defence in depth next to SameSite=Strict).
+/// `Sec-Fetch-Site` decides when the browser sends it; otherwise `Origin` must match the host.
+async fn same_origin(req: Request, next: Next) -> Response {
+    if matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
+        return next.run(req).await;
+    }
+    let h = req.headers();
+    let text = |name: &str| h.get(name).and_then(|v| v.to_str().ok());
+    let allowed = match (text("sec-fetch-site"), text("origin")) {
+        (Some(site), _) => site == "same-origin" || site == "none",
+        (None, None) => true,
+        (None, Some(origin)) => origin.split_once("://").is_some_and(|(_, host)| {
+            [text("x-forwarded-host"), text("host")]
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.split(',').next())
+                .any(|v| v.trim().eq_ignore_ascii_case(host))
+        }),
+    };
+    if allowed {
+        next.run(req).await
+    } else {
+        message(StatusCode::FORBIDDEN, "Cross-site request refused.")
+    }
+}
 
 async fn setup(
     State(app): State<AppState>,
@@ -130,7 +173,7 @@ async fn setup(
     if !valid_username(username) {
         return message(StatusCode::BAD_REQUEST, USERNAME_HINT);
     }
-    if body.password.chars().count() < MIN_PASSWORD_LEN {
+    if !valid_password(&body.password, username) {
         return message(StatusCode::BAD_REQUEST, PASSWORD_HINT);
     }
     match app
@@ -139,7 +182,10 @@ async fn setup(
         .create_first_admin(username, &hash_password(&body.password))
         .await
     {
-        Some(id) => start_session(&app, &headers, id).await,
+        Some(id) => {
+            tracing::info!(target: "audit", user = username, "first admin created");
+            start_session(&app, &headers, id).await
+        }
         None => message(StatusCode::CONFLICT, "Already set up."),
     }
 }
@@ -149,11 +195,30 @@ async fn login(
     headers: HeaderMap,
     Json(body): Json<Credentials>,
 ) -> Response {
-    match app.core.store().user_login(body.username.trim()).await {
-        Some((user, hash)) if verify_password(&body.password, &hash) => {
+    let name = body.username.trim();
+    let key = throttle::key("login", name);
+    if let Some(wait) = app.guard.check(&key, now_secs()) {
+        tracing::warn!(target: "audit", user = name, wait, "login refused: locked");
+        return too_many(wait);
+    }
+    let user = match app.core.store().user_login(name).await {
+        Some((user, hash)) => verify_password(&body.password, &hash).then_some(user),
+        None => {
+            verify_dummy(&body.password);
+            None
+        }
+    };
+    match user {
+        Some(user) => {
+            app.guard.succeed(&key);
+            tracing::info!(target: "audit", user = %user.username, "login ok");
             start_session(&app, &headers, user.id).await
         }
-        _ => message(StatusCode::UNAUTHORIZED, "Wrong username or password."),
+        None => {
+            app.guard.fail(&key, now_secs());
+            tracing::warn!(target: "audit", user = name, "login failed");
+            message(StatusCode::UNAUTHORIZED, "Wrong username or password.")
+        }
     }
 }
 
@@ -185,15 +250,24 @@ async fn password_change(
     Json(body): Json<PasswordChange>,
 ) -> Response {
     let store = app.core.store();
-    match store.user_hash(me.id).await {
-        Some(h) if verify_password(&body.current, &h) => {}
-        _ => return message(StatusCode::UNAUTHORIZED, "Current password is wrong."),
+    let key = throttle::key("password", &me.username);
+    if let Some(wait) = app.guard.check(&key, now_secs()) {
+        return too_many(wait);
     }
-    if body.new.chars().count() < MIN_PASSWORD_LEN {
+    match store.user_hash(me.id).await {
+        Some(h) if verify_password(&body.current, &h) => app.guard.succeed(&key),
+        _ => {
+            app.guard.fail(&key, now_secs());
+            tracing::warn!(target: "audit", user = %me.username, "password change refused: wrong current password");
+            return message(StatusCode::UNAUTHORIZED, "Current password is wrong.");
+        }
+    }
+    if !valid_password(&body.new, &me.username) {
         return message(StatusCode::BAD_REQUEST, PASSWORD_HINT);
     }
     store.set_password(me.id, &hash_password(&body.new)).await;
     store.delete_user_sessions(me.id).await;
+    tracing::info!(target: "audit", user = %me.username, "password changed");
     start_session(&app, &headers, me.id).await
 }
 
@@ -209,12 +283,16 @@ struct NewUser {
     is_admin: bool,
 }
 
-async fn user_create(State(app): State<AppState>, Json(body): Json<NewUser>) -> Response {
+async fn user_create(
+    State(app): State<AppState>,
+    Extension(me): Extension<User>,
+    Json(body): Json<NewUser>,
+) -> Response {
     let username = body.username.trim();
     if !valid_username(username) {
         return message(StatusCode::BAD_REQUEST, USERNAME_HINT);
     }
-    if body.password.chars().count() < MIN_PASSWORD_LEN {
+    if !valid_password(&body.password, username) {
         return message(StatusCode::BAD_REQUEST, PASSWORD_HINT);
     }
     match app
@@ -223,7 +301,10 @@ async fn user_create(State(app): State<AppState>, Json(body): Json<NewUser>) -> 
         .create_user(username, &hash_password(&body.password), body.is_admin)
         .await
     {
-        Some(id) => Json(json!({"id": id, "username": username})).into_response(),
+        Some(id) => {
+            tracing::info!(target: "audit", by = %me.username, user = username, admin = body.is_admin, "user created");
+            Json(json!({"id": id, "username": username})).into_response()
+        }
         None => message(StatusCode::CONFLICT, "That username is taken."),
     }
 }
@@ -236,6 +317,7 @@ struct UserUpdate {
 
 async fn user_update(
     State(app): State<AppState>,
+    Extension(me): Extension<User>,
     Path(id): Path<i64>,
     Json(body): Json<UserUpdate>,
 ) -> Response {
@@ -244,7 +326,7 @@ async fn user_update(
         return message(StatusCode::NOT_FOUND, "No such user.");
     };
     if let Some(pw) = &body.password
-        && pw.chars().count() < MIN_PASSWORD_LEN
+        && !valid_password(pw, &target.username)
     {
         return message(StatusCode::BAD_REQUEST, PASSWORD_HINT);
     }
@@ -253,10 +335,12 @@ async fn user_update(
     }
     if let Some(admin) = body.is_admin {
         store.set_admin(id, admin).await;
+        tracing::info!(target: "audit", by = %me.username, user = %target.username, admin, "role changed");
     }
     if let Some(pw) = &body.password {
         store.set_password(id, &hash_password(pw)).await;
         store.delete_user_sessions(id).await;
+        tracing::info!(target: "audit", by = %me.username, user = %target.username, "password reset");
     }
     Json(json!({"ok": true})).into_response()
 }
@@ -270,6 +354,7 @@ async fn user_delete(
         return message(StatusCode::BAD_REQUEST, "You cannot delete yourself.");
     }
     if app.core.store().delete_user(id).await {
+        tracing::info!(target: "audit", by = %me.username, id, "user deleted");
         Json(json!({"ok": true})).into_response()
     } else {
         message(StatusCode::NOT_FOUND, "No such user.")
@@ -516,7 +601,10 @@ async fn token_create(
         .await
     {
         // The plaintext is returned exactly once; only its hash is stored.
-        Some(id) => Json(json!({"id": id, "name": name, "token": token})).into_response(),
+        Some(id) => {
+            tracing::info!(target: "audit", user = %me.username, name, id, "token created");
+            Json(json!({"id": id, "name": name, "token": token})).into_response()
+        }
         None => message(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Could not create the token.",
@@ -530,6 +618,7 @@ async fn token_revoke(
     Path(id): Path<i64>,
 ) -> Response {
     if app.core.store().revoke_token(id, token_owner(&me)).await {
+        tracing::info!(target: "audit", user = %me.username, id, "token revoked");
         Json(json!({"ok": true})).into_response()
     } else {
         message(StatusCode::NOT_FOUND, "No such token.")
@@ -584,6 +673,7 @@ pub fn router(app: AppState) -> Router {
         .route("/setup", post(setup))
         .route("/login", post(login))
         .merge(protected)
+        .layer(middleware::from_fn(same_origin))
         .with_state(app)
 }
 
@@ -602,10 +692,7 @@ mod tests {
 
     async fn setup_app() -> (Router, AppState) {
         let core = Core::new(Arc::new(Store::open_memory().await.unwrap()));
-        let app = AppState {
-            core: core.clone(),
-            hue: HueManager::new(core),
-        };
+        let app = AppState::new(core.clone(), HueManager::new(core));
         (Router::new().nest("/api/domus", router(app.clone())), app)
     }
 
@@ -706,7 +793,7 @@ mod tests {
                 "POST",
                 "/api/domus/setup",
                 None,
-                r#"{"username":"second","password":"another one"}"#
+                r#"{"username":"second","password":"another one pw12"}"#
             )
             .await
             .0,
@@ -889,7 +976,7 @@ mod tests {
         let bob_uri = format!("/api/domus/users/{bob_id}");
 
         // duplicates (case-insensitive) and weak passwords are refused
-        let dup = r#"{"username":"Bob","password":"long enough"}"#;
+        let dup = r#"{"username":"Bob","password":"long enough pw12"}"#;
         assert_eq!(
             call(&r, "POST", "/api/domus/users", Some(&admin), dup)
                 .await
@@ -918,14 +1005,14 @@ mod tests {
 
         // an admin reset signs the user out and the new password works
         assert_eq!(
-            put(&admin, &bob_uri, r#"{"password":"reset reset"}"#).await,
+            put(&admin, &bob_uri, r#"{"password":"reset reset reset"}"#).await,
             StatusCode::OK
         );
         assert_eq!(
             call(&r, "GET", "/api/domus/tokens", Some(&bob), "").await.0,
             StatusCode::UNAUTHORIZED
         );
-        let login = r#"{"username":"bob","password":"reset reset"}"#;
+        let login = r#"{"username":"bob","password":"reset reset reset"}"#;
         assert_eq!(
             call(&r, "POST", "/api/domus/login", None, login).await.0,
             StatusCode::OK
@@ -1320,6 +1407,186 @@ mod tests {
                 .await
                 .0,
             StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn login_is_throttled_per_username() {
+        let (r, _) = setup_app().await;
+        admin_and_member(&r).await;
+        let login = |user: &str, pw: &str| {
+            let (r, body) = (
+                r.clone(),
+                format!(r#"{{"username":"{user}","password":"{pw}"}}"#),
+            );
+            async move { call(&r, "POST", "/api/domus/login", None, &body).await }
+        };
+        // unknown names are throttled the same way, so a 429 reveals nothing
+        for name in ["admin", "ghost"] {
+            for _ in 0..5 {
+                assert_eq!(login(name, "wrong").await.0, StatusCode::UNAUTHORIZED);
+            }
+            let (s, h, _) = login(name, "correct horse").await;
+            assert_eq!(s, StatusCode::TOO_MANY_REQUESTS, "{name}");
+            let wait: i64 = h["retry-after"].to_str().unwrap().parse().unwrap();
+            assert!((1..=60).contains(&wait));
+        }
+        // the lock is case-insensitive and does not spill onto other users
+        assert_eq!(
+            login("ADMIN", "correct horse").await.0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(login("bob", "bob's password").await.0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn successful_login_resets_the_failure_count() {
+        let (r, _) = setup_app().await;
+        admin_and_member(&r).await;
+        let login = |pw: &'static str| {
+            let (r, body) = (
+                r.clone(),
+                format!(r#"{{"username":"bob","password":"{pw}"}}"#),
+            );
+            async move { call(&r, "POST", "/api/domus/login", None, &body).await.0 }
+        };
+        for _ in 0..4 {
+            assert_eq!(login("wrong").await, StatusCode::UNAUTHORIZED);
+        }
+        assert_eq!(login("bob's password").await, StatusCode::OK);
+        for _ in 0..4 {
+            assert_eq!(login("wrong").await, StatusCode::UNAUTHORIZED);
+        }
+        assert_eq!(login("bob's password").await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn password_change_is_throttled() {
+        let (r, _) = setup_app().await;
+        let (_, bob) = admin_and_member(&r).await;
+        let change = |current: &str| {
+            let (r, bob, body) = (
+                r.clone(),
+                bob.clone(),
+                format!(r#"{{"current":"{current}","new":"brand new pw 12"}}"#),
+            );
+            async move {
+                call(&r, "POST", "/api/domus/password", Some(&bob), &body)
+                    .await
+                    .0
+            }
+        };
+        for _ in 0..5 {
+            assert_eq!(change("wrong").await, StatusCode::UNAUTHORIZED);
+        }
+        assert_eq!(
+            change("bob's password").await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[tokio::test]
+    async fn password_rules() {
+        let (r, _) = setup_app().await;
+        let setup = |user: &str, pw: &str| {
+            let (r, body) = (
+                r.clone(),
+                format!(r#"{{"username":"{user}","password":"{pw}"}}"#),
+            );
+            async move { call(&r, "POST", "/api/domus/setup", None, &body).await.0 }
+        };
+        assert_eq!(setup("admin", "elevenchars").await, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            setup("administrator", "Administrator").await,
+            StatusCode::BAD_REQUEST,
+            "same as the username, any case"
+        );
+        let long = "x".repeat(129);
+        assert_eq!(setup("admin", &long).await, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            setup("admin", &"x".repeat(128)).await,
+            StatusCode::OK,
+            "128 is the limit"
+        );
+        // exactly 12 characters, counted as characters rather than bytes
+        let (r, _) = setup_app().await;
+        let body = r#"{"username":"admin","password":"密碼密碼密碼密碼密碼密碼"}"#;
+        assert_eq!(
+            call(&r, "POST", "/api/domus/setup", None, body).await.0,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_site_requests_are_refused() {
+        let (r, _) = setup_app().await;
+        let send = |method: &str, headers: &[(&str, &str)]| {
+            let mut b = HttpRequest::builder()
+                .method(method)
+                .uri("/api/domus/logout")
+                .header("host", "domus.example");
+            for (k, v) in headers {
+                b = b.header(*k, *v);
+            }
+            let r = r.clone();
+            async move {
+                r.oneshot(b.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+        // no Origin (curl, hasscontrol) passes the check; the route then needs a session
+        let unauth = StatusCode::UNAUTHORIZED;
+        assert_eq!(send("POST", &[]).await, unauth);
+        assert_eq!(
+            send("POST", &[("origin", "https://domus.example")]).await,
+            unauth
+        );
+        assert_eq!(
+            send("POST", &[("origin", "https://DOMUS.example")]).await,
+            unauth
+        );
+        assert_eq!(
+            send(
+                "POST",
+                &[
+                    ("origin", "https://domus.example"),
+                    ("host", "127.0.0.1:8123"),
+                    ("x-forwarded-host", "domus.example"),
+                ]
+            )
+            .await,
+            unauth,
+            "behind a proxy"
+        );
+        assert_eq!(
+            send("POST", &[("sec-fetch-site", "same-origin")]).await,
+            unauth
+        );
+
+        let forbidden = StatusCode::FORBIDDEN;
+        assert_eq!(
+            send("POST", &[("origin", "https://evil.example")]).await,
+            forbidden
+        );
+        assert_eq!(send("POST", &[("origin", "null")]).await, forbidden);
+        assert_eq!(
+            send("DELETE", &[("origin", "https://evil.example")]).await,
+            forbidden
+        );
+        assert_eq!(
+            send("POST", &[("sec-fetch-site", "cross-site")]).await,
+            forbidden
+        );
+        assert_eq!(
+            send("POST", &[("sec-fetch-site", "same-site")]).await,
+            forbidden
+        );
+        // reads are never blocked
+        assert_ne!(
+            send("GET", &[("origin", "https://evil.example")]).await,
+            forbidden
         );
     }
 
