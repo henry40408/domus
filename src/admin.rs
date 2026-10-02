@@ -187,7 +187,12 @@ async fn setup(
         if let Some(wait) = app.guard.check(&key, now_secs()) {
             return too_many(wait);
         }
-        if !constant_time_eq(body.setup_code.trim().as_bytes(), expected.as_bytes()) {
+        // Dashes are only for readability (`a1b2-c3d4`), so they are ignored on both sides.
+        let plain = |c: &str| c.trim().replace('-', "");
+        if !constant_time_eq(
+            plain(&body.setup_code).as_bytes(),
+            plain(&expected).as_bytes(),
+        ) {
             app.guard.fail(&key, now_secs());
             tracing::warn!(target: "audit", "setup refused: wrong setup code");
             return message(
@@ -1644,7 +1649,7 @@ mod tests {
             call(&r, "POST", "/api/domus/setup", None, missing).await.0,
             StatusCode::FORBIDDEN
         );
-        let (s, h, _) = setup(" abc123 ").await;
+        let (s, h, _) = setup(" abc-123 ").await;
         assert_eq!(s, StatusCode::OK);
         assert!(h.contains_key("set-cookie"));
 

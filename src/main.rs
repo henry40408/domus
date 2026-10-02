@@ -48,7 +48,11 @@ async fn main() {
 
     // Until the first admin exists, creating it requires a code only the operator can read.
     let setup_code = if store.user_count().await == 0 {
-        let code = env.setup_code.clone().unwrap_or_else(|| random_hex(8));
+        // 32 bits is plenty: wrong guesses are throttled (about 4 an hour) and the code dies with setup.
+        let code = env.setup_code.clone().unwrap_or_else(|| {
+            let hex = random_hex(4);
+            format!("{}-{}", &hex[..4], &hex[4..])
+        });
         eprintln!("domus: no users yet. Setup code: {code}");
         tracing::warn!("no users yet; the setup code is required to create the first admin");
         Some(code)
