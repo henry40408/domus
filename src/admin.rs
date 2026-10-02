@@ -860,6 +860,7 @@ fn mime_for(path: &str) -> &'static str {
         Some("html") => "text/html; charset=utf-8",
         Some("js") => "text/javascript; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
+        Some("svg") => "image/svg+xml",
         _ => "application/octet-stream",
     }
 }
@@ -2200,6 +2201,9 @@ mod tests {
             static_files("/nope.txt".parse().unwrap()).await.status(),
             StatusCode::NOT_FOUND
         );
+        let icon = static_files("/favicon.svg".parse().unwrap()).await;
+        assert_eq!(icon.status(), StatusCode::OK);
+        assert_eq!(icon.headers()[header::CONTENT_TYPE], "image/svg+xml");
     }
 
     struct Bridge;
