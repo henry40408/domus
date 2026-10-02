@@ -8,6 +8,8 @@ pub struct Env {
     pub bind: SocketAddr,
     pub data_dir: PathBuf,
     pub log: String,
+    /// Fixed first-run setup code; a random one is generated when unset.
+    pub setup_code: Option<String>,
 }
 
 impl Env {
@@ -22,6 +24,7 @@ impl Env {
                 .unwrap_or_else(|| "./data".into())
                 .into(),
             log: get("DOMUS_LOG").unwrap_or_else(|| "info".into()),
+            setup_code: get("DOMUS_SETUP_CODE").filter(|c| !c.is_empty()),
         })
     }
 
@@ -39,6 +42,11 @@ mod tests {
         let e = Env::from_lookup(|_| None).unwrap();
         assert_eq!(e.bind, "127.0.0.1:8123".parse().unwrap());
         assert_eq!(e.data_dir, PathBuf::from("./data"));
+        assert_eq!(e.setup_code, None);
+        let e = Env::from_lookup(|k| (k == "DOMUS_SETUP_CODE").then(|| "abc".to_string())).unwrap();
+        assert_eq!(e.setup_code.as_deref(), Some("abc"));
+        let e = Env::from_lookup(|k| (k == "DOMUS_SETUP_CODE").then(String::new)).unwrap();
+        assert_eq!(e.setup_code, None);
         let e =
             Env::from_lookup(|k| (k == "DOMUS_BIND").then(|| "0.0.0.0:9000".to_string())).unwrap();
         assert_eq!(e.bind.port(), 9000);

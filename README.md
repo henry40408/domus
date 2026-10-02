@@ -34,7 +34,9 @@ docker run -d \
 ```
 
 `main` tracks the default branch; releases also get semver tags (`0.1.0`, `0.1`).
-Open `http://localhost:8123` and create the admin account on first start, then continue with [Usage](#usage).
+On first start with no users, domus prints a one-time setup code (`docker logs domus`, look for `Setup code:`).
+Open `http://localhost:8123`, enter the code and create the admin account, then continue with [Usage](#usage).
+The code stops working once the admin exists; set `DOMUS_SETUP_CODE` to choose your own.
 
 ### Building from Source
 
@@ -53,6 +55,7 @@ Configuration is environment variables only:
 | `DOMUS_BIND`      | `127.0.0.1:8123` | Listen address (plain HTTP). The container image sets `0.0.0.0:8123`. |
 | `DOMUS_DATA_DIR`  | `./data`         | SQLite location (dir mode `0700`, `domus.db` `0600`). The container image sets `/data`. |
 | `DOMUS_LOG`       | `info`           | Log filter (`tracing` env-filter syntax)            |
+| `DOMUS_SETUP_CODE`| random           | Code required to create the first admin (only while no user exists). When unset, a random one is printed at startup. |
 
 Everything else is configured in the admin page at `/`.
 
@@ -60,7 +63,7 @@ Everything else is configured in the admin page at `/`.
 
 Admin page tabs: Dashboard, Groups (admin), Devices, Tokens, Users (admin), Settings. Regular users see Dashboard, Devices, Tokens and Settings, and only their own tokens.
 
-1. Create the admin account (username and password; first start only). Add more users in Users; admins manage the bridge, groups and users, regular users control lights and manage their own tokens. Upgrading from v0.1.0 turns the old password into the user `admin`; everyone must log in again.
+1. Create the admin account (setup code from the log, username and password; first start only). Add more users in Users; admins manage the bridge, groups and users, regular users control lights and manage their own tokens. Upgrading from v0.1.0 turns the old password into the user `admin`; everyone must log in again.
 2. Pair the Hue Bridge (Settings): enter its IP, press the bridge's link button, click **Pair**.
 3. Create a group (e.g. `Garmin`, Groups), tick lights and scenes, order them, and save. A watch preview shows what hasscontrol will list.
 4. Create a long-lived access token (Tokens; shown once, only its hash is stored; "last used" is tracked). Tokens look like `domus_` + 32 hex characters. Optionally limit a token to chosen groups: it can then only reach those groups, their members and the group's light switch. Out-of-scope reads return 404 and out-of-scope service targets are skipped. Tokens without a scope keep full access.

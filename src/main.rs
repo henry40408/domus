@@ -2,6 +2,7 @@ use domus::core::Core;
 use domus::env::Env;
 use domus::hue::HueManager;
 use domus::store::Store;
+use domus::util::random_hex;
 use domus::{AppState, build_app, resume_hue};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::sync::Arc;
@@ -45,10 +46,20 @@ async fn main() {
     };
     let _ = std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o600));
 
+    // Until the first admin exists, creating it requires a code only the operator can read.
+    let setup_code = if store.user_count().await == 0 {
+        let code = env.setup_code.clone().unwrap_or_else(|| random_hex(8));
+        eprintln!("domus: no users yet. Setup code: {code}");
+        tracing::warn!("no users yet; the setup code is required to create the first admin");
+        Some(code)
+    } else {
+        None
+    };
+
     let core = Core::new(store);
     let hue = HueManager::new(core.clone());
     resume_hue(&core, &hue).await;
-    let app = build_app(AppState::new(core, hue));
+    let app = build_app(AppState::new(core, hue).with_setup_code(setup_code));
 
     let listener = match tokio::net::TcpListener::bind(env.bind).await {
         Ok(l) => l,
