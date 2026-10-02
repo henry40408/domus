@@ -457,7 +457,7 @@ async fn hue_pair(State(app): State<AppState>, Json(body): Json<PairRequest>) ->
                     key: key.clone(),
                 })
                 .await;
-            app.hue.start(&base, &key);
+            app.hue.start_synced(&base, &key).await;
             Json(json!({"ok": true})).into_response()
         }
         Err(PairError::LinkButtonNotPressed) => message(

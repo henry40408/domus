@@ -542,11 +542,19 @@ impl HueIntegration {
 
     /// Sync + stream forever, reconnecting after failures.
     pub async fn run(self: Arc<Self>) {
+        self.run_from(true).await;
+    }
+
+    /// Syncs (unless `first_sync` is false), then follows the event stream forever.
+    async fn run_from(self: Arc<Self>, mut first_sync: bool) {
         loop {
-            match self.sync().await {
-                Ok(n) => info!("hue: synced {n} lights"),
-                Err(e) => warn!("hue: sync failed: {e}"),
+            if first_sync {
+                match self.sync().await {
+                    Ok(n) => info!("hue: synced {n} lights"),
+                    Err(e) => warn!("hue: sync failed: {e}"),
+                }
             }
+            first_sync = true;
             if let Err(e) = self.stream_once().await {
                 warn!("hue: {e}");
             }
@@ -619,6 +627,23 @@ impl HueManager {
     }
 
     pub fn start(&self, base: &str, key: &str) {
+        self.reset();
+        self.start_inner(base, key, None);
+    }
+
+    /// Like `start`, but finishes the first sync before returning so callers see the lights.
+    pub async fn start_synced(&self, base: &str, key: &str) {
+        self.reset();
+        let integration = HueIntegration::new(HueClient::new(base, key), self.core.clone());
+        match integration.sync().await {
+            Ok(n) => info!("hue: synced {n} lights"),
+            Err(e) => warn!("hue: sync failed: {e}"),
+        }
+        self.start_inner(base, key, Some(integration));
+    }
+
+    /// Stops the running sync task and forgets every Hue entity.
+    fn reset(&self) {
         let mut task = self.task.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(old) = task.take() {
             old.abort();
@@ -628,10 +653,19 @@ impl HueManager {
                 self.core.remove_state(&id);
             }
         }
-        let integration = HueIntegration::new(HueClient::new(base, key), self.core.clone());
+    }
+
+    fn start_inner(&self, base: &str, key: &str, synced: Option<Arc<HueIntegration>>) {
+        let mut task = self.task.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(old) = task.take() {
+            old.abort();
+        }
+        let first_sync = synced.is_none();
+        let integration = synced
+            .unwrap_or_else(|| HueIntegration::new(HueClient::new(base, key), self.core.clone()));
         self.core
             .set_integration(INTEGRATION_NAME, integration.clone());
-        *task = Some(tokio::spawn(integration.run()));
+        *task = Some(tokio::spawn(integration.run_from(first_sync)));
     }
 }
 
@@ -758,6 +792,18 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn start_synced_has_the_lights_ready_on_return() {
+        let mock = Mock::default();
+        *mock.lights.lock().unwrap() = vec![light_json("aaaaaaaa-0000", "Desk", true, 40.0)];
+        let base = mock_server(mock).await;
+        let core = Core::new(Arc::new(Store::open_memory().await.unwrap()));
+        let manager = HueManager::new(core.clone());
+        manager.start_synced(&base, "key").await;
+        assert!(manager.is_running());
+        assert_eq!(core.get_state("light.hue_aaaaaaaa").unwrap().state, "on");
     }
 
     #[tokio::test]
