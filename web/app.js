@@ -455,14 +455,22 @@ function devices() {
 function tokens() {
   const name = el("input", { type: "text", placeholder: "Token name, e.g. Garmin watch" });
   const boxes = data.groups.map((g) => ({ g, box: el("input", { type: "checkbox" }) }));
+  const readOnly = el("input", { type: "checkbox" });
+  const expiry = el("select", {}, ...[["", "Never expires"], ["7", "7 days"], ["30", "30 days"], ["90", "90 days"], ["365", "1 year"]]
+    .map(([v, label]) => el("option", { value: v }, label)));
   const create = () => guarded(async () => {
     const picked = boxes.filter((b) => b.box.checked).map((b) => b.g.name);
-    const t = await api("POST", "/tokens", { name: name.value, scope: picked.length ? picked : null });
+    const t = await api("POST", "/tokens", {
+      name: name.value,
+      scope: picked.length ? picked : null,
+      read_only: readOnly.checked,
+      expires_days: expiry.value ? Number(expiry.value) : null,
+    });
     ui.fresh = t.token;
     await refresh();
   });
   const picker = boxes.length ? el("div", { class: "scope" },
-    el("p", { class: "muted" }, "Limit to groups (leave all unchecked for full access):"),
+    el("p", { class: "muted" }, me.scope ? "Limit to groups (leave all unchecked for all of yours):" : "Limit to groups (leave all unchecked for full access):"),
     ...boxes.map((b) => el("label", {}, b.box, " " + b.g.name))) : "";
   name.addEventListener("keydown", (e) => { if (e.key === "Enter") create(); });
   const fresh = ui.fresh && el("div", { class: "warn" },
@@ -475,6 +483,8 @@ function tokens() {
     el("div", { class: "card" },
       el("div", { class: "row" }, el("div", { class: "grow" }, name), el("button", { class: "primary", onclick: create }, "Create token")),
       picker,
+      el("div", { class: "row check", style: "margin:12px 0" },
+        el("label", {}, readOnly, " Read-only (cannot control lights)"), expiry),
       fresh,
       data.tokens.length
         ? el("ul", { class: "rows" }, ...data.tokens.map((t) => el("li", {},
@@ -488,7 +498,8 @@ function tokens() {
             }),
           }, "Revoke"),
           me.is_admin ? el("span", { class: "meta" }, "Owner " + (t.username || "unknown")) : "",
-          el("span", { class: "meta" }, t.scope ? "Groups: " + t.scope.join(", ") : "Full access"),
+          el("span", { class: "meta" }, (t.scope ? "Groups: " + t.scope.join(", ") : "Full access") + (t.read_only ? ", read-only" : "")),
+          el("span", { class: "meta" }, t.expires ? (t.expires * 1000 < Date.now() ? "Expired " : "Expires ") + fmtDate(t.expires) : "Never expires"),
           el("span", { class: "meta" }, "Created " + fmtDate(t.created)),
           el("span", { class: "meta" }, "Last used " + ago(t.last_used)))))
         : el("p", { class: "muted" }, "No tokens yet.")),
@@ -541,7 +552,18 @@ function users() {
             await refresh();
           }),
         }, u.is_admin ? "Make regular user" : "Make admin"),
-        el("span", { class: "meta" }, u.is_admin ? "Admin" : "User"),
+        u.is_admin ? "" : el("button", {
+          class: "act",
+          onclick: () => guarded(async () => {
+            const known = data.groups.map((g) => g.name).join(", ");
+            const input = prompt("Limit " + u.username + " to groups (comma separated; empty = no limit).\nAvailable: " + known, (u.scope || []).join(", "));
+            if (input === null) return;
+            const picked = input.split(",").map((x) => x.trim()).filter(Boolean);
+            await api("PUT", "/users/" + u.id, { scope: picked.length ? picked : null });
+            await refresh();
+          }),
+        }, "Limit groups"),
+        el("span", { class: "meta" }, u.is_admin ? "Admin" : u.scope ? "User, groups: " + u.scope.join(", ") : "User, all groups"),
         el("span", { class: "meta" }, "Created " + fmtDate(u.created)))))),
   ];
 }
