@@ -173,17 +173,24 @@ impl Core {
     }
 
     /// Synthesises `group.<name>`: "on" if any member is on, listing the member ids.
-    pub fn group_state(&self, name: &str) -> Option<State> {
-        if !self.store.group_exists(name) {
+    pub async fn group_state(&self, name: &str) -> Option<State> {
+        if !self.store.group_exists(name).await {
             return None;
         }
-        let members = self.store.group_members(name);
-        let any_on = members
-            .iter()
-            .any(|m| self.lookup(m).is_some_and(|s| s.state == "on"));
+        let members = self.store.group_members(name).await;
+        let mut any_on = false;
+        for m in &members {
+            if Box::pin(self.lookup(m))
+                .await
+                .is_some_and(|s| s.state == "on")
+            {
+                any_on = true;
+                break;
+            }
+        }
         // An exposed group lists its own all-lights switch first, so a client that imports the
         // group (hasscontrol) gets it without a second group.
-        let listed = if self.store.group_exposed(name) {
+        let listed = if self.store.group_exposed(name).await {
             let mut v = vec![group_light_id(name)];
             v.extend(members);
             v
@@ -205,23 +212,27 @@ impl Core {
     }
 
     /// Name of the exposed group a `light.domus_group_*` id stands for.
-    fn exposed_group_of(&self, entity_id: &str) -> Option<String> {
+    async fn exposed_group_of(&self, entity_id: &str) -> Option<String> {
         let name = entity_id.strip_prefix(GROUP_LIGHT_PREFIX)?;
-        self.store.group_exposed(name).then(|| name.to_string())
+        self.store
+            .group_exposed(name)
+            .await
+            .then(|| name.to_string())
     }
 
     /// Members that are real lights. Group lights are skipped, so expansion is one level deep
     /// and groups that include each other's lights cannot recurse.
-    fn real_members(&self, name: &str) -> Vec<String> {
-        let mut members = self.store.group_members(name);
+    async fn real_members(&self, name: &str) -> Vec<String> {
+        let mut members = self.store.group_members(name).await;
         members.retain(|m| !m.starts_with(GROUP_LIGHT_PREFIX));
         members
     }
 
     /// State of a group's light: "on" if any real member is on; deliberately minimal attributes.
-    fn group_light_state(&self, name: &str) -> State {
+    async fn group_light_state(&self, name: &str) -> State {
         let any_on = self
             .real_members(name)
+            .await
             .iter()
             .any(|m| self.get_state(m).is_some_and(|s| s.state == "on"));
         let mut attributes = Map::new();
@@ -238,31 +249,31 @@ impl Core {
     }
 
     /// States of every group exposed as a light.
-    pub fn group_lights(&self) -> Vec<State> {
-        self.store
-            .exposed_group_names()
-            .iter()
-            .map(|n| self.group_light_state(n))
-            .collect()
+    pub async fn group_lights(&self) -> Vec<State> {
+        let mut out = Vec::new();
+        for n in self.store.exposed_group_names().await {
+            out.push(self.group_light_state(&n).await);
+        }
+        out
     }
 
     /// Looks up any state, including synthesised groups and group lights.
-    pub fn lookup(&self, entity_id: &str) -> Option<State> {
-        if let Some(name) = self.exposed_group_of(entity_id) {
-            return Some(self.group_light_state(&name));
+    pub async fn lookup(&self, entity_id: &str) -> Option<State> {
+        if let Some(name) = self.exposed_group_of(entity_id).await {
+            return Some(self.group_light_state(&name).await);
         }
         match entity_id.strip_prefix("group.") {
-            Some(name) => self.group_state(name),
+            Some(name) => self.group_state(name).await,
             None => self.get_state(entity_id),
         }
     }
 
     /// Expands `group.*` ids into their members; other ids pass through unchanged.
-    pub fn expand_entities(&self, ids: &[String]) -> Vec<String> {
+    pub async fn expand_entities(&self, ids: &[String]) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for id in ids {
             let expanded = match id.strip_prefix("group.") {
-                Some(name) => self.store.group_members(name),
+                Some(name) => self.store.group_members(name).await,
                 None => vec![id.clone()],
             };
             for e in expanded {
@@ -277,10 +288,10 @@ impl Core {
     /// Runs a light action. A group light fans out to its real members in parallel and succeeds
     /// if at least one member did; real lights go through their integration.
     pub async fn call_light(&self, entity_id: &str, action: &LightAction) -> Result<(), CallError> {
-        let Some(name) = self.exposed_group_of(entity_id) else {
+        let Some(name) = self.exposed_group_of(entity_id).await else {
             return self.call_real_light(entity_id, action).await;
         };
-        let members = self.real_members(&name);
+        let members = self.real_members(&name).await;
         let results =
             futures_util::future::join_all(members.iter().map(|m| self.call_real_light(m, action)))
                 .await;
@@ -364,13 +375,13 @@ impl Core {
 mod tests {
     use super::*;
 
-    fn core() -> Arc<Core> {
-        Core::new(Arc::new(Store::open_memory().unwrap()))
+    async fn core() -> Arc<Core> {
+        Core::new(Arc::new(Store::open_memory().await.unwrap()))
     }
 
-    #[test]
-    fn last_changed_only_moves_on_state_change() {
-        let c = core();
+    #[tokio::test]
+    async fn last_changed_only_moves_on_state_change() {
+        let c = core().await;
         c.set_state("light.a", "on", Map::new());
         let first = c.get_state("light.a").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(2));
@@ -386,48 +397,52 @@ mod tests {
         );
     }
 
-    #[test]
-    fn group_state_follows_members() {
-        let c = core();
+    #[tokio::test]
+    async fn group_state_follows_members() {
+        let c = core().await;
         c.set_state("light.a", "off", Map::new());
         c.set_state("light.b", "off", Map::new());
-        assert!(c.group_state("garmin").is_none());
+        assert!(c.group_state("garmin").await.is_none());
         c.store()
             .group_set("garmin", &["light.a".into(), "light.b".into()])
+            .await
             .unwrap();
-        let g = c.group_state("garmin").unwrap();
+        let g = c.group_state("garmin").await.unwrap();
         assert_eq!(g.entity_id, "group.garmin");
         assert_eq!(g.state, "off");
         assert_eq!(g.attributes["entity_id"], json!(["light.a", "light.b"]));
         c.set_state("light.b", "on", Map::new());
-        assert_eq!(c.group_state("garmin").unwrap().state, "on");
-        assert_eq!(c.lookup("group.garmin").unwrap().state, "on");
+        assert_eq!(c.group_state("garmin").await.unwrap().state, "on");
+        assert_eq!(c.lookup("group.garmin").await.unwrap().state, "on");
 
         // exposing lists the group's own light first, but never as a stored member
-        c.store().group_set_exposed("garmin", true);
-        let g = c.group_state("garmin").unwrap();
+        c.store().group_set_exposed("garmin", true).await;
+        let g = c.group_state("garmin").await.unwrap();
         assert_eq!(
             g.attributes["entity_id"],
             json!(["light.domus_group_garmin", "light.a", "light.b"])
         );
         assert_eq!(
-            c.store().group_members("garmin"),
+            c.store().group_members("garmin").await,
             vec!["light.a", "light.b"]
         );
         assert_eq!(
-            c.expand_entities(&["group.garmin".into()]),
+            c.expand_entities(&["group.garmin".into()]).await,
             vec!["light.a", "light.b"]
         );
-        assert!(c.lookup("group.nope").is_none());
+        assert!(c.lookup("group.nope").await.is_none());
     }
 
-    #[test]
-    fn expand_groups_and_dedupe() {
-        let c = core();
+    #[tokio::test]
+    async fn expand_groups_and_dedupe() {
+        let c = core().await;
         c.store()
             .group_set("g", &["light.a".into(), "light.b".into()])
+            .await
             .unwrap();
-        let out = c.expand_entities(&["group.g".into(), "light.b".into(), "light.c".into()]);
+        let out = c
+            .expand_entities(&["group.g".into(), "light.b".into(), "light.c".into()])
+            .await;
         assert_eq!(out, vec!["light.a", "light.b", "light.c"]);
     }
 
@@ -453,7 +468,7 @@ mod tests {
 
     #[tokio::test]
     async fn call_light_applies_optimistic_state() {
-        let c = core();
+        let c = core().await;
         c.set_integration("fake", Arc::new(Fake));
         c.set_state("light.fake1", "off", Map::new());
         c.call_light(
@@ -477,7 +492,7 @@ mod tests {
 
     #[tokio::test]
     async fn call_light_errors() {
-        let c = core();
+        let c = core().await;
         c.set_integration("fake", Arc::new(Fake));
         assert_eq!(
             c.call_light("light.other", &LightAction::TurnOff).await,
@@ -509,41 +524,41 @@ mod tests {
         }
     }
 
-    fn group_core(members: &[&str]) -> Arc<Core> {
-        let c = core();
+    async fn group_core(members: &[&str]) -> Arc<Core> {
+        let c = core().await;
         c.set_integration("flaky", Arc::new(Flaky));
         for m in members {
             c.set_state(m, "off", Map::new());
         }
         let ids: Vec<String> = members.iter().map(|m| m.to_string()).collect();
-        c.store().group_set("room", &ids).unwrap();
+        c.store().group_set("room", &ids).await.unwrap();
         c
     }
 
-    #[test]
-    fn group_light_exists_only_when_exposed() {
-        let c = group_core(&["light.flaky_a", "light.flaky_b"]);
+    #[tokio::test]
+    async fn group_light_exists_only_when_exposed() {
+        let c = group_core(&["light.flaky_a", "light.flaky_b"]).await;
         let id = group_light_id("room");
-        assert!(c.lookup(&id).is_none());
-        assert!(c.group_lights().is_empty());
-        c.store().group_set_exposed("room", true);
-        let s = c.lookup(&id).unwrap();
+        assert!(c.lookup(&id).await.is_none());
+        assert!(c.group_lights().await.is_empty());
+        c.store().group_set_exposed("room", true).await;
+        let s = c.lookup(&id).await.unwrap();
         assert_eq!(
             (s.state.as_str(), s.entity_id.as_str()),
             ("off", id.as_str())
         );
         assert_eq!(s.attributes.len(), 1, "only friendly_name");
         c.set_state("light.flaky_b", "on", Map::new());
-        assert_eq!(c.lookup(&id).unwrap().state, "on");
-        assert_eq!(c.group_lights().len(), 1);
-        c.store().group_delete("room");
-        assert!(c.lookup(&id).is_none());
+        assert_eq!(c.lookup(&id).await.unwrap().state, "on");
+        assert_eq!(c.group_lights().await.len(), 1);
+        c.store().group_delete("room").await;
+        assert!(c.lookup(&id).await.is_none());
     }
 
     #[tokio::test]
     async fn group_light_fans_out_to_members() {
-        let c = group_core(&["light.flaky_a", "light.flaky_b"]);
-        c.store().group_set_exposed("room", true);
+        let c = group_core(&["light.flaky_a", "light.flaky_b"]).await;
+        c.store().group_set_exposed("room", true).await;
         let id = group_light_id("room");
         c.call_light(&id, &LightAction::TurnOn { brightness: None })
             .await
@@ -551,13 +566,13 @@ mod tests {
         assert_eq!(c.get_state("light.flaky_a").unwrap().state, "on");
         assert_eq!(c.get_state("light.flaky_b").unwrap().state, "on");
         c.call_light(&id, &LightAction::TurnOff).await.unwrap();
-        assert_eq!(c.lookup(&id).unwrap().state, "off");
+        assert_eq!(c.lookup(&id).await.unwrap().state, "off");
     }
 
     #[tokio::test]
     async fn group_light_partial_and_total_failure() {
-        let c = group_core(&["light.flaky_a", "light.flaky_bad"]);
-        c.store().group_set_exposed("room", true);
+        let c = group_core(&["light.flaky_a", "light.flaky_bad"]).await;
+        c.store().group_set_exposed("room", true).await;
         let id = group_light_id("room");
         c.call_light(&id, &LightAction::TurnOn { brightness: None })
             .await
@@ -565,8 +580,8 @@ mod tests {
         assert_eq!(c.get_state("light.flaky_a").unwrap().state, "on");
         assert_eq!(c.get_state("light.flaky_bad").unwrap().state, "off");
 
-        let c = group_core(&["light.flaky_bad"]);
-        c.store().group_set_exposed("room", true);
+        let c = group_core(&["light.flaky_bad"]).await;
+        c.store().group_set_exposed("room", true).await;
         assert_eq!(
             c.call_light(&group_light_id("room"), &LightAction::TurnOff)
                 .await,
@@ -576,14 +591,14 @@ mod tests {
 
     #[tokio::test]
     async fn group_light_without_exposure_or_members() {
-        let c = group_core(&["light.flaky_a"]);
+        let c = group_core(&["light.flaky_a"]).await;
         assert_eq!(
             c.call_light(&group_light_id("room"), &LightAction::TurnOff)
                 .await,
             Err(CallError::NoIntegration)
         );
-        c.store().group_set("empty", &[]).unwrap();
-        c.store().group_set_exposed("empty", true);
+        c.store().group_set("empty", &[]).await.unwrap();
+        c.store().group_set_exposed("empty", true).await;
         c.call_light(&group_light_id("empty"), &LightAction::TurnOff)
             .await
             .unwrap();
@@ -591,20 +606,22 @@ mod tests {
 
     #[tokio::test]
     async fn group_lights_that_include_each_other_do_not_recurse() {
-        let c = group_core(&["light.flaky_a"]);
+        let c = group_core(&["light.flaky_a"]).await;
         let (a, b) = (group_light_id("room"), group_light_id("other"));
         c.store()
             .group_set("room", &["light.flaky_a".into(), b.clone()])
+            .await
             .unwrap();
         c.store()
             .group_set("other", &["light.flaky_a".into(), a.clone()])
+            .await
             .unwrap();
-        c.store().group_set_exposed("room", true);
-        c.store().group_set_exposed("other", true);
+        c.store().group_set_exposed("room", true).await;
+        c.store().group_set_exposed("other", true).await;
         c.call_light(&a, &LightAction::TurnOn { brightness: None })
             .await
             .unwrap();
-        assert_eq!(c.lookup(&b).unwrap().state, "on");
-        assert_eq!(c.lookup("group.room").unwrap().state, "on");
+        assert_eq!(c.lookup(&b).await.unwrap().state, "on");
+        assert_eq!(c.lookup("group.room").await.unwrap().state, "on");
     }
 }

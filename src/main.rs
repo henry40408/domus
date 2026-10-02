@@ -36,7 +36,7 @@ async fn main() {
         std::process::exit(1);
     }
     let db_path = env.data_dir.join("domus.db");
-    let store = match Store::open(&db_path) {
+    let store = match Store::open(&db_path).await {
         Ok(s) => Arc::new(s),
         Err(e) => {
             eprintln!("domus: cannot open {}: {e}", db_path.display());
@@ -47,7 +47,7 @@ async fn main() {
 
     let core = Core::new(store);
     let hue = HueManager::new(core.clone());
-    resume_hue(&core, &hue);
+    resume_hue(&core, &hue).await;
     let app = build_app(AppState { core, hue });
 
     let listener = match tokio::net::TcpListener::bind(env.bind).await {

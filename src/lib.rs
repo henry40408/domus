@@ -22,8 +22,8 @@ pub fn build_app(app: AppState) -> Router {
 }
 
 /// Starts the Hue integration if a bridge was paired earlier.
-pub fn resume_hue(core: &Arc<core::Core>, hue: &hue::HueManager) {
-    if let Some(b) = core.store().hue_get() {
+pub async fn resume_hue(core: &Arc<core::Core>, hue: &hue::HueManager) {
+    if let Some(b) = core.store().hue_get().await {
         hue.start(&hue::bridge_base(&b.ip), &b.key);
     }
 }

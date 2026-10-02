@@ -1,9 +1,10 @@
 //! SQLite persistence: owner, sessions, long-lived tokens, Hue bridge, groups.
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use sqlx::{Row, SqlitePool};
 use std::path::Path;
-use std::sync::Mutex;
+use std::str::FromStr;
 
 use crate::util::now_secs;
 
@@ -25,407 +26,447 @@ pub struct HueBridge {
 }
 
 pub struct Store {
-    conn: Mutex<Connection>,
+    pool: SqlitePool,
 }
 
 impl Store {
-    pub fn open(path: &Path) -> rusqlite::Result<Self> {
-        Self::init(Connection::open(path)?)
+    pub async fn open(path: &Path) -> sqlx::Result<Self> {
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal);
+        Self::init(SqlitePoolOptions::new().connect_with(options).await?).await
     }
 
-    pub fn open_memory() -> rusqlite::Result<Self> {
-        Self::init(Connection::open_in_memory()?)
+    pub async fn open_memory() -> sqlx::Result<Self> {
+        Self::init(memory_pool().await?).await
     }
 
-    fn init(conn: Connection) -> rusqlite::Result<Self> {
-        conn.execute_batch(
-            "PRAGMA foreign_keys = ON;
-             CREATE TABLE IF NOT EXISTS owner (
-                 id INTEGER PRIMARY KEY CHECK (id = 1),
-                 password_hash TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS sessions (
-                 token_hash TEXT PRIMARY KEY,
-                 expires INTEGER NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS tokens (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 name TEXT NOT NULL,
-                 token_hash TEXT NOT NULL UNIQUE,
-                 created INTEGER NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS hue (
-                 id INTEGER PRIMARY KEY CHECK (id = 1),
-                 ip TEXT NOT NULL,
-                 app_key TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS groups (
-                 name TEXT PRIMARY KEY
-             );
-             CREATE TABLE IF NOT EXISTS group_members (
-                 group_name TEXT NOT NULL REFERENCES groups(name) ON DELETE CASCADE,
-                 entity_id TEXT NOT NULL,
-                 pos INTEGER NOT NULL,
-                 PRIMARY KEY (group_name, entity_id)
-             );",
-        )?;
-        // Databases created before token usage tracking lack this column.
-        let has_last_used = conn
-            .prepare("SELECT 1 FROM pragma_table_info('tokens') WHERE name = 'last_used'")?
-            .exists([])?;
-        if !has_last_used {
-            conn.execute("ALTER TABLE tokens ADD COLUMN last_used INTEGER", [])?;
-        }
-        // Databases created before group lights existed lack this column.
-        let has_expose = conn
-            .prepare("SELECT 1 FROM pragma_table_info('groups') WHERE name = 'expose_light'")?
-            .exists([])?;
-        if !has_expose {
-            conn.execute(
-                "ALTER TABLE groups ADD COLUMN expose_light INTEGER NOT NULL DEFAULT 0",
-                [],
-            )?;
-        }
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
-    }
-
-    fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    async fn init(pool: SqlitePool) -> sqlx::Result<Self> {
+        upgrade_unversioned(&pool).await?;
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .map_err(sqlx::Error::from)?;
+        Ok(Self { pool })
     }
 
     // owner
 
-    pub fn owner_hash(&self) -> Option<String> {
-        self.conn()
-            .query_row("SELECT password_hash FROM owner WHERE id = 1", [], |r| {
-                r.get(0)
-            })
-            .optional()
+    pub async fn owner_hash(&self) -> Option<String> {
+        sqlx::query_scalar("SELECT password_hash FROM owner WHERE id = 1")
+            .fetch_optional(&self.pool)
+            .await
             .ok()
             .flatten()
     }
 
     /// Returns false if an owner already exists.
-    pub fn set_owner_if_absent(&self, password_hash: &str) -> bool {
-        self.conn()
-            .execute(
-                "INSERT OR IGNORE INTO owner (id, password_hash) VALUES (1, ?1)",
-                params![password_hash],
-            )
-            .map(|n| n == 1)
+    pub async fn set_owner_if_absent(&self, password_hash: &str) -> bool {
+        sqlx::query("INSERT OR IGNORE INTO owner (id, password_hash) VALUES (1, ?1)")
+            .bind(password_hash)
+            .execute(&self.pool)
+            .await
+            .map(|r| r.rows_affected() == 1)
             .unwrap_or(false)
     }
 
     // sessions
 
-    pub fn create_session(&self, token_hash: &str) {
+    pub async fn create_session(&self, token_hash: &str) {
         let expires = now_secs() + SESSION_TTL_SECS;
-        let conn = self.conn();
-        let _ = conn.execute(
-            "DELETE FROM sessions WHERE expires < ?1",
-            params![now_secs()],
-        );
-        let _ = conn.execute(
-            "INSERT OR REPLACE INTO sessions (token_hash, expires) VALUES (?1, ?2)",
-            params![token_hash, expires],
-        );
+        let _ = sqlx::query("DELETE FROM sessions WHERE expires < ?1")
+            .bind(now_secs())
+            .execute(&self.pool)
+            .await;
+        let _ =
+            sqlx::query("INSERT OR REPLACE INTO sessions (token_hash, expires) VALUES (?1, ?2)")
+                .bind(token_hash)
+                .bind(expires)
+                .execute(&self.pool)
+                .await;
     }
 
-    pub fn session_valid(&self, token_hash: &str) -> bool {
-        self.conn()
-            .query_row(
-                "SELECT 1 FROM sessions WHERE token_hash = ?1 AND expires > ?2",
-                params![token_hash, now_secs()],
-                |_| Ok(()),
-            )
-            .optional()
-            .map(|o| o.is_some())
-            .unwrap_or(false)
+    pub async fn session_valid(&self, token_hash: &str) -> bool {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM sessions WHERE token_hash = ?1 AND expires > ?2",
+        )
+        .bind(token_hash)
+        .bind(now_secs())
+        .fetch_optional(&self.pool)
+        .await
+        .map(|o| o.is_some())
+        .unwrap_or(false)
     }
 
-    pub fn delete_session(&self, token_hash: &str) {
-        let _ = self.conn().execute(
-            "DELETE FROM sessions WHERE token_hash = ?1",
-            params![token_hash],
-        );
+    pub async fn delete_session(&self, token_hash: &str) {
+        let _ = sqlx::query("DELETE FROM sessions WHERE token_hash = ?1")
+            .bind(token_hash)
+            .execute(&self.pool)
+            .await;
     }
 
     // long-lived tokens (only the hash is stored)
 
-    pub fn create_token(&self, name: &str, token_hash: &str) -> Option<i64> {
-        let conn = self.conn();
-        conn.execute(
-            "INSERT INTO tokens (name, token_hash, created) VALUES (?1, ?2, ?3)",
-            params![name, token_hash, now_secs()],
-        )
-        .ok()?;
-        Some(conn.last_insert_rowid())
+    pub async fn create_token(&self, name: &str, token_hash: &str) -> Option<i64> {
+        sqlx::query("INSERT INTO tokens (name, token_hash, created) VALUES (?1, ?2, ?3)")
+            .bind(name)
+            .bind(token_hash)
+            .bind(now_secs())
+            .execute(&self.pool)
+            .await
+            .ok()
+            .map(|r| r.last_insert_rowid())
     }
 
-    pub fn list_tokens(&self) -> Vec<TokenInfo> {
-        let conn = self.conn();
-        let Ok(mut stmt) =
-            conn.prepare("SELECT id, name, created, last_used FROM tokens ORDER BY id")
-        else {
-            return Vec::new();
-        };
-        stmt.query_map([], |r| {
-            Ok(TokenInfo {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                created: r.get(2)?,
-                last_used: r.get(3)?,
+    pub async fn list_tokens(&self) -> Vec<TokenInfo> {
+        sqlx::query("SELECT id, name, created, last_used FROM tokens ORDER BY id")
+            .fetch_all(&self.pool)
+            .await
+            .map(|rows| {
+                rows.iter()
+                    .map(|r| TokenInfo {
+                        id: r.get(0),
+                        name: r.get(1),
+                        created: r.get(2),
+                        last_used: r.get(3),
+                    })
+                    .collect()
             })
-        })
-        .map(|rows| rows.filter_map(Result::ok).collect())
-        .unwrap_or_default()
+            .unwrap_or_default()
     }
 
-    pub fn revoke_token(&self, id: i64) -> bool {
-        self.conn()
-            .execute("DELETE FROM tokens WHERE id = ?1", params![id])
-            .map(|n| n > 0)
+    pub async fn revoke_token(&self, id: i64) -> bool {
+        sqlx::query("DELETE FROM tokens WHERE id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map(|r| r.rows_affected() > 0)
             .unwrap_or(false)
     }
 
-    pub fn token_valid(&self, token_hash: &str) -> bool {
-        let conn = self.conn();
-        let valid = conn
-            .query_row(
-                "SELECT 1 FROM tokens WHERE token_hash = ?1",
-                params![token_hash],
-                |_| Ok(()),
-            )
-            .optional()
+    pub async fn token_valid(&self, token_hash: &str) -> bool {
+        let valid = sqlx::query_scalar::<_, i64>("SELECT 1 FROM tokens WHERE token_hash = ?1")
+            .bind(token_hash)
+            .fetch_optional(&self.pool)
+            .await
             .map(|o| o.is_some())
             .unwrap_or(false);
         if valid {
             // Throttled so a polling client does not write on every request.
             let now = now_secs();
-            let _ = conn.execute(
+            let _ = sqlx::query(
                 "UPDATE tokens SET last_used = ?2
                  WHERE token_hash = ?1 AND (last_used IS NULL OR last_used < ?3)",
-                params![token_hash, now, now - 60],
-            );
+            )
+            .bind(token_hash)
+            .bind(now)
+            .bind(now - 60)
+            .execute(&self.pool)
+            .await;
         }
         valid
     }
 
     // Hue bridge
 
-    pub fn hue_get(&self) -> Option<HueBridge> {
-        self.conn()
-            .query_row("SELECT ip, app_key FROM hue WHERE id = 1", [], |r| {
-                Ok(HueBridge {
-                    ip: r.get(0)?,
-                    key: r.get(1)?,
-                })
-            })
-            .optional()
+    pub async fn hue_get(&self) -> Option<HueBridge> {
+        sqlx::query("SELECT ip, app_key FROM hue WHERE id = 1")
+            .fetch_optional(&self.pool)
+            .await
             .ok()
             .flatten()
+            .map(|r| HueBridge {
+                ip: r.get(0),
+                key: r.get(1),
+            })
     }
 
-    pub fn hue_set(&self, bridge: &HueBridge) {
-        let _ = self.conn().execute(
-            "INSERT OR REPLACE INTO hue (id, ip, app_key) VALUES (1, ?1, ?2)",
-            params![bridge.ip, bridge.key],
-        );
+    pub async fn hue_set(&self, bridge: &HueBridge) {
+        let _ = sqlx::query("INSERT OR REPLACE INTO hue (id, ip, app_key) VALUES (1, ?1, ?2)")
+            .bind(&bridge.ip)
+            .bind(&bridge.key)
+            .execute(&self.pool)
+            .await;
     }
 
     // groups
 
-    pub fn group_exists(&self, name: &str) -> bool {
-        self.conn()
-            .query_row(
-                "SELECT 1 FROM groups WHERE name = ?1",
-                params![name],
-                |_| Ok(()),
-            )
-            .optional()
+    pub async fn group_exists(&self, name: &str) -> bool {
+        sqlx::query_scalar::<_, i64>("SELECT 1 FROM groups WHERE name = ?1")
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await
             .map(|o| o.is_some())
             .unwrap_or(false)
     }
 
-    pub fn group_members(&self, name: &str) -> Vec<String> {
-        let conn = self.conn();
-        let Ok(mut stmt) =
-            conn.prepare("SELECT entity_id FROM group_members WHERE group_name = ?1 ORDER BY pos")
-        else {
-            return Vec::new();
-        };
-        stmt.query_map(params![name], |r| r.get(0))
-            .map(|rows| rows.filter_map(Result::ok).collect())
+    pub async fn group_members(&self, name: &str) -> Vec<String> {
+        sqlx::query_scalar("SELECT entity_id FROM group_members WHERE group_name = ?1 ORDER BY pos")
+            .bind(name)
+            .fetch_all(&self.pool)
+            .await
             .unwrap_or_default()
     }
 
-    pub fn group_names(&self) -> Vec<String> {
-        let conn = self.conn();
-        let Ok(mut stmt) = conn.prepare("SELECT name FROM groups ORDER BY name") else {
-            return Vec::new();
-        };
-        stmt.query_map([], |r| r.get(0))
-            .map(|rows| rows.filter_map(Result::ok).collect())
+    pub async fn group_names(&self) -> Vec<String> {
+        sqlx::query_scalar("SELECT name FROM groups ORDER BY name")
+            .fetch_all(&self.pool)
+            .await
             .unwrap_or_default()
     }
 
     /// Creates the group if needed and replaces its members (order preserved, duplicates dropped).
-    pub fn group_set(&self, name: &str, members: &[String]) -> rusqlite::Result<()> {
-        let mut conn = self.conn();
-        let tx = conn.transaction()?;
-        tx.execute(
-            "INSERT OR IGNORE INTO groups (name) VALUES (?1)",
-            params![name],
-        )?;
-        tx.execute(
-            "DELETE FROM group_members WHERE group_name = ?1",
-            params![name],
-        )?;
+    pub async fn group_set(&self, name: &str, members: &[String]) -> sqlx::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("INSERT OR IGNORE INTO groups (name) VALUES (?1)")
+            .bind(name)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM group_members WHERE group_name = ?1")
+            .bind(name)
+            .execute(&mut *tx)
+            .await?;
         let mut pos = 0i64;
         for m in members {
-            let n = tx.execute(
+            let n = sqlx::query(
                 "INSERT OR IGNORE INTO group_members (group_name, entity_id, pos) VALUES (?1, ?2, ?3)",
-                params![name, m, pos],
-            )?;
+            )
+            .bind(name)
+            .bind(m)
+            .bind(pos)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
             pos += n as i64;
         }
-        tx.commit()
+        tx.commit().await
     }
 
     /// Whether the group is also exposed as a `light.domus_group_<name>` entity.
-    pub fn group_exposed(&self, name: &str) -> bool {
-        self.conn()
-            .query_row(
-                "SELECT expose_light FROM groups WHERE name = ?1",
-                params![name],
-                |r| r.get::<_, i64>(0),
-            )
-            .optional()
+    pub async fn group_exposed(&self, name: &str) -> bool {
+        sqlx::query_scalar::<_, i64>("SELECT expose_light FROM groups WHERE name = ?1")
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await
             .ok()
             .flatten()
             .is_some_and(|v| v != 0)
     }
 
     /// Returns false if the group does not exist.
-    pub fn group_set_exposed(&self, name: &str, exposed: bool) -> bool {
-        self.conn()
-            .execute(
-                "UPDATE groups SET expose_light = ?2 WHERE name = ?1",
-                params![name, exposed],
-            )
-            .map(|n| n > 0)
+    pub async fn group_set_exposed(&self, name: &str, exposed: bool) -> bool {
+        sqlx::query("UPDATE groups SET expose_light = ?2 WHERE name = ?1")
+            .bind(name)
+            .bind(exposed)
+            .execute(&self.pool)
+            .await
+            .map(|r| r.rows_affected() > 0)
             .unwrap_or(false)
     }
 
-    pub fn exposed_group_names(&self) -> Vec<String> {
-        let conn = self.conn();
-        let Ok(mut stmt) =
-            conn.prepare("SELECT name FROM groups WHERE expose_light != 0 ORDER BY name")
-        else {
-            return Vec::new();
-        };
-        stmt.query_map([], |r| r.get(0))
-            .map(|rows| rows.filter_map(Result::ok).collect())
+    pub async fn exposed_group_names(&self) -> Vec<String> {
+        sqlx::query_scalar("SELECT name FROM groups WHERE expose_light != 0 ORDER BY name")
+            .fetch_all(&self.pool)
+            .await
             .unwrap_or_default()
     }
 
-    pub fn group_delete(&self, name: &str) -> bool {
-        self.conn()
-            .execute("DELETE FROM groups WHERE name = ?1", params![name])
-            .map(|n| n > 0)
+    pub async fn group_delete(&self, name: &str) -> bool {
+        sqlx::query("DELETE FROM groups WHERE name = ?1")
+            .bind(name)
+            .execute(&self.pool)
+            .await
+            .map(|r| r.rows_affected() > 0)
             .unwrap_or(false)
     }
+}
+
+/// A single-connection in-memory pool; the connection never expires, or the data would vanish.
+async fn memory_pool() -> sqlx::Result<SqlitePool> {
+    SqlitePoolOptions::new()
+        .max_connections(1)
+        .idle_timeout(None)
+        .max_lifetime(None)
+        .connect_with(SqliteConnectOptions::from_str("sqlite::memory:")?)
+        .await
+}
+
+/// Databases created before versioned migrations lack two columns that the baseline
+/// migration only declares for fresh databases (`CREATE TABLE IF NOT EXISTS` skips them).
+async fn upgrade_unversioned(pool: &SqlitePool) -> sqlx::Result<()> {
+    if table_lacks_column(pool, "tokens", "last_used").await? {
+        sqlx::query("ALTER TABLE tokens ADD COLUMN last_used INTEGER")
+            .execute(pool)
+            .await?;
+    }
+    if table_lacks_column(pool, "groups", "expose_light").await? {
+        sqlx::query("ALTER TABLE groups ADD COLUMN expose_light INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+/// True only when the table exists but has no such column (a fresh database has no table yet,
+/// and the migration creates it with the column).
+async fn table_lacks_column(pool: &SqlitePool, table: &str, column: &str) -> sqlx::Result<bool> {
+    let table_exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM pragma_table_info(?1) LIMIT 1")
+        .bind(table)
+        .fetch_optional(pool)
+        .await?
+        .is_some();
+    if !table_exists {
+        return Ok(false);
+    }
+    let has_column =
+        sqlx::query_scalar::<_, i64>("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")
+            .bind(table)
+            .bind(column)
+            .fetch_optional(pool)
+            .await?
+            .is_some();
+    Ok(!has_column)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn owner_set_once() {
-        let s = Store::open_memory().unwrap();
-        assert!(s.owner_hash().is_none());
-        assert!(s.set_owner_if_absent("a"));
-        assert!(!s.set_owner_if_absent("b"));
-        assert_eq!(s.owner_hash().as_deref(), Some("a"));
+    #[tokio::test]
+    async fn owner_set_once() {
+        let s = Store::open_memory().await.unwrap();
+        assert!(s.owner_hash().await.is_none());
+        assert!(s.set_owner_if_absent("a").await);
+        assert!(!s.set_owner_if_absent("b").await);
+        assert_eq!(s.owner_hash().await.as_deref(), Some("a"));
     }
 
-    #[test]
-    fn token_lifecycle() {
-        let s = Store::open_memory().unwrap();
-        let id = s.create_token("watch", "h1").unwrap();
-        assert!(s.list_tokens()[0].last_used.is_none());
-        assert!(s.token_valid("h1"));
-        assert!(s.list_tokens()[0].last_used.is_some());
-        assert!(!s.token_valid("h2"));
-        assert_eq!(s.list_tokens().len(), 1);
-        assert_eq!(s.list_tokens()[0].name, "watch");
-        assert!(s.revoke_token(id));
-        assert!(!s.token_valid("h1"));
-        assert!(!s.revoke_token(id));
+    #[tokio::test]
+    async fn token_lifecycle() {
+        let s = Store::open_memory().await.unwrap();
+        let id = s.create_token("watch", "h1").await.unwrap();
+        assert!(s.list_tokens().await[0].last_used.is_none());
+        assert!(s.token_valid("h1").await);
+        assert!(s.list_tokens().await[0].last_used.is_some());
+        assert!(!s.token_valid("h2").await);
+        assert_eq!(s.list_tokens().await.len(), 1);
+        assert_eq!(s.list_tokens().await[0].name, "watch");
+        assert!(s.revoke_token(id).await);
+        assert!(!s.token_valid("h1").await);
+        assert!(!s.revoke_token(id).await);
     }
 
-    #[test]
-    fn session_lifecycle() {
-        let s = Store::open_memory().unwrap();
-        assert!(!s.session_valid("x"));
-        s.create_session("x");
-        assert!(s.session_valid("x"));
-        s.delete_session("x");
-        assert!(!s.session_valid("x"));
+    #[tokio::test]
+    async fn session_lifecycle() {
+        let s = Store::open_memory().await.unwrap();
+        assert!(!s.session_valid("x").await);
+        s.create_session("x").await;
+        assert!(s.session_valid("x").await);
+        s.delete_session("x").await;
+        assert!(!s.session_valid("x").await);
     }
 
-    #[test]
-    fn groups_keep_order_and_dedupe() {
-        let s = Store::open_memory().unwrap();
-        assert!(!s.group_exists("garmin"));
+    #[tokio::test]
+    async fn groups_keep_order_and_dedupe() {
+        let s = Store::open_memory().await.unwrap();
+        assert!(!s.group_exists("garmin").await);
         s.group_set(
             "garmin",
             &["light.b".into(), "light.a".into(), "light.b".into()],
         )
+        .await
         .unwrap();
-        assert!(s.group_exists("garmin"));
-        assert_eq!(s.group_members("garmin"), vec!["light.b", "light.a"]);
-        s.group_set("garmin", &["light.c".into()]).unwrap();
-        assert_eq!(s.group_members("garmin"), vec!["light.c"]);
-        assert_eq!(s.group_names(), vec!["garmin"]);
-        assert!(!s.group_exposed("garmin"));
-        assert!(s.group_set_exposed("garmin", true));
-        assert!(s.group_exposed("garmin"));
-        assert_eq!(s.exposed_group_names(), vec!["garmin"]);
-        s.group_set("garmin", &["light.d".into()]).unwrap();
-        assert!(s.group_exposed("garmin"), "editing members keeps the flag");
-        assert!(!s.group_set_exposed("nope", true));
-        assert!(s.group_delete("garmin"));
-        assert!(!s.group_exposed("garmin"));
-        assert!(s.group_members("garmin").is_empty());
+        assert!(s.group_exists("garmin").await);
+        assert_eq!(s.group_members("garmin").await, vec!["light.b", "light.a"]);
+        s.group_set("garmin", &["light.c".into()]).await.unwrap();
+        assert_eq!(s.group_members("garmin").await, vec!["light.c"]);
+        assert_eq!(s.group_names().await, vec!["garmin"]);
+        assert!(!s.group_exposed("garmin").await);
+        assert!(s.group_set_exposed("garmin", true).await);
+        assert!(s.group_exposed("garmin").await);
+        assert_eq!(s.exposed_group_names().await, vec!["garmin"]);
+        s.group_set("garmin", &["light.d".into()]).await.unwrap();
+        assert!(
+            s.group_exposed("garmin").await,
+            "editing members keeps the flag"
+        );
+        assert!(!s.group_set_exposed("nope", true).await);
+        assert!(s.group_delete("garmin").await);
+        assert!(!s.group_exposed("garmin").await);
+        assert!(s.group_members("garmin").await.is_empty());
     }
 
-    #[test]
-    fn hue_bridge_roundtrip() {
-        let s = Store::open_memory().unwrap();
-        assert!(s.hue_get().is_none());
+    #[tokio::test]
+    async fn hue_bridge_roundtrip() {
+        let s = Store::open_memory().await.unwrap();
+        assert!(s.hue_get().await.is_none());
         let b = HueBridge {
             ip: "192.168.1.2".into(),
             key: "k".into(),
         };
-        s.hue_set(&b);
-        assert_eq!(s.hue_get(), Some(b));
+        s.hue_set(&b).await;
+        assert_eq!(s.hue_get().await, Some(b));
     }
 
-    #[test]
-    fn legacy_groups_table_is_migrated() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
+    #[tokio::test]
+    async fn legacy_groups_table_is_migrated() {
+        let pool = memory_pool().await.unwrap();
+        sqlx::raw_sql(
             "CREATE TABLE groups (name TEXT PRIMARY KEY);
              INSERT INTO groups (name) VALUES ('old');",
         )
+        .execute(&pool)
+        .await
         .unwrap();
-        let s = Store::init(conn).unwrap();
-        assert!(s.group_exists("old"));
-        assert!(!s.group_exposed("old"));
-        assert!(s.group_set_exposed("old", true));
+        let s = Store::init(pool).await.unwrap();
+        assert!(s.group_exists("old").await);
+        assert!(!s.group_exposed("old").await);
+        assert!(s.group_set_exposed("old", true).await);
+    }
+
+    #[tokio::test]
+    async fn v0_1_0_database_keeps_its_data() {
+        let pool = memory_pool().await.unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE owner (id INTEGER PRIMARY KEY CHECK (id = 1), password_hash TEXT NOT NULL);
+             CREATE TABLE sessions (token_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
+             CREATE TABLE tokens (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+                 token_hash TEXT NOT NULL UNIQUE, created INTEGER NOT NULL, last_used INTEGER);
+             CREATE TABLE hue (id INTEGER PRIMARY KEY CHECK (id = 1), ip TEXT NOT NULL, app_key TEXT NOT NULL);
+             CREATE TABLE groups (name TEXT PRIMARY KEY, expose_light INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE group_members (
+                 group_name TEXT NOT NULL REFERENCES groups(name) ON DELETE CASCADE,
+                 entity_id TEXT NOT NULL, pos INTEGER NOT NULL, PRIMARY KEY (group_name, entity_id));
+             INSERT INTO owner VALUES (1, 'hash');
+             INSERT INTO tokens (name, token_hash, created) VALUES ('watch', 'th', 1);
+             INSERT INTO hue VALUES (1, '10.0.0.2', 'key');
+             INSERT INTO groups VALUES ('garmin', 1);
+             INSERT INTO group_members VALUES ('garmin', 'light.a', 0);",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let s = Store::init(pool).await.unwrap();
+        assert_eq!(s.owner_hash().await.as_deref(), Some("hash"));
+        assert!(s.token_valid("th").await);
+        assert_eq!(s.hue_get().await.unwrap().ip, "10.0.0.2");
+        assert!(s.group_exposed("garmin").await);
+        assert_eq!(s.group_members("garmin").await, vec!["light.a"]);
+    }
+
+    #[tokio::test]
+    async fn file_database_reopens_without_rerunning_migrations() {
+        let dir = std::env::temp_dir().join(format!("domus-store-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("domus.db");
+        {
+            let s = Store::open(&path).await.unwrap();
+            s.set_owner_if_absent("a").await;
+        }
+        let s = Store::open(&path).await.unwrap();
+        assert_eq!(s.owner_hash().await.as_deref(), Some("a"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
