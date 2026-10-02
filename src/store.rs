@@ -19,6 +19,9 @@ pub struct TokenInfo {
     pub last_used: Option<i64>,
     /// Group names the token may use; `None` means unrestricted.
     pub scope: Option<Vec<String>>,
+    pub read_only: bool,
+    /// Unix seconds after which the token stops working; `None` never expires.
+    pub expires: Option<i64>,
     pub user_id: Option<i64>,
     pub username: Option<String>,
 }
@@ -29,6 +32,8 @@ pub struct User {
     pub username: String,
     pub is_admin: bool,
     pub created: i64,
+    /// Groups the user may use; `None` is unrestricted. Always `None` for admins.
+    pub scope: Option<Vec<String>>,
 }
 
 fn user_row(r: &sqlx::sqlite::SqliteRow) -> User {
@@ -37,6 +42,7 @@ fn user_row(r: &sqlx::sqlite::SqliteRow) -> User {
         username: r.get(1),
         is_admin: r.get(2),
         created: r.get(3),
+        scope: parse_scope(r.get(4)),
     }
 }
 
@@ -46,6 +52,21 @@ pub type Scope = Option<Vec<String>>;
 fn parse_scope(raw: Option<String>) -> Scope {
     // An unreadable value must not widen access: it becomes an empty scope (nothing allowed).
     raw.map(|r| serde_json::from_str(&r).unwrap_or_default())
+}
+
+/// What an authenticated token may do: its own scope narrowed by its owner's, and read-only or not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenAuth {
+    pub scope: Scope,
+    pub read_only: bool,
+}
+
+/// The groups allowed by both scopes; `None` (unrestricted) yields to the other side.
+pub fn intersect_scope(a: &Scope, b: &Scope) -> Scope {
+    match (a, b) {
+        (None, other) | (other, None) => other.clone(),
+        (Some(x), Some(y)) => Some(x.iter().filter(|g| y.contains(g)).cloned().collect()),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,14 +149,14 @@ impl Store {
     /// The user and their password hash, for logging in.
     pub async fn user_login(&self, username: &str) -> Option<(User, String)> {
         sqlx::query(
-            "SELECT id, username, is_admin, created, password_hash FROM users WHERE username = ?1",
+            "SELECT id, username, is_admin, created, scope, password_hash FROM users WHERE username = ?1",
         )
         .bind(username)
         .fetch_optional(&self.pool)
         .await
         .ok()
         .flatten()
-        .map(|r| (user_row(&r), r.get(4)))
+        .map(|r| (user_row(&r), r.get(5)))
     }
 
     pub async fn user_hash(&self, id: i64) -> Option<String> {
@@ -148,7 +169,7 @@ impl Store {
     }
 
     pub async fn list_users(&self) -> Vec<User> {
-        sqlx::query("SELECT id, username, is_admin, created FROM users ORDER BY id")
+        sqlx::query("SELECT id, username, is_admin, created, scope FROM users ORDER BY id")
             .fetch_all(&self.pool)
             .await
             .map(|rows| rows.iter().map(user_row).collect())
@@ -166,6 +187,18 @@ impl Store {
         sqlx::query("UPDATE users SET password_hash = ?2 WHERE id = ?1")
             .bind(id)
             .bind(password_hash)
+            .execute(&self.pool)
+            .await
+            .map(|r| r.rows_affected() > 0)
+            .unwrap_or(false)
+    }
+
+    /// Sets the user's group limit; `None` removes it.
+    pub async fn set_user_scope(&self, id: i64, scope: Option<&[String]>) -> bool {
+        let scope = scope.map(|s| serde_json::to_string(s).unwrap_or_else(|_| "[]".into()));
+        sqlx::query("UPDATE users SET scope = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(scope)
             .execute(&self.pool)
             .await
             .map(|r| r.rows_affected() > 0)
@@ -220,7 +253,7 @@ impl Store {
 
     pub async fn session_user(&self, token_hash: &str) -> Option<User> {
         sqlx::query(
-            "SELECT u.id, u.username, u.is_admin, u.created FROM sessions s
+            "SELECT u.id, u.username, u.is_admin, u.created, u.scope FROM sessions s
              JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?1 AND s.expires > ?2",
         )
         .bind(token_hash)
@@ -255,16 +288,27 @@ impl Store {
         name: &str,
         token_hash: &str,
         scope: Option<&[String]>,
+        read_only: bool,
+        expires: Option<i64>,
     ) -> Option<i64> {
         let scope = scope.map(|s| serde_json::to_string(s).unwrap_or_else(|_| "[]".into()));
+        let now = now_secs();
+        // Expired tokens never authenticate; this just keeps the table tidy.
+        let _ = sqlx::query("DELETE FROM tokens WHERE expires IS NOT NULL AND expires < ?1")
+            .bind(now)
+            .execute(&self.pool)
+            .await;
         sqlx::query(
-            "INSERT INTO tokens (name, token_hash, created, scope, user_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO tokens (name, token_hash, created, scope, user_id, read_only, expires)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )
         .bind(name)
         .bind(token_hash)
-        .bind(now_secs())
+        .bind(now)
         .bind(scope)
         .bind(user_id)
+        .bind(read_only)
+        .bind(expires)
         .execute(&self.pool)
         .await
         .ok()
@@ -274,7 +318,7 @@ impl Store {
     /// All tokens, or only those of `user_id` when given.
     pub async fn list_tokens(&self, user_id: Option<i64>) -> Vec<TokenInfo> {
         sqlx::query(
-            "SELECT t.id, t.name, t.created, t.last_used, t.scope, t.user_id, u.username
+            "SELECT t.id, t.name, t.created, t.last_used, t.scope, t.user_id, u.username, t.read_only, t.expires
              FROM tokens t LEFT JOIN users u ON u.id = t.user_id
              WHERE ?1 IS NULL OR t.user_id = ?1 ORDER BY t.id",
         )
@@ -291,6 +335,8 @@ impl Store {
                     scope: parse_scope(r.get(4)),
                     user_id: r.get(5),
                     username: r.get(6),
+                    read_only: r.get(7),
+                    expires: r.get(8),
                 })
                 .collect()
         })
@@ -308,18 +354,24 @@ impl Store {
             .unwrap_or(false)
     }
 
-    /// Authenticates a token by its hash: `None` if unknown, otherwise its scope.
-    pub async fn token_scope(&self, token_hash: &str) -> Option<Scope> {
-        // Outer Option: is there such a token; inner: its (nullable) scope column.
-        let row: Option<Option<String>> =
-            sqlx::query_scalar("SELECT scope FROM tokens WHERE token_hash = ?1")
-                .bind(token_hash)
-                .fetch_optional(&self.pool)
-                .await
-                .ok()
-                .flatten();
-        let scope = row.map(parse_scope);
-        if scope.is_some() {
+    /// Authenticates a token by its hash: `None` if unknown or expired. The scope is the token's
+    /// own narrowed by its owner's, so shrinking a user's groups shrinks their tokens too.
+    pub async fn token_auth(&self, token_hash: &str) -> Option<TokenAuth> {
+        let row = sqlx::query(
+            "SELECT t.scope, t.read_only, u.scope FROM tokens t LEFT JOIN users u ON u.id = t.user_id
+             WHERE t.token_hash = ?1 AND (t.expires IS NULL OR t.expires > ?2)",
+        )
+        .bind(token_hash)
+        .bind(now_secs())
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten();
+        let auth = row.map(|r| TokenAuth {
+            scope: intersect_scope(&parse_scope(r.get(0)), &parse_scope(r.get(2))),
+            read_only: r.get(1),
+        });
+        if auth.is_some() {
             // Throttled so a polling client does not write on every request.
             let now = now_secs();
             let _ = sqlx::query(
@@ -332,7 +384,7 @@ impl Store {
             .execute(&self.pool)
             .await;
         }
-        scope
+        auth
     }
 
     // Hue bridge
@@ -528,12 +580,14 @@ mod tests {
         assert_eq!(s.list_users().await.len(), 2);
 
         s.create_session("sb", bob).await;
-        s.create_token(bob, "watch", "hb", None).await.unwrap();
+        s.create_token(bob, "watch", "hb", None, false, None)
+            .await
+            .unwrap();
         assert!(s.delete_user(bob).await);
         assert!(!s.delete_user(bob).await);
         assert!(s.session_user("sb").await.is_none());
         assert!(
-            s.token_scope("hb").await.is_none(),
+            s.token_auth("hb").await.is_none(),
             "tokens go with the user"
         );
         assert_eq!(s.list_users().await[0].id, admin);
@@ -546,36 +600,101 @@ mod tests {
             s.create_user("a", "x", false).await.unwrap(),
             s.create_user("b", "x", false).await.unwrap(),
         );
-        let id = s.create_token(a, "watch", "h1", None).await.unwrap();
-        s.create_token(b, "other", "h3", None).await.unwrap();
+        let id = s
+            .create_token(a, "watch", "h1", None, false, None)
+            .await
+            .unwrap();
+        s.create_token(b, "other", "h3", None, false, None)
+            .await
+            .unwrap();
         assert!(s.list_tokens(Some(a)).await[0].last_used.is_none());
-        assert!(s.token_scope("h1").await.is_some());
+        assert!(s.token_auth("h1").await.is_some());
         assert!(s.list_tokens(Some(a)).await[0].last_used.is_some());
-        assert!(!s.token_scope("h2").await.is_some());
+        assert!(!s.token_auth("h2").await.is_some());
         assert_eq!(s.list_tokens(Some(a)).await.len(), 1);
         assert_eq!(s.list_tokens(Some(a)).await[0].name, "watch");
         assert_eq!(s.list_tokens(None).await.len(), 2);
         assert_eq!(s.list_tokens(None).await[1].username.as_deref(), Some("b"));
         assert!(!s.revoke_token(id, Some(b)).await, "not b's token");
         assert!(s.revoke_token(id, Some(a)).await);
-        assert!(!s.token_scope("h1").await.is_some());
+        assert!(!s.token_auth("h1").await.is_some());
         assert!(!s.revoke_token(id, None).await);
     }
 
     #[tokio::test]
     async fn token_scope_roundtrip() {
         let s = Store::open_memory().await.unwrap();
-        s.create_token(1, "open", "h-open", None).await.unwrap();
-        let scope = ["a".to_string(), "b".to_string()];
-        s.create_token(1, "scoped", "h-scoped", Some(&scope))
+        s.create_token(1, "open", "h-open", None, false, None)
             .await
             .unwrap();
-        assert_eq!(s.token_scope("h-open").await, Some(None));
-        assert_eq!(s.token_scope("h-scoped").await, Some(Some(scope.to_vec())));
-        assert_eq!(s.token_scope("nope").await, None);
+        let scope = ["a".to_string(), "b".to_string()];
+        s.create_token(1, "scoped", "h-scoped", Some(&scope), false, None)
+            .await
+            .unwrap();
+        let scope_of = async |h: &str| s.token_auth(h).await.map(|a| a.scope);
+        assert_eq!(scope_of("h-open").await, Some(None));
+        assert_eq!(scope_of("h-scoped").await, Some(Some(scope.to_vec())));
+        assert_eq!(scope_of("nope").await, None);
         let list = s.list_tokens(None).await;
         assert_eq!(list[0].scope, None);
         assert_eq!(list[1].scope.as_deref(), Some(&scope[..]));
+    }
+
+    fn scope(groups: &[&str]) -> Scope {
+        Some(groups.iter().map(|g| g.to_string()).collect())
+    }
+
+    #[test]
+    fn scopes_intersect() {
+        assert_eq!(intersect_scope(&None, &None), None);
+        assert_eq!(intersect_scope(&None, &scope(&["a"])), scope(&["a"]));
+        assert_eq!(intersect_scope(&scope(&["a"]), &None), scope(&["a"]));
+        assert_eq!(
+            intersect_scope(&scope(&["a", "b"]), &scope(&["b", "c"])),
+            scope(&["b"])
+        );
+        // nothing in common: nothing allowed, never everything
+        assert_eq!(intersect_scope(&scope(&["a"]), &scope(&["b"])), scope(&[]));
+    }
+
+    #[tokio::test]
+    async fn read_only_expiry_and_user_scope_shape_a_token() {
+        let s = Store::open_memory().await.unwrap();
+        let now = now_secs();
+        let u = s.create_user("u", "h", false).await.unwrap();
+        let ga = ["a".to_string(), "b".to_string()];
+        s.create_token(u, "ro", "h-ro", None, true, None)
+            .await
+            .unwrap();
+        s.create_token(u, "live", "h-live", Some(&ga), false, Some(now + 100))
+            .await
+            .unwrap();
+        s.create_token(u, "dead", "h-dead", None, false, Some(now - 1))
+            .await
+            .unwrap();
+        assert!(s.token_auth("h-ro").await.unwrap().read_only);
+        assert!(!s.token_auth("h-live").await.unwrap().read_only);
+        assert!(s.token_auth("h-dead").await.is_none(), "expired");
+        let list = s.list_tokens(None).await;
+        assert_eq!(list[1].expires, Some(now + 100));
+        assert!(list[0].read_only && list[0].expires.is_none());
+
+        // shrinking the owner's groups shrinks the token with it
+        assert!(s.set_user_scope(u, Some(&["b".to_string()])).await);
+        assert_eq!(s.token_auth("h-live").await.unwrap().scope, scope(&["b"]));
+        assert_eq!(s.token_auth("h-ro").await.unwrap().scope, scope(&["b"]));
+        assert!(s.set_user_scope(u, None).await);
+        assert_eq!(
+            s.token_auth("h-live").await.unwrap().scope,
+            scope(&["a", "b"])
+        );
+        assert_eq!(s.list_users().await[0].scope, None);
+
+        // creating a token tidies expired ones away
+        s.create_token(u, "new", "h-new", None, false, None)
+            .await
+            .unwrap();
+        assert_eq!(s.list_tokens(None).await.len(), 3);
     }
 
     #[test]
@@ -688,7 +807,7 @@ mod tests {
             1,
             "token now belongs to the admin"
         );
-        assert!(s.token_scope("th").await.is_some());
+        assert!(s.token_auth("th").await.is_some());
         assert_eq!(s.hue_get().await.unwrap().ip, "10.0.0.2");
         assert!(s.group_exposed("garmin").await);
         assert_eq!(s.group_members("garmin").await, vec!["light.a"]);

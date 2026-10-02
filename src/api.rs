@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::core::{CallError, Core, LightAction};
 use crate::hue::HueManager;
-use crate::store::Scope;
+use crate::store::TokenAuth;
 use crate::throttle::LoginGuard;
 use crate::util::sha256_hex;
 
@@ -55,29 +55,25 @@ fn bearer(req: &Request) -> Option<&str> {
 
 async fn require_token(State(app): State<AppState>, mut req: Request, next: Next) -> Response {
     let hash = bearer(&req).map(sha256_hex);
-    let scope = match hash {
-        Some(h) => app.core.store().token_scope(&h).await,
+    let auth = match hash {
+        Some(h) => app.core.store().token_auth(&h).await,
         None => None,
     };
-    match scope {
-        Some(scope) => {
-            req.extensions_mut().insert(TokenScope(scope));
+    match auth {
+        Some(auth) => {
+            req.extensions_mut().insert(auth);
             next.run(req).await
         }
         None => (StatusCode::UNAUTHORIZED, "401: Unauthorized").into_response(),
     }
 }
 
-/// The authenticated token's scope, attached to the request by `require_token`.
-#[derive(Clone)]
-struct TokenScope(Scope);
-
 async fn get_state(
     State(app): State<AppState>,
-    Extension(TokenScope(scope)): Extension<TokenScope>,
+    Extension(auth): Extension<TokenAuth>,
     Path(entity_id): Path<String>,
 ) -> Response {
-    if !app.core.allowed(&scope, &entity_id).await {
+    if !app.core.allowed(&auth.scope, &entity_id).await {
         return message(StatusCode::NOT_FOUND, "Entity not found.");
     }
     match app.core.lookup(&entity_id).await {
@@ -129,10 +125,13 @@ fn parse_body(body: &Bytes) -> Result<Value, &'static str> {
 
 async fn scene_service(
     State(app): State<AppState>,
-    Extension(TokenScope(scope)): Extension<TokenScope>,
+    Extension(auth): Extension<TokenAuth>,
     Path(service): Path<String>,
     body: Bytes,
 ) -> Response {
+    if auth.read_only {
+        return message(StatusCode::FORBIDDEN, "This token is read-only.");
+    }
     let body = match parse_body(&body) {
         Ok(b) => b,
         Err(e) => return message(StatusCode::BAD_REQUEST, e),
@@ -147,7 +146,7 @@ async fn scene_service(
     let mut changed = Vec::new();
     for id in ids.iter().filter(|i| i.starts_with("scene.")) {
         // Out-of-scope entities are ignored, like unknown ones.
-        if !app.core.allowed(&scope, id).await {
+        if !app.core.allowed(&auth.scope, id).await {
             continue;
         }
         match app.core.activate_scene(id).await {
@@ -164,10 +163,13 @@ async fn scene_service(
 
 async fn light_service(
     State(app): State<AppState>,
-    Extension(TokenScope(scope)): Extension<TokenScope>,
+    Extension(auth): Extension<TokenAuth>,
     Path(service): Path<String>,
     body: Bytes,
 ) -> Response {
+    if auth.read_only {
+        return message(StatusCode::FORBIDDEN, "This token is read-only.");
+    }
     let body = match parse_body(&body) {
         Ok(b) => b,
         Err(e) => return message(StatusCode::BAD_REQUEST, e),
@@ -187,7 +189,7 @@ async fn light_service(
     let mut changed = Vec::new();
     // A group may also hold scenes; those are not lights.
     for id in ids.iter().filter(|i| !i.starts_with("scene.")) {
-        if !app.core.allowed(&scope, id).await {
+        if !app.core.allowed(&auth.scope, id).await {
             continue;
         }
         match app.core.call_light(id, &action).await {
@@ -259,7 +261,7 @@ mod tests {
     async fn setup() -> (Router, AppState, Arc<Fake>) {
         let core = Core::new(Arc::new(Store::open_memory().await.unwrap()));
         core.store()
-            .create_token(1, "t", &sha256_hex(TOKEN), None)
+            .create_token(1, "t", &sha256_hex(TOKEN), None, false, None)
             .await;
         let fake = Arc::new(Fake(Mutex::new(Vec::new())));
         core.set_integration("fake", fake.clone());
@@ -349,6 +351,60 @@ mod tests {
                 .0,
             StatusCode::NOT_FOUND
         );
+    }
+
+    #[tokio::test]
+    async fn read_only_tokens_read_but_never_control() {
+        let (r, app, fake) = setup().await;
+        let store = app.core.store();
+        store
+            .create_token(1, "ro", &sha256_hex("ro"), None, true, None)
+            .await;
+        let t = Some("ro");
+        assert_eq!(
+            call(&r, "GET", "/api/states/light.hue_a", t, "").await.0,
+            StatusCode::OK
+        );
+        let body = r#"{"entity_id":"light.hue_a"}"#;
+        for uri in [
+            "/api/services/light/turn_on",
+            "/api/services/light/turn_off",
+            "/api/services/scene/turn_on",
+        ] {
+            assert_eq!(
+                call(&r, "POST", uri, t, body).await.0,
+                StatusCode::FORBIDDEN,
+                "{uri}"
+            );
+        }
+        assert!(fake.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn owner_group_limit_narrows_existing_tokens() {
+        let (r, app, _) = setup().await;
+        let store = app.core.store();
+        let owner = store.create_user("owner", "h", false).await.unwrap();
+        let token = "owned-token";
+        store
+            .create_token(owner, "o", &sha256_hex(token), None, false, None)
+            .await;
+        store
+            .group_set("Other", &["light.hue_c".into()])
+            .await
+            .unwrap();
+        app.core.set_state("light.hue_c", "off", Map::new());
+        let get = |id: &str| {
+            let (r, uri) = (r.clone(), format!("/api/states/{id}"));
+            async move { call(&r, "GET", &uri, Some(token), "").await.0 }
+        };
+        assert_eq!(get("light.hue_c").await, StatusCode::OK);
+        // the token itself is unrestricted, but its owner is limited to Garmin
+        store
+            .set_user_scope(owner, Some(&["Garmin".to_string()]))
+            .await;
+        assert_eq!(get("light.hue_a").await, StatusCode::OK);
+        assert_eq!(get("light.hue_c").await, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -538,7 +594,14 @@ mod tests {
         store.group_set_exposed("Garmin", true).await;
         let scope = ["Garmin".to_string()];
         store
-            .create_token(1, "scoped", &sha256_hex("scoped"), Some(&scope))
+            .create_token(
+                1,
+                "scoped",
+                &sha256_hex("scoped"),
+                Some(&scope),
+                false,
+                None,
+            )
             .await;
         let t = Some("scoped");
 

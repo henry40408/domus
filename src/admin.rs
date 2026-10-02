@@ -343,10 +343,22 @@ async fn user_create(
     }
 }
 
+/// Tells an absent field (`None`) from an explicit `null` (`Some(None)`).
+fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
+}
+
 #[derive(Deserialize)]
 struct UserUpdate {
     is_admin: Option<bool>,
     password: Option<String>,
+    /// Groups the user may use; `null` removes the limit, omitted leaves it alone.
+    #[serde(default, deserialize_with = "present")]
+    scope: Option<Option<Vec<String>>>,
 }
 
 async fn user_update(
@@ -367,8 +379,29 @@ async fn user_update(
     if body.is_admin == Some(false) && target.is_admin && store.admin_count().await <= 1 {
         return message(StatusCode::BAD_REQUEST, "Keep at least one admin.");
     }
+    let scope = match body.scope {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(groups)) => {
+            if body.is_admin.unwrap_or(target.is_admin) {
+                return message(StatusCode::BAD_REQUEST, "Admins are not limited to groups.");
+            }
+            match validate_scope(&app, groups).await {
+                Ok(groups) => Some(Some(groups)),
+                Err(e) => return message(StatusCode::BAD_REQUEST, &e),
+            }
+        }
+    };
+    if let Some(scope) = &scope {
+        store.set_user_scope(id, scope.as_deref()).await;
+        tracing::info!(target: "audit", by = %me.username, user = %target.username, scope = ?scope, "group limit changed");
+    }
     if let Some(admin) = body.is_admin {
         store.set_admin(id, admin).await;
+        if admin {
+            // Admins are never limited.
+            store.set_user_scope(id, None).await;
+        }
         tracing::info!(target: "audit", by = %me.username, user = %target.username, admin, "role changed");
     }
     if let Some(pw) = &body.password {
@@ -441,22 +474,25 @@ async fn hue_pair(State(app): State<AppState>, Json(body): Json<PairRequest>) ->
     }
 }
 
-async fn lights(State(app): State<AppState>) -> Json<Value> {
-    let list: Vec<Value> = app
+async fn lights(State(app): State<AppState>, Extension(me): Extension<User>) -> Json<Value> {
+    let states = app
         .core
         .all_states()
         .into_iter()
         .chain(app.core.group_lights().await)
-        .filter(|s| s.entity_id.starts_with("light.") || s.entity_id.starts_with("scene."))
-        .map(|s| {
-            json!({
-                "entity_id": s.entity_id,
-                "name": s.attributes.get("friendly_name").cloned().unwrap_or(Value::Null),
-                "state": s.state,
-                "brightness": s.attributes.get("brightness").cloned().unwrap_or(Value::Null),
-            })
-        })
-        .collect();
+        .filter(|s| s.entity_id.starts_with("light.") || s.entity_id.starts_with("scene."));
+    let mut list: Vec<Value> = Vec::new();
+    for s in states {
+        if !app.core.allowed(&me.scope, &s.entity_id).await {
+            continue;
+        }
+        list.push(json!({
+            "entity_id": s.entity_id,
+            "name": s.attributes.get("friendly_name").cloned().unwrap_or(Value::Null),
+            "state": s.state,
+            "brightness": s.attributes.get("brightness").cloned().unwrap_or(Value::Null),
+        }));
+    }
     Json(Value::Array(list))
 }
 
@@ -468,8 +504,15 @@ struct TestBody {
 }
 
 /// Runs a light or scene action from the admin page, so the setup can be tested without a watch.
-async fn device_test(State(app): State<AppState>, Json(body): Json<TestBody>) -> Response {
+async fn device_test(
+    State(app): State<AppState>,
+    Extension(me): Extension<User>,
+    Json(body): Json<TestBody>,
+) -> Response {
     let id = body.entity_id;
+    if !app.core.allowed(&me.scope, &id).await {
+        return message(StatusCode::NOT_FOUND, "Unknown entity.");
+    }
     let result = if id.starts_with("scene.") {
         app.core.activate_scene(&id).await
     } else if id.starts_with("light.") {
@@ -498,10 +541,13 @@ async fn device_test(State(app): State<AppState>, Json(body): Json<TestBody>) ->
     }
 }
 
-async fn groups(State(app): State<AppState>) -> Json<Value> {
+async fn groups(State(app): State<AppState>, Extension(me): Extension<User>) -> Json<Value> {
     let store = app.core.store();
     let mut list: Vec<Value> = Vec::new();
     for n in store.group_names().await {
+        if me.scope.as_ref().is_some_and(|g| !g.contains(&n)) {
+            continue;
+        }
         list.push(json!({
             "members": store.group_members(&n).await,
             "expose_light": store.group_exposed(&n).await,
@@ -588,11 +634,31 @@ async fn tokens(State(app): State<AppState>, Extension(me): Extension<User>) -> 
     Json(json!(app.core.store().list_tokens(token_owner(&me)).await))
 }
 
+/// Sorts and dedups a requested group list and checks it is non-empty and every group exists.
+async fn validate_scope(app: &AppState, mut groups: Vec<String>) -> Result<Vec<String>, String> {
+    groups.sort();
+    groups.dedup();
+    if groups.is_empty() {
+        return Err("Pick at least one group, or leave it unrestricted.".into());
+    }
+    for g in &groups {
+        if !app.core.store().group_exists(g).await {
+            return Err(format!("No such group: {g}."));
+        }
+    }
+    Ok(groups)
+}
+
 #[derive(Deserialize)]
 struct TokenBody {
     name: String,
-    /// Groups the token may use; omitted or null means unrestricted.
+    /// Groups the token may use; omitted or null means everything its owner may use.
     scope: Option<Vec<String>>,
+    /// May read states but not control anything.
+    #[serde(default)]
+    read_only: bool,
+    /// Days until the token stops working; omitted means never.
+    expires_days: Option<i64>,
 }
 
 async fn token_create(
@@ -607,23 +673,32 @@ async fn token_create(
             "Give the token a name (max 64 characters).",
         );
     }
-    let scope = match body.scope {
+    let requested = match body.scope {
         None => None,
-        Some(mut groups) => {
-            groups.sort();
-            groups.dedup();
-            if groups.is_empty() {
+        Some(groups) => match validate_scope(&app, groups).await {
+            Ok(groups) => Some(groups),
+            Err(e) => return message(StatusCode::BAD_REQUEST, &e),
+        },
+    };
+    // A limited user can only hand out what they have: no scope means "all of mine".
+    let scope = match (&me.scope, requested) {
+        (None, requested) => requested,
+        (Some(own), None) => Some(own.clone()),
+        (Some(own), Some(groups)) => {
+            if let Some(bad) = groups.iter().find(|g| !own.contains(g)) {
                 return message(
-                    StatusCode::BAD_REQUEST,
-                    "Pick at least one group, or leave the token unrestricted.",
+                    StatusCode::FORBIDDEN,
+                    &format!("Your account may not use the group {bad}."),
                 );
             }
-            for g in &groups {
-                if !app.core.store().group_exists(g).await {
-                    return message(StatusCode::BAD_REQUEST, &format!("No such group: {g}."));
-                }
-            }
             Some(groups)
+        }
+    };
+    let expires = match body.expires_days {
+        None => None,
+        Some(days) if (1..=3650).contains(&days) => Some(now_secs() + days * 86_400),
+        Some(_) => {
+            return message(StatusCode::BAD_REQUEST, "Expiry must be 1 to 3650 days.");
         }
     };
     // 128 bits of entropy; the prefix makes the token recognisable to people and secret scanners.
@@ -631,7 +706,14 @@ async fn token_create(
     match app
         .core
         .store()
-        .create_token(me.id, name, &sha256_hex(&token), scope.as_deref())
+        .create_token(
+            me.id,
+            name,
+            &sha256_hex(&token),
+            scope.as_deref(),
+            body.read_only,
+            expires,
+        )
         .await
     {
         // The plaintext is returned exactly once; only its hash is stored.
@@ -995,7 +1077,7 @@ mod tests {
         assert_eq!(revoke(&bob, &a).await, StatusCode::NOT_FOUND);
         assert_eq!(revoke(&admin, &b).await, StatusCode::OK);
         let hash = sha256_hex(a["token"].as_str().unwrap());
-        assert!(app.core.store().token_scope(&hash).await.is_some());
+        assert!(app.core.store().token_auth(&hash).await.is_some());
     }
 
     #[tokio::test]
@@ -1208,7 +1290,7 @@ mod tests {
         assert_eq!(s, StatusCode::OK);
         let hash = sha256_hex(v["token"].as_str().unwrap());
         assert_eq!(
-            app.core.store().token_scope(&hash).await,
+            app.core.store().token_auth(&hash).await.map(|a| a.scope),
             Some(Some(vec!["Garmin".to_string()]))
         );
         assert_eq!(post(r#"{"name":"open"}"#).await.0, StatusCode::OK);
@@ -1249,7 +1331,7 @@ mod tests {
         assert!(
             app.core
                 .store()
-                .token_scope(&sha256_hex(&token))
+                .token_auth(&sha256_hex(&token))
                 .await
                 .is_some()
         );
@@ -1278,7 +1360,7 @@ mod tests {
         assert!(
             !app.core
                 .store()
-                .token_scope(&sha256_hex(&token))
+                .token_auth(&sha256_hex(&token))
                 .await
                 .is_some()
         );
@@ -1678,6 +1760,158 @@ mod tests {
         let (s, h, _) = call(&r, "POST", "/api/domus/setup", None, &body("abc123")).await;
         assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
         assert!(h.contains_key("retry-after"));
+    }
+
+    #[tokio::test]
+    async fn limited_users_only_see_and_hand_out_their_groups() {
+        let (r, app) = setup_app().await;
+        let (admin, bob) = admin_and_member(&r).await;
+        app.core.set_integration("bridge", Arc::new(Bridge));
+        for id in ["light.hue_a", "light.hue_b"] {
+            app.core.set_state(id, "off", Map::new());
+        }
+        let store = app.core.store();
+        store
+            .group_set("G1", &["light.hue_a".into()])
+            .await
+            .unwrap();
+        store
+            .group_set("G2", &["light.hue_b".into()])
+            .await
+            .unwrap();
+        let bob_id = store.user_login("bob").await.unwrap().0.id;
+        let uri = format!("/api/domus/users/{bob_id}");
+        let put = |c: &str, uri: &str, body: &str| {
+            let (r, c, uri, body) = (r.clone(), c.to_string(), uri.to_string(), body.to_string());
+            async move { call(&r, "PUT", &uri, Some(&c), &body).await.0 }
+        };
+
+        // validation: unknown group, empty list, and admins cannot be limited
+        assert_eq!(
+            put(&admin, &uri, r#"{"scope":["Nope"]}"#).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            put(&admin, &uri, r#"{"scope":[]}"#).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            put(&admin, "/api/domus/users/1", r#"{"scope":["G1"]}"#).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            put(&admin, &uri, r#"{"scope":["G1"]}"#).await,
+            StatusCode::OK
+        );
+        let (_, _, users) = call(&r, "GET", "/api/domus/users", Some(&admin), "").await;
+        assert_eq!(users[1]["scope"], json!(["G1"]));
+        assert!(users[0]["scope"].is_null());
+
+        // what bob can see and test is limited to G1
+        let (_, _, g) = call(&r, "GET", "/api/domus/groups", Some(&bob), "").await;
+        assert_eq!(g.as_array().unwrap().len(), 1);
+        assert_eq!(g[0]["name"], "G1");
+        let (_, _, l) = call(&r, "GET", "/api/domus/lights", Some(&bob), "").await;
+        let ids: Vec<_> = l
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["entity_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["light.hue_a"]);
+        let test = |c: &str, id: &str| {
+            let (r, c, body) = (
+                r.clone(),
+                c.to_string(),
+                format!(r#"{{"entity_id":"{id}"}}"#),
+            );
+            async move {
+                call(&r, "POST", "/api/domus/devices/test", Some(&c), &body)
+                    .await
+                    .0
+            }
+        };
+        assert_eq!(test(&bob, "light.hue_a").await, StatusCode::OK);
+        assert_eq!(test(&bob, "light.hue_b").await, StatusCode::NOT_FOUND);
+        assert_eq!(test(&admin, "light.hue_b").await, StatusCode::OK);
+
+        // tokens: default to bob's own groups, never beyond them
+        let mint = |body: &str| {
+            let (r, bob, body) = (r.clone(), bob.clone(), body.to_string());
+            async move { call(&r, "POST", "/api/domus/tokens", Some(&bob), &body).await }
+        };
+        let (s, _, _) = mint(r#"{"name":"x","scope":["G2"]}"#).await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        let (s, _, _) = mint(r#"{"name":"x","scope":["G1","G2"]}"#).await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        let (s, _, v) = mint(r#"{"name":"open"}"#).await;
+        assert_eq!(s, StatusCode::OK);
+        let auth = store
+            .token_auth(&sha256_hex(v["token"].as_str().unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(auth.scope, Some(vec!["G1".to_string()]));
+        assert_eq!(
+            mint(r#"{"name":"ok","scope":["G1"]}"#).await.0,
+            StatusCode::OK
+        );
+        // the admin is not limited
+        let (_, _, v) = call(
+            &r,
+            "POST",
+            "/api/domus/tokens",
+            Some(&admin),
+            r#"{"name":"a"}"#,
+        )
+        .await;
+        assert_eq!(
+            store
+                .token_auth(&sha256_hex(v["token"].as_str().unwrap()))
+                .await
+                .unwrap()
+                .scope,
+            None
+        );
+
+        // null lifts the limit; making someone admin clears it
+        assert_eq!(put(&admin, &uri, r#"{"scope":null}"#).await, StatusCode::OK);
+        assert_eq!(store.list_users().await[1].scope, None);
+        assert_eq!(test(&bob, "light.hue_b").await, StatusCode::OK);
+        assert_eq!(
+            put(&admin, &uri, r#"{"scope":["G1"]}"#).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            put(&admin, &uri, r#"{"is_admin":true}"#).await,
+            StatusCode::OK
+        );
+        assert_eq!(store.list_users().await[1].scope, None);
+    }
+
+    #[tokio::test]
+    async fn token_read_only_and_expiry_are_validated() {
+        let (r, app) = setup_app().await;
+        let (admin, _) = admin_and_member(&r).await;
+        let mint = |body: &str| {
+            let (r, c, body) = (r.clone(), admin.clone(), body.to_string());
+            async move { call(&r, "POST", "/api/domus/tokens", Some(&c), &body).await }
+        };
+        for bad in ["0", "-5", "3651"] {
+            let body = format!(r#"{{"name":"x","expires_days":{bad}}}"#);
+            assert_eq!(mint(&body).await.0, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        let (s, _, v) = mint(r#"{"name":"x","read_only":true,"expires_days":30}"#).await;
+        assert_eq!(s, StatusCode::OK);
+        let auth = app
+            .core
+            .store()
+            .token_auth(&sha256_hex(v["token"].as_str().unwrap()))
+            .await;
+        assert!(auth.unwrap().read_only);
+        let (_, _, list) = call(&r, "GET", "/api/domus/tokens", Some(&admin), "").await;
+        assert_eq!(list[0]["read_only"], true);
+        let left = list[0]["expires"].as_i64().unwrap() - now_secs();
+        assert!((30 * 86_400 - 5..=30 * 86_400).contains(&left));
     }
 
     #[tokio::test]
