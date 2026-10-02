@@ -79,22 +79,29 @@ function ago(secs) {
 
 const TABS = [
   ["dashboard", "📊", "Dashboard"],
-  ["groups", "🗂️", "Groups"],
+  ["groups", "🗂️", "Groups", true],
   ["devices", "💡", "Devices"],
   ["tokens", "🔑", "Tokens"],
+  ["users", "👥", "Users", true],
   ["settings", "⚙️", "Settings"],
 ];
 
-/** hue, entities (lights + scenes + group lights), groups, tokens */
+/** the logged-in user: { id, username, is_admin } */
+let me = null;
+const visibleTabs = () => TABS.filter(([, , , adminOnly]) => !adminOnly || me.is_admin);
+
+/** hue (admins only), entities (lights + scenes + group lights), groups, tokens, users (admins only) */
 let data = null;
 /** per-view state that survives re-renders */
 const ui = { tab: "dashboard", draft: null, sub: "pick", fresh: null };
 
 async function load() {
-  const [hue, entities, groups, tokens] = await Promise.all([
-    api("GET", "/hue"), api("GET", "/lights"), api("GET", "/groups"), api("GET", "/tokens"),
+  const [hue, entities, groups, tokens, users] = await Promise.all([
+    me.is_admin ? api("GET", "/hue") : null,
+    api("GET", "/lights"), api("GET", "/groups"), api("GET", "/tokens"),
+    me.is_admin ? api("GET", "/users") : [],
   ]);
-  data = { hue, entities, groups, tokens };
+  data = { hue, entities, groups, tokens, users };
 }
 
 const isScene = (e) => e.entity_id.startsWith("scene.");
@@ -107,19 +114,20 @@ const label = (id) => { const e = find(id); return (e && e.name) || id; };
 // ------------------------------------------------------------ auth screen
 
 function authScreen(setupDone) {
+  const user = el("input", { type: "text", placeholder: "Username", autocomplete: "username" });
   const pw = el("input", { type: "password", placeholder: "Password", autocomplete: setupDone ? "current-password" : "new-password" });
   const go = el("button", {
     class: "primary",
     onclick: () => guarded(async () => {
-      await api("POST", setupDone ? "/login" : "/setup", { password: pw.value });
+      await api("POST", setupDone ? "/login" : "/setup", { username: user.value, password: pw.value });
       await start();
     }),
-  }, setupDone ? "Log in" : "Set password");
-  pw.addEventListener("keydown", (e) => { if (e.key === "Enter") go.click(); });
+  }, setupDone ? "Log in" : "Create admin");
+  for (const input of [user, pw]) input.addEventListener("keydown", (e) => { if (e.key === "Enter") go.click(); });
   root.replaceChildren(el("div", { class: "auth" },
     el("h2", {}, "domus"),
-    el("p", { class: "sub" }, setupDone ? "Log in to continue." : "First-time setup: choose the admin password (at least 8 characters)."),
-    pw, go));
+    el("p", { class: "sub" }, setupDone ? "Log in to continue." : "First-time setup: choose the admin username and password (at least 8 characters)."),
+    user, pw, go));
 }
 
 // ------------------------------------------------------------------ shell
@@ -127,20 +135,21 @@ function authScreen(setupDone) {
 function shell() {
   const main = el("main", {});
   const nav = el("nav", {}, el("h1", {}, "🏠 domus"),
-    ...TABS.map(([id, icon, name]) => el("a", {
+    ...visibleTabs().map(([id, icon, name]) => el("a", {
       class: "tab" + (id === ui.tab ? " active" : ""),
       href: "#" + id,
     }, icon + " " + name)),
-    el("div", { class: "bridge muted" },
-      el("span", { class: "dot" + (data.hue && data.hue.paired && data.hue.running ? "" : " off") }),
-      !data.hue || !data.hue.paired ? "Bridge not paired" : data.hue.running ? "Bridge connected" : "Bridge disconnected"));
+    data.hue ? el("div", { class: "bridge muted" },
+      el("span", { class: "dot" + (data.hue.paired && data.hue.running ? "" : " off") }),
+      !data.hue.paired ? "Bridge not paired" : data.hue.running ? "Bridge connected" : "Bridge disconnected") : "",
+    el("div", { class: "bridge muted" }, "Signed in as " + me.username));
   root.replaceChildren(el("div", { class: "app" }, nav, main));
   return main;
 }
 
 function render() {
   const main = shell();
-  const views = { dashboard, groups, devices, tokens, settings };
+  const views = { dashboard, groups, devices, tokens, users, settings };
   main.replaceChildren(...views[ui.tab]());
 }
 
@@ -163,8 +172,8 @@ function dashboard() {
       stat("Lights", String(lights.length), lights.filter((l) => l.state === "on").length + " on"),
       stat("Scenes", String(scenes().length), "from the Hue Bridge"),
       stat("Groups", String(data.groups.length), data.groups.filter((g) => g.expose_light).length + " with an all-lights switch"),
-      stat("Hue Bridge", !data.hue.paired ? "Not paired" : data.hue.running ? "Connected" : "Disconnected",
-        data.hue.paired ? data.hue.ip : "Pair it in Settings")),
+      data.hue ? stat("Hue Bridge", !data.hue.paired ? "Not paired" : data.hue.running ? "Connected" : "Disconnected",
+        data.hue.paired ? data.hue.ip : "Pair it in Settings") : ""),
     el("div", { class: "card" },
       el("h3", {}, "Set up hasscontrol on the watch"),
       el("ol", { class: "steps" },
@@ -432,6 +441,7 @@ function tokens() {
               await refresh();
             }),
           }, "Revoke"),
+          me.is_admin ? el("span", { class: "meta" }, "Owner " + (t.username || "unknown")) : "",
           el("span", { class: "meta" }, t.scope ? "Groups: " + t.scope.join(", ") : "Full access"),
           el("span", { class: "meta" }, "Created " + fmtDate(t.created)),
           el("span", { class: "meta" }, "Last used " + ago(t.last_used)))))
@@ -439,31 +449,101 @@ function tokens() {
   ];
 }
 
+// ------------------------------------------------------------------ users
+
+function users() {
+  const name = el("input", { type: "text", placeholder: "Username", autocomplete: "off" });
+  const pw = el("input", { type: "password", placeholder: "Password (at least 8 characters)", autocomplete: "new-password" });
+  const admin = el("input", { type: "checkbox" });
+  const create = () => guarded(async () => {
+    await api("POST", "/users", { username: name.value, password: pw.value, is_admin: admin.checked });
+    await refresh();
+    toast("User created", false);
+  });
+  pw.addEventListener("keydown", (e) => { if (e.key === "Enter") create(); });
+  return [
+    el("h2", {}, "Users"),
+    el("p", { class: "sub" }, "Admins manage everything; other users can only control lights and manage their own tokens."),
+    el("div", { class: "card" },
+      el("div", { class: "row" }, el("div", { class: "grow" }, name), el("div", { class: "grow" }, pw)),
+      el("div", { class: "row check", style: "margin:12px 0" },
+        el("label", {}, admin, " Admin"),
+        el("button", { class: "primary", onclick: create }, "Add user")),
+      el("ul", { class: "rows" }, ...data.users.map((u) => el("li", {},
+        el("span", { class: "name" }, u.username + (u.id === me.id ? " (you)" : "")),
+        u.id === me.id ? "" : el("button", {
+          class: "danger act",
+          onclick: () => guarded(async () => {
+            if (!confirm("Delete user “" + u.username + "”? Their tokens stop working.")) return;
+            await api("DELETE", "/users/" + u.id);
+            await refresh();
+          }),
+        }, "Delete"),
+        el("button", {
+          class: "act",
+          onclick: () => guarded(async () => {
+            const password = prompt("New password for " + u.username + " (at least 8 characters):");
+            if (!password) return;
+            await api("PUT", "/users/" + u.id, { password });
+            toast("Password changed; they must log in again.", false);
+          }),
+        }, "Reset password"),
+        el("button", {
+          class: "act",
+          onclick: () => guarded(async () => {
+            await api("PUT", "/users/" + u.id, { is_admin: !u.is_admin });
+            await refresh();
+          }),
+        }, u.is_admin ? "Make regular user" : "Make admin"),
+        el("span", { class: "meta" }, u.is_admin ? "Admin" : "User"),
+        el("span", { class: "meta" }, "Created " + fmtDate(u.created)))))),
+  ];
+}
+
 // --------------------------------------------------------------- settings
 
-function settings() {
+function hueCard() {
   const ip = el("input", { type: "text", placeholder: "Bridge IP, e.g. 192.168.1.2", value: data.hue.ip || "" });
+  return el("div", { class: "card" },
+    el("h3", {}, "Hue Bridge"),
+    el("p", {}, data.hue.paired
+      ? el("span", {}, el("span", { class: "dot" }), "Paired with ", el("code", {}, data.hue.ip), data.hue.running ? "" : " (not running)")
+      : "Not paired. Press the link button on the bridge, then click Pair."),
+    el("div", { class: "row" }, el("div", { class: "grow" }, ip),
+      el("button", {
+        class: "primary",
+        onclick: () => guarded(async () => {
+          await api("POST", "/hue/pair", { ip: ip.value });
+          await refresh();
+          toast("Paired", false);
+        }),
+      }, data.hue.paired ? "Re-pair" : "Pair")),
+    el("p", { class: "muted" }, "Press the bridge's link button first."));
+}
+
+function accountCard() {
+  const current = el("input", { type: "password", placeholder: "Current password", autocomplete: "current-password" });
+  const next = el("input", { type: "password", placeholder: "New password (at least 8 characters)", autocomplete: "new-password" });
+  const change = () => guarded(async () => {
+    await api("POST", "/password", { current: current.value, new: next.value });
+    current.value = next.value = "";
+    toast("Password changed", false);
+  });
+  next.addEventListener("keydown", (e) => { if (e.key === "Enter") change(); });
+  return el("div", { class: "card" },
+    el("h3", {}, "Account"),
+    el("p", {}, "Signed in as ", el("b", {}, me.username), me.is_admin ? " (admin)" : ""),
+    el("div", { class: "row" }, el("div", { class: "grow" }, current), el("div", { class: "grow" }, next),
+      el("button", { onclick: change }, "Change password")),
+    el("p", {}, el("button", { onclick: async () => { await api("POST", "/logout"); ui.draft = null; await start(); } }, "Log out")));
+}
+
+function settings() {
   return [
     el("h2", {}, "Settings"),
-    el("p", { class: "sub" }, "Hue Bridge and account."),
-    el("div", { class: "card" },
-      el("h3", {}, "Hue Bridge"),
-      el("p", {}, data.hue.paired
-        ? el("span", {}, el("span", { class: "dot" }), "Paired with ", el("code", {}, data.hue.ip), data.hue.running ? "" : " (not running)")
-        : "Not paired. Press the link button on the bridge, then click Pair."),
-      el("div", { class: "row" }, el("div", { class: "grow" }, ip),
-        el("button", {
-          class: "primary",
-          onclick: () => guarded(async () => {
-            await api("POST", "/hue/pair", { ip: ip.value });
-            await refresh();
-            toast("Paired", false);
-          }),
-        }, data.hue.paired ? "Re-pair" : "Pair")),
-      el("p", { class: "muted" }, "Press the bridge's link button first.")),
-    el("div", { class: "card" },
-      el("h3", {}, "Account"),
-      el("button", { onclick: async () => { await api("POST", "/logout"); ui.draft = null; await start(); } }, "Log out")),
+    el("p", { class: "sub" }, me.is_admin ? "Hue Bridge and account." : "Your account."),
+    me.is_admin ? hueCard() : "",
+    accountCard(),
   ];
 }
 
@@ -471,7 +551,7 @@ function settings() {
 
 function tabFromHash() {
   const t = location.hash.slice(1);
-  if (TABS.some(([id]) => id === t)) ui.tab = t;
+  if (visibleTabs().some(([id]) => id === t)) ui.tab = t;
 }
 
 window.addEventListener("hashchange", () => { if (data) { tabFromHash(); render(); } });
@@ -480,6 +560,8 @@ async function start() {
   const s = await api("GET", "/status");
   if (!s.setup_done) return authScreen(false);
   if (!s.logged_in) return authScreen(true);
+  me = s.user;
+  if (!visibleTabs().some(([id]) => id === ui.tab)) ui.tab = "dashboard";
   tabFromHash();
   await load();
   render();

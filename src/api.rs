@@ -238,7 +238,7 @@ mod tests {
     async fn setup() -> (Router, AppState, Arc<Fake>) {
         let core = Core::new(Arc::new(Store::open_memory().await.unwrap()));
         core.store()
-            .create_token("t", &sha256_hex(TOKEN), None)
+            .create_token(1, "t", &sha256_hex(TOKEN), None)
             .await;
         let fake = Arc::new(Fake(Mutex::new(Vec::new())));
         core.set_integration("fake", fake.clone());
@@ -520,7 +520,7 @@ mod tests {
         store.group_set_exposed("Garmin", true).await;
         let scope = ["Garmin".to_string()];
         store
-            .create_token("scoped", &sha256_hex("scoped"), Some(&scope))
+            .create_token(1, "scoped", &sha256_hex("scoped"), Some(&scope))
             .await;
         let t = Some("scoped");
 
