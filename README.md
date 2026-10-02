@@ -141,6 +141,7 @@ nginx must pass the scheme so the admin session cookie gets the `Secure` flag:
 ```
 location / {
     proxy_pass http://127.0.0.1:8123;
+    proxy_set_header Host $host;
     proxy_set_header X-Forwarded-Proto $scheme;
 }
 ```
@@ -151,7 +152,11 @@ For LAN-only use, get a certificate via DNS-01 (Let's Encrypt) for a name that r
 
 - The Hue application key is stored in plaintext in the SQLite DB; protect the data directory.
 - User passwords: argon2id. Access tokens: SHA-256 hashes. Sessions: HttpOnly, SameSite=Strict cookie.
-- There is no login rate limiting; do not expose the admin page to the open internet without one at the proxy.
+- Passwords: 12 to 128 characters, not equal to the username. The rule applies when a user is created or a password is set; existing passwords keep working.
+- Login throttling: after 5 failed attempts in a row for a username, further attempts are refused (HTTP 429, `Retry-After`) for 1 minute, doubling each time up to 15 minutes. A success resets it. It is kept in memory (a restart clears it), keyed by username rather than IP, and never locks an account permanently. Unknown usernames take the same time and are throttled the same way, so neither reveals which accounts exist. Add IP-based limits at the proxy if you expose the page to the internet.
+- State-changing admin requests from another site are refused (`Sec-Fetch-Site`, or `Origin` against `Host` / `X-Forwarded-Host`). Behind a proxy that rewrites `Host`, pass it through (see nginx above) or set `X-Forwarded-Host`.
+- Responses carry a CSP, `X-Frame-Options: DENY`, `nosniff` and `Referrer-Policy: no-referrer`; admin API responses are `no-store`, and HSTS is sent when the proxy sets `X-Forwarded-Proto: https`.
+- Security events (logins, lockouts, user and token changes) are logged at target `audit`, never with passwords or tokens.
 
 ## Not implemented (yet)
 

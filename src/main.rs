@@ -48,7 +48,7 @@ async fn main() {
     let core = Core::new(store);
     let hue = HueManager::new(core.clone());
     resume_hue(&core, &hue).await;
-    let app = build_app(AppState { core, hue });
+    let app = build_app(AppState::new(core, hue));
 
     let listener = match tokio::net::TcpListener::bind(env.bind).await {
         Ok(l) => l,

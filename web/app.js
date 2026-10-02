@@ -161,7 +161,7 @@ function authScreen(setupDone) {
   for (const input of [user, pw]) input.addEventListener("keydown", (e) => { if (e.key === "Enter") go.click(); });
   root.replaceChildren(el("div", { class: "auth" },
     el("h2", {}, "domus"),
-    el("p", { class: "sub" }, setupDone ? "Log in to continue." : "First-time setup: choose the admin username and password (at least 8 characters)."),
+    el("p", { class: "sub" }, setupDone ? "Log in to continue." : "First-time setup: choose the admin username and password (at least 12 characters)."),
     user, pw, go));
 }
 
@@ -498,7 +498,7 @@ function tokens() {
 
 function users() {
   const name = el("input", { type: "text", placeholder: "Username", autocomplete: "off" });
-  const pw = el("input", { type: "password", placeholder: "Password (at least 8 characters)", autocomplete: "new-password" });
+  const pw = el("input", { type: "password", placeholder: "Password (at least 12 characters)", autocomplete: "new-password" });
   const admin = el("input", { type: "checkbox" });
   const create = () => guarded(async () => {
     await api("POST", "/users", { username: name.value, password: pw.value, is_admin: admin.checked });
@@ -527,7 +527,7 @@ function users() {
         el("button", {
           class: "act",
           onclick: () => guarded(async () => {
-            const password = prompt("New password for " + u.username + " (at least 8 characters):");
+            const password = prompt("New password for " + u.username + " (at least 12 characters):");
             if (!password) return;
             await api("PUT", "/users/" + u.id, { password });
             toast("Password changed; they must log in again.", false);
@@ -568,7 +568,7 @@ function hueCard() {
 
 function accountCard() {
   const current = el("input", { type: "password", placeholder: "Current password", autocomplete: "current-password" });
-  const next = el("input", { type: "password", placeholder: "New password (at least 8 characters)", autocomplete: "new-password" });
+  const next = el("input", { type: "password", placeholder: "New password (at least 12 characters)", autocomplete: "new-password" });
   const change = () => guarded(async () => {
     await api("POST", "/password", { current: current.value, new: next.value });
     current.value = next.value = "";
