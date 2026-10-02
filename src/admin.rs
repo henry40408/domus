@@ -4,12 +4,17 @@ use axum::Extension;
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
+use futures_util::Stream;
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::convert::Infallible;
+use std::time::Duration;
+use tokio::sync::broadcast;
 
 use crate::api::AppState;
 use crate::core::{CallError, LightAction, group_light_id};
@@ -317,6 +322,52 @@ async fn sessions_revoke_others(
         .await;
     tracing::info!(target: "audit", user = %me.username, ended = n, "other sessions revoked");
     Json(json!({"ok": true, "ended": n})).into_response()
+}
+
+/// How often an open event stream re-checks that its session is still alive.
+const EVENTS_RECHECK: Duration = Duration::from_secs(30);
+
+/// Server-sent events for the admin page: one `change` event per entity the caller may see,
+/// carrying only the entity id (the page reloads the list). `*` means "events were missed,
+/// reload everything". The stream ends when the session does.
+async fn events(
+    State(app): State<AppState>,
+    Extension(me): Extension<User>,
+    headers: HeaderMap,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let hash = session_token(&headers)
+        .map(|t| sha256_hex(&t))
+        .unwrap_or_default();
+    let rx = app.core.subscribe();
+    let ticker =
+        tokio::time::interval_at(tokio::time::Instant::now() + EVENTS_RECHECK, EVENTS_RECHECK);
+    let stream = futures_util::stream::unfold((rx, ticker), move |(mut rx, mut ticker)| {
+        let (app, me, hash) = (app.clone(), me.clone(), hash.clone());
+        async move {
+            loop {
+                let id = tokio::select! {
+                    got = rx.recv() => match got {
+                        Ok(id) => {
+                            if !app.core.allowed(&me.scope, &id).await {
+                                continue;
+                            }
+                            id
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => "*".to_string(),
+                        Err(broadcast::error::RecvError::Closed) => return None,
+                    },
+                    _ = ticker.tick() => {
+                        if app.core.store().session_valid(&hash).await {
+                            continue;
+                        }
+                        return None;
+                    }
+                };
+                return Some((Ok(Event::default().event("change").data(id)), (rx, ticker)));
+            }
+        }
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 #[derive(Deserialize)]
@@ -826,6 +877,7 @@ pub fn router(app: AppState) -> Router {
     let protected = Router::new()
         .route("/logout", post(logout))
         .route("/password", post(password_change))
+        .route("/events", get(events))
         .route("/sessions", get(sessions))
         .route("/sessions/revoke-others", post(sessions_revoke_others))
         .route("/sessions/{id}", delete(session_revoke))
@@ -1130,6 +1182,76 @@ mod tests {
         assert_eq!(revoke(&admin, &b).await, StatusCode::OK);
         let hash = sha256_hex(a["token"].as_str().unwrap());
         assert!(app.core.store().token_auth(&hash).await.is_some());
+    }
+
+    /// Opens `/events` and returns the response; `next_event` then reads it frame by frame.
+    async fn open_events(r: &Router, cookie: Option<&str>) -> Response {
+        let mut b = HttpRequest::builder().uri("/api/domus/events");
+        if let Some(c) = cookie {
+            b = b.header("cookie", c);
+        }
+        r.clone()
+            .oneshot(b.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn next_event(body: &mut Body) -> String {
+        loop {
+            let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
+                .await
+                .expect("an event within 2s")
+                .expect("stream still open")
+                .unwrap();
+            if let Ok(data) = frame.into_data() {
+                let text = String::from_utf8(data.to_vec()).unwrap();
+                if !text.starts_with(':') {
+                    return text;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn events_stream_only_what_the_user_may_see() {
+        let (r, app) = setup_app().await;
+        let (admin, bob) = admin_and_member(&r).await;
+        let store = app.core.store();
+        store
+            .group_set("G", &["light.a".to_string()])
+            .await
+            .unwrap();
+        let bob_id = store.user_login("bob").await.unwrap().0.id;
+        assert!(store.set_user_scope(bob_id, Some(&["G".to_string()])).await);
+
+        assert_eq!(
+            open_events(&r, None).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let resp = open_events(&r, Some(&admin)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "text/event-stream");
+        let mut admin_stream = resp.into_body();
+        let mut bob_stream = open_events(&r, Some(&bob)).await.into_body();
+
+        app.core.set_state("light.b", "on", Map::new());
+        app.core.set_state("light.a", "on", Map::new());
+
+        // the admin sees both, in order
+        assert_eq!(
+            next_event(&mut admin_stream).await,
+            "event: change\ndata: light.b\n\n"
+        );
+        assert_eq!(
+            next_event(&mut admin_stream).await,
+            "event: change\ndata: light.a\n\n"
+        );
+        // bob is limited to group G, so light.b never reaches him
+        assert_eq!(
+            next_event(&mut bob_stream).await,
+            "event: change\ndata: light.a\n\n"
+        );
     }
 
     #[tokio::test]

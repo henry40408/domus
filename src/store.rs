@@ -298,6 +298,23 @@ impl Store {
         Some(user)
     }
 
+    /// Whether the session is still alive, without counting as activity (long-lived streams
+    /// use this so an open tab does not defeat the idle timeout).
+    pub async fn session_valid(&self, token_hash: &str) -> bool {
+        let now = now_secs();
+        sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM sessions WHERE token_hash = ?1 AND expires > ?2 AND last_seen > ?3",
+        )
+        .bind(token_hash)
+        .bind(now)
+        .bind(now - SESSION_IDLE_SECS)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+    }
+
     /// The user's live sessions, newest first; `current_hash` marks the caller's own.
     pub async fn list_sessions(&self, user_id: i64, current_hash: &str) -> Vec<SessionInfo> {
         let now = now_secs();
@@ -815,10 +832,15 @@ mod tests {
         set_seen(120).await;
         assert!(s.session_user("a").await.is_some());
         assert!(seen().await >= now_secs() - 1);
+        // checking validity never counts as activity
+        set_seen(120).await;
+        assert!(s.session_valid("a").await);
+        assert!(seen().await <= now_secs() - 119);
 
         // idle for a day: dead, hidden and swept by the next login
         set_seen(SESSION_IDLE_SECS + 5).await;
         assert!(s.session_user("a").await.is_none());
+        assert!(!s.session_valid("a").await);
         assert!(s.list_sessions(id, "a").await.is_empty());
         s.create_session("b", id, "").await;
         assert_eq!(s.list_sessions(id, "b").await.len(), 1);

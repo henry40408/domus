@@ -662,7 +662,46 @@ function tabFromHash() {
 
 window.addEventListener("hashchange", () => { if (data) { tabFromHash(); render(); } });
 
+// ------------------------------------------------------------ live updates
+
+// The server pushes the id of every light or scene that changes; we just reload the list
+// (debounced) and redraw only the views that show it, so forms being edited are left alone.
+let events = null;
+let liveTimer = null;
+
+function stopLive() {
+  if (events) events.close();
+  events = null;
+  clearTimeout(liveTimer);
+}
+
+async function syncLights() {
+  if (!data) return;
+  try {
+    data.entities = await api("GET", "/lights");
+  } catch {
+    return;
+  }
+  if (ui.tab === "dashboard" || ui.tab === "devices") render();
+}
+
+function startLive() {
+  stopLive();
+  const es = events = new EventSource("/api/domus/events");
+  const reload = () => {
+    clearTimeout(liveTimer);
+    liveTimer = setTimeout(syncLights, 300);
+  };
+  es.addEventListener("change", reload);
+  es.onopen = reload; // also catches up on whatever was missed while disconnected
+  es.onerror = () => {
+    // The browser retries by itself unless the server refused (session ended): then re-check.
+    if (es.readyState === EventSource.CLOSED) setTimeout(() => { if (events === es) start().catch(() => {}); }, 5000);
+  };
+}
+
 async function start() {
+  stopLive();
   const s = await api("GET", "/status");
   if (!s.setup_done) return authScreen(false, s.setup_code_required);
   if (!s.logged_in) return authScreen(true);
@@ -671,6 +710,7 @@ async function start() {
   tabFromHash();
   await load();
   render();
+  startLive();
 }
 
 start().catch((e) => root.replaceChildren(el("p", { class: "err" }, e.message)));

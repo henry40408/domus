@@ -61,6 +61,8 @@ Everything else is configured in the admin page at `/`.
 
 ## Usage
 
+The admin page updates live: `GET /api/domus/events` is a server-sent event stream (session cookie) that announces which lights and scenes changed, limited to what the user may see. Behind a reverse proxy, disable response buffering for `/api/domus/events`.
+
 Admin page tabs: Dashboard, Groups (admin), Devices, Tokens, Users (admin), Settings. Regular users see Dashboard, Devices, Tokens and Settings, and only their own tokens.
 
 1. Create the admin account (setup code from the log, username and password; first start only). Add more users in Users; admins manage the bridge, groups and users, regular users control lights and manage their own tokens. Upgrading from v0.1.0 turns the old password into the user `admin`; everyone must log in again.
