@@ -36,8 +36,11 @@ fn session_token(headers: &HeaderMap) -> Option<String> {
         .map(|(_, v)| v.to_string())
 }
 
-fn logged_in(app: &AppState, headers: &HeaderMap) -> bool {
-    session_token(headers).is_some_and(|t| app.core.store().session_valid(&sha256_hex(&t)))
+async fn logged_in(app: &AppState, headers: &HeaderMap) -> bool {
+    match session_token(headers) {
+        Some(t) => app.core.store().session_valid(&sha256_hex(&t)).await,
+        None => false,
+    }
 }
 
 fn secure_request(headers: &HeaderMap) -> bool {
@@ -55,9 +58,9 @@ fn cookie_header(value: &str, max_age: i64, secure: bool) -> String {
     c
 }
 
-fn start_session(app: &AppState, headers: &HeaderMap) -> Response {
+async fn start_session(app: &AppState, headers: &HeaderMap) -> Response {
     let token = random_hex(32);
-    app.core.store().create_session(&sha256_hex(&token));
+    app.core.store().create_session(&sha256_hex(&token)).await;
     (
         [(
             header::SET_COOKIE,
@@ -69,7 +72,7 @@ fn start_session(app: &AppState, headers: &HeaderMap) -> Response {
 }
 
 async fn require_session(State(app): State<AppState>, req: Request, next: Next) -> Response {
-    if logged_in(&app, req.headers()) {
+    if logged_in(&app, req.headers()).await {
         next.run(req).await
     } else {
         message(StatusCode::UNAUTHORIZED, "Login required.")
@@ -80,9 +83,9 @@ async fn require_session(State(app): State<AppState>, req: Request, next: Next) 
 
 async fn status(State(app): State<AppState>, headers: HeaderMap) -> Json<Value> {
     Json(json!({
-        "setup_done": app.core.store().owner_hash().is_some(),
-        "logged_in": logged_in(&app, &headers),
-        "hue_paired": app.core.store().hue_get().is_some(),
+        "setup_done": app.core.store().owner_hash().await.is_some(),
+        "logged_in": logged_in(&app, &headers).await,
+        "hue_paired": app.core.store().hue_get().await.is_some(),
     }))
 }
 
@@ -106,10 +109,11 @@ async fn setup(
         .core
         .store()
         .set_owner_if_absent(&hash_password(&body.password))
+        .await
     {
         return message(StatusCode::CONFLICT, "Already set up.");
     }
-    start_session(&app, &headers)
+    start_session(&app, &headers).await
 }
 
 async fn login(
@@ -117,15 +121,15 @@ async fn login(
     headers: HeaderMap,
     Json(body): Json<Password>,
 ) -> Response {
-    match app.core.store().owner_hash() {
-        Some(h) if verify_password(&body.password, &h) => start_session(&app, &headers),
+    match app.core.store().owner_hash().await {
+        Some(h) if verify_password(&body.password, &h) => start_session(&app, &headers).await,
         _ => message(StatusCode::UNAUTHORIZED, "Wrong password."),
     }
 }
 
 async fn logout(State(app): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(t) = session_token(&headers) {
-        app.core.store().delete_session(&sha256_hex(&t));
+        app.core.store().delete_session(&sha256_hex(&t)).await;
     }
     (
         [(
@@ -138,7 +142,7 @@ async fn logout(State(app): State<AppState>, headers: HeaderMap) -> Response {
 }
 
 async fn hue_status(State(app): State<AppState>) -> Json<Value> {
-    let bridge = app.core.store().hue_get();
+    let bridge = app.core.store().hue_get().await;
     Json(json!({
         "paired": bridge.is_some(),
         "ip": bridge.map(|b| b.ip),
@@ -159,10 +163,13 @@ async fn hue_pair(State(app): State<AppState>, Json(body): Json<PairRequest>) ->
     let base = bridge_base(&ip);
     match pair(&base).await {
         Ok(key) => {
-            app.core.store().hue_set(&HueBridge {
-                ip,
-                key: key.clone(),
-            });
+            app.core
+                .store()
+                .hue_set(&HueBridge {
+                    ip,
+                    key: key.clone(),
+                })
+                .await;
             app.hue.start(&base, &key);
             Json(json!({"ok": true})).into_response()
         }
@@ -185,7 +192,7 @@ async fn lights(State(app): State<AppState>) -> Json<Value> {
         .core
         .all_states()
         .into_iter()
-        .chain(app.core.group_lights())
+        .chain(app.core.group_lights().await)
         .filter(|s| s.entity_id.starts_with("light.") || s.entity_id.starts_with("scene."))
         .map(|s| {
             json!({
@@ -225,7 +232,10 @@ async fn device_test(State(app): State<AppState>, Json(body): Json<TestBody>) ->
         );
     };
     match result {
-        Ok(()) => Json(json!({"state": app.core.lookup(&id).map(|s| s.state)})).into_response(),
+        Ok(()) => {
+            let state = app.core.lookup(&id).await.map(|s| s.state);
+            Json(json!({ "state": state })).into_response()
+        }
         Err(CallError::NoIntegration) => message(StatusCode::NOT_FOUND, "Unknown entity."),
         Err(CallError::Failed(e)) => {
             tracing::warn!("test call for {id} failed: {e}");
@@ -236,18 +246,15 @@ async fn device_test(State(app): State<AppState>, Json(body): Json<TestBody>) ->
 
 async fn groups(State(app): State<AppState>) -> Json<Value> {
     let store = app.core.store();
-    let list: Vec<Value> = store
-        .group_names()
-        .into_iter()
-        .map(|n| {
-            json!({
-                "name": n,
-                "members": store.group_members(&n),
-                "expose_light": store.group_exposed(&n),
-                "light_entity_id": group_light_id(&n),
-            })
-        })
-        .collect();
+    let mut list: Vec<Value> = Vec::new();
+    for n in store.group_names().await {
+        list.push(json!({
+            "members": store.group_members(&n).await,
+            "expose_light": store.group_exposed(&n).await,
+            "light_entity_id": group_light_id(&n),
+            "name": n,
+        }));
+    }
     Json(Value::Array(list))
 }
 
@@ -293,10 +300,10 @@ async fn group_put(
             "A group cannot contain its own light.",
         );
     }
-    match app.core.store().group_set(&name, &body.members) {
+    match app.core.store().group_set(&name, &body.members).await {
         Ok(()) => {
             if let Some(expose) = body.expose_light {
-                app.core.store().group_set_exposed(&name, expose);
+                app.core.store().group_set_exposed(&name, expose).await;
             }
             Json(json!({"ok": true})).into_response()
         }
@@ -311,7 +318,7 @@ async fn group_put(
 }
 
 async fn group_delete(State(app): State<AppState>, Path(name): Path<String>) -> Response {
-    if app.core.store().group_delete(&name) {
+    if app.core.store().group_delete(&name).await {
         Json(json!({"ok": true})).into_response()
     } else {
         message(StatusCode::NOT_FOUND, "No such group.")
@@ -319,7 +326,7 @@ async fn group_delete(State(app): State<AppState>, Path(name): Path<String>) -> 
 }
 
 async fn tokens(State(app): State<AppState>) -> Json<Value> {
-    Json(json!(app.core.store().list_tokens()))
+    Json(json!(app.core.store().list_tokens().await))
 }
 
 #[derive(Deserialize)]
@@ -337,7 +344,12 @@ async fn token_create(State(app): State<AppState>, Json(body): Json<TokenBody>) 
     }
     // 128 bits of entropy; the prefix makes the token recognisable to people and secret scanners.
     let token = format!("{TOKEN_PREFIX}{}", random_hex(16));
-    match app.core.store().create_token(name, &sha256_hex(&token)) {
+    match app
+        .core
+        .store()
+        .create_token(name, &sha256_hex(&token))
+        .await
+    {
         // The plaintext is returned exactly once; only its hash is stored.
         Some(id) => Json(json!({"id": id, "name": name, "token": token})).into_response(),
         None => message(
@@ -348,7 +360,7 @@ async fn token_create(State(app): State<AppState>, Json(body): Json<TokenBody>) 
 }
 
 async fn token_revoke(State(app): State<AppState>, Path(id): Path<i64>) -> Response {
-    if app.core.store().revoke_token(id) {
+    if app.core.store().revoke_token(id).await {
         Json(json!({"ok": true})).into_response()
     } else {
         message(StatusCode::NOT_FOUND, "No such token.")
@@ -413,8 +425,8 @@ mod tests {
     use std::sync::Arc;
     use tower::ServiceExt;
 
-    fn setup_app() -> (Router, AppState) {
-        let core = Core::new(Arc::new(Store::open_memory().unwrap()));
+    async fn setup_app() -> (Router, AppState) {
+        let core = Core::new(Arc::new(Store::open_memory().await.unwrap()));
         let app = AppState {
             core: core.clone(),
             hue: HueManager::new(core),
@@ -463,7 +475,7 @@ mod tests {
 
     #[tokio::test]
     async fn setup_login_logout_flow() {
-        let (r, _) = setup_app();
+        let (r, _) = setup_app().await;
         let (_, _, v) = call(&r, "GET", "/api/domus/status", None, "").await;
         assert_eq!(
             v,
@@ -558,7 +570,7 @@ mod tests {
 
     #[tokio::test]
     async fn secure_cookie_behind_https_proxy() {
-        let (r, _) = setup_app();
+        let (r, _) = setup_app().await;
         let req = HttpRequest::builder()
             .method("POST")
             .uri("/api/domus/setup")
@@ -577,7 +589,7 @@ mod tests {
 
     #[tokio::test]
     async fn protected_routes_need_session() {
-        let (r, _) = setup_app();
+        let (r, _) = setup_app().await;
         for (m, u) in [
             ("GET", "/api/domus/tokens"),
             ("GET", "/api/domus/lights"),
@@ -606,7 +618,7 @@ mod tests {
 
     #[tokio::test]
     async fn tokens_groups_and_lights() {
-        let (r, app) = setup_app();
+        let (r, app) = setup_app().await;
         let (_, h, _) = call(
             &r,
             "POST",
@@ -632,7 +644,7 @@ mod tests {
             token.starts_with("domus_") && token.len() == 6 + 32,
             "{token}"
         );
-        assert!(app.core.store().token_valid(&sha256_hex(&token)));
+        assert!(app.core.store().token_valid(&sha256_hex(&token)).await);
         let (_, _, list) = call(&r, "GET", "/api/domus/tokens", Some(&c), "").await;
         assert_eq!(list[0]["name"], "watch");
         assert!(list[0].get("token").is_none());
@@ -655,7 +667,7 @@ mod tests {
             .0,
             StatusCode::OK
         );
-        assert!(!app.core.store().token_valid(&sha256_hex(&token)));
+        assert!(!app.core.store().token_valid(&sha256_hex(&token)).await);
         assert_eq!(
             call(
                 &r,
@@ -770,7 +782,7 @@ mod tests {
         );
         let keep = r#"{"members":["light.hue_a"]}"#;
         call(&r, "PUT", "/api/domus/groups/Garmin", Some(&c), keep).await;
-        assert!(app.core.store().group_exposed("Garmin"));
+        assert!(app.core.store().group_exposed("Garmin").await);
         assert_eq!(
             call(&r, "DELETE", "/api/domus/groups/Garmin", Some(&c), "")
                 .await
@@ -787,7 +799,7 @@ mod tests {
 
     #[tokio::test]
     async fn pairing_failure_reports_bad_gateway() {
-        let (r, app) = setup_app();
+        let (r, app) = setup_app().await;
         let (_, h, _) = call(
             &r,
             "POST",
@@ -807,7 +819,7 @@ mod tests {
         .await;
         assert_eq!(s, StatusCode::BAD_GATEWAY);
         assert!(
-            app.core.store().hue_get().is_none(),
+            app.core.store().hue_get().await.is_none(),
             "nothing stored on failure"
         );
         assert_eq!(
@@ -856,7 +868,7 @@ mod tests {
 
     #[tokio::test]
     async fn device_test_endpoint_controls_lights_and_scenes() {
-        let (r, app) = setup_app();
+        let (r, app) = setup_app().await;
         app.core.set_integration("bridge", Arc::new(Bridge));
         app.core.set_state("light.hue_a", "off", Map::new());
         app.core.set_state("light.hue_bad", "off", Map::new());

@@ -31,7 +31,11 @@ fn bearer(req: &Request) -> Option<&str> {
 }
 
 async fn require_token(State(app): State<AppState>, req: Request, next: Next) -> Response {
-    let ok = bearer(&req).is_some_and(|t| app.core.store().token_valid(&sha256_hex(t)));
+    let hash = bearer(&req).map(sha256_hex);
+    let ok = match hash {
+        Some(h) => app.core.store().token_valid(&h).await,
+        None => false,
+    };
     if ok {
         next.run(req).await
     } else {
@@ -40,7 +44,7 @@ async fn require_token(State(app): State<AppState>, req: Request, next: Next) ->
 }
 
 async fn get_state(State(app): State<AppState>, Path(entity_id): Path<String>) -> Response {
-    match app.core.lookup(&entity_id) {
+    match app.core.lookup(&entity_id).await {
         Some(s) => Json(s).into_response(),
         None => message(StatusCode::NOT_FOUND, "Entity not found."),
     }
@@ -106,7 +110,7 @@ async fn scene_service(
     let mut changed = Vec::new();
     for id in ids.iter().filter(|i| i.starts_with("scene.")) {
         match app.core.activate_scene(id).await {
-            Ok(()) => changed.extend(app.core.lookup(id)),
+            Ok(()) => changed.extend(app.core.lookup(id).await),
             Err(CallError::NoIntegration) => {}
             Err(CallError::Failed(e)) => {
                 tracing::warn!("scene call for {id} failed: {e}");
@@ -134,7 +138,7 @@ async fn light_service(
         _ => return message(StatusCode::NOT_FOUND, "Service not found."),
     };
     let ids = match requested_entities(&body) {
-        Ok(ids) => app.core.expand_entities(&ids),
+        Ok(ids) => app.core.expand_entities(&ids).await,
         Err(e) => return message(StatusCode::BAD_REQUEST, e),
     };
 
@@ -143,7 +147,7 @@ async fn light_service(
     for id in ids.iter().filter(|i| !i.starts_with("scene.")) {
         match app.core.call_light(id, &action).await {
             Ok(()) => {
-                if let Some(s) = app.core.lookup(id) {
+                if let Some(s) = app.core.lookup(id).await {
                     changed.push(s);
                 }
             }
@@ -207,15 +211,16 @@ mod tests {
 
     const TOKEN: &str = "secret-token";
 
-    fn setup() -> (Router, AppState, Arc<Fake>) {
-        let core = Core::new(Arc::new(Store::open_memory().unwrap()));
-        core.store().create_token("t", &sha256_hex(TOKEN));
+    async fn setup() -> (Router, AppState, Arc<Fake>) {
+        let core = Core::new(Arc::new(Store::open_memory().await.unwrap()));
+        core.store().create_token("t", &sha256_hex(TOKEN)).await;
         let fake = Arc::new(Fake(Mutex::new(Vec::new())));
         core.set_integration("fake", fake.clone());
         core.set_state("light.hue_a", "off", Map::new());
         core.set_state("light.hue_b", "off", Map::new());
         core.store()
             .group_set("Garmin", &["light.hue_a".into(), "light.hue_b".into()])
+            .await
             .unwrap();
         let app = AppState {
             core: core.clone(),
@@ -253,7 +258,7 @@ mod tests {
 
     #[tokio::test]
     async fn auth_required() {
-        let (r, ..) = setup();
+        let (r, ..) = setup().await;
         assert_eq!(
             call(&r, "GET", "/api/states/light.hue_a", None, "").await.0,
             StatusCode::UNAUTHORIZED
@@ -274,7 +279,7 @@ mod tests {
 
     #[tokio::test]
     async fn state_shape_and_404() {
-        let (r, ..) = setup();
+        let (r, ..) = setup().await;
         let (_, v) = call(&r, "GET", "/api/states/light.hue_a", Some(TOKEN), "").await;
         assert_eq!(v["entity_id"], "light.hue_a");
         assert_eq!(v["state"], "off");
@@ -286,7 +291,7 @@ mod tests {
 
     #[tokio::test]
     async fn group_lists_members() {
-        let (r, ..) = setup();
+        let (r, ..) = setup().await;
         let (s, v) = call(&r, "GET", "/api/states/group.Garmin", Some(TOKEN), "").await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(v["entity_id"], "group.Garmin");
@@ -304,7 +309,7 @@ mod tests {
 
     #[tokio::test]
     async fn turn_on_string_entity_returns_state_array() {
-        let (r, app, fake) = setup();
+        let (r, app, fake) = setup().await;
         let (s, v) = call(
             &r,
             "POST",
@@ -328,7 +333,7 @@ mod tests {
 
     #[tokio::test]
     async fn target_array_group_and_brightness() {
-        let (r, _, fake) = setup();
+        let (r, _, fake) = setup().await;
         let body = r#"{"target":{"entity_id":["group.Garmin"]},"brightness_pct":50}"#;
         let (s, v) = call(&r, "POST", "/api/services/light/turn_on", Some(TOKEN), body).await;
         assert_eq!(s, StatusCode::OK);
@@ -353,7 +358,7 @@ mod tests {
 
     #[tokio::test]
     async fn service_edge_cases() {
-        let (r, ..) = setup();
+        let (r, ..) = setup().await;
         // unknown entity: empty array, still JSON
         let (s, v) = call(
             &r,
@@ -398,7 +403,7 @@ mod tests {
 
     #[tokio::test]
     async fn scene_turn_on_stamps_state_and_light_calls_skip_scenes() {
-        let (r, app, fake) = setup();
+        let (r, app, fake) = setup().await;
         app.core.set_state("scene.hue_a", "unknown", Map::new());
         app.core.set_state("scene.hue_bad", "unknown", Map::new());
 
@@ -442,6 +447,7 @@ mod tests {
         app.core
             .store()
             .group_set("Mixed", &["light.hue_a".into(), "scene.hue_a".into()])
+            .await
             .unwrap();
         let (_, v) = call(&r, "GET", "/api/states/group.Mixed", Some(TOKEN), "").await;
         assert_eq!(
@@ -456,8 +462,8 @@ mod tests {
 
     #[tokio::test]
     async fn group_light_service_call_returns_its_state() {
-        let (r, app, fake) = setup();
-        app.core.store().group_set_exposed("Garmin", true);
+        let (r, app, fake) = setup().await;
+        app.core.store().group_set_exposed("Garmin", true).await;
         let body = r#"{"entity_id":"light.domus_group_Garmin"}"#;
         let (s, v) = call(&r, "POST", "/api/services/light/turn_on", Some(TOKEN), body).await;
         assert_eq!(s, StatusCode::OK);

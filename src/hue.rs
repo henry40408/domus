@@ -649,8 +649,8 @@ mod tests {
         json!({"id": id, "type": "light", "metadata": {"name": name}, "on": {"on": on}, "dimming": {"brightness": b}})
     }
 
-    #[test]
-    fn brightness_conversion() {
+    #[tokio::test]
+    async fn brightness_conversion() {
         assert_eq!(pct_to_ha(100.0), 255);
         assert_eq!(pct_to_ha(50.0), 128);
         assert_eq!(pct_to_ha(0.0), 1);
@@ -659,8 +659,8 @@ mod tests {
         assert_eq!(ha_to_pct(0), 0.0);
     }
 
-    #[test]
-    fn light_mapping() {
+    #[tokio::test]
+    async fn light_mapping() {
         let l =
             HueLight::from_resource(&light_json("abcdef12-3456-7890", "Desk", true, 50.0)).unwrap();
         assert_eq!(l.entity_id(), "light.hue_abcdef12");
@@ -678,8 +678,8 @@ mod tests {
         assert!(HueLight::from_resource(&json!({"type": "light"})).is_none());
     }
 
-    #[test]
-    fn partial_update_merges() {
+    #[tokio::test]
+    async fn partial_update_merges() {
         let mut l = HueLight::from_resource(&light_json("a1", "Desk", true, 50.0)).unwrap();
         l.apply_update(&json!({"on": {"on": false}}));
         assert!(!l.on);
@@ -689,8 +689,8 @@ mod tests {
         assert_eq!(l.name, "Lamp");
     }
 
-    #[test]
-    fn sse_parser_handles_chunks_comments_and_crlf() {
+    #[tokio::test]
+    async fn sse_parser_handles_chunks_comments_and_crlf() {
         let mut p = SseParser::default();
         assert!(p.push(b": hi\n\n").is_empty());
         assert!(p.push(b"id: 1\r\ndata: {\"a\"").is_empty());
@@ -772,7 +772,7 @@ mod tests {
         ];
         let base = mock_server(mock.clone()).await;
 
-        let core = Core::new(Arc::new(Store::open_memory().unwrap()));
+        let core = Core::new(Arc::new(Store::open_memory().await.unwrap()));
         let hue = HueIntegration::new(HueClient::new(&base, "key"), core.clone());
         core.set_integration(INTEGRATION_NAME, hue.clone());
 
@@ -818,8 +818,8 @@ mod tests {
                "group": {"rid": room, "rtype": "room"}, "status": {"active": active}})
     }
 
-    #[test]
-    fn scene_mapping() {
+    #[tokio::test]
+    async fn scene_mapping() {
         let groups = HashMap::from([("room-1".to_string(), "Living Room".to_string())]);
         let s = HueScene::from_resource(
             &scene_json("12345678-aaaa", "Relax", "room-1", "inactive"),
@@ -844,7 +844,7 @@ mod tests {
             vec![scene_json("cccccccc-0000", "Relax", "room-1", "inactive")];
         let base = mock_server(mock.clone()).await;
 
-        let core = Core::new(Arc::new(Store::open_memory().unwrap()));
+        let core = Core::new(Arc::new(Store::open_memory().await.unwrap()));
         let hue = HueIntegration::new(HueClient::new(&base, "key"), core.clone());
         core.set_integration(INTEGRATION_NAME, hue.clone());
         hue.sync().await.unwrap();
@@ -896,7 +896,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_event_requests_resync() {
-        let core = Core::new(Arc::new(Store::open_memory().unwrap()));
+        let core = Core::new(Arc::new(Store::open_memory().await.unwrap()));
         let hue = HueIntegration::new(HueClient::new("http://127.0.0.1:1", "k"), core);
         let add = json!([{"type": "add", "data": [{"id": "x", "type": "light"}]}]).to_string();
         assert!(hue.apply_event_payload(&add));
@@ -926,8 +926,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bridge_base_forms() {
+    #[tokio::test]
+    async fn bridge_base_forms() {
         assert_eq!(bridge_base("192.168.1.2"), "https://192.168.1.2");
         assert_eq!(bridge_base("http://127.0.0.1:9/"), "http://127.0.0.1:9");
     }
