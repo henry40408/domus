@@ -3,6 +3,7 @@
 > A lightweight, Home Assistant API-compatible server in Rust for Philips Hue lights.
 
 [![CI](https://github.com/henry40408/domus/actions/workflows/ci.yml/badge.svg)](https://github.com/henry40408/domus/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/henry40408/domus/graph/badge.svg)](https://codecov.io/gh/henry40408/domus)
 [![Release](https://img.shields.io/github/v/release/henry40408/domus)](https://github.com/henry40408/domus/releases/latest)
 [![License](https://img.shields.io/github/license/henry40408/domus)](LICENSE.txt)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io-blue.svg)](https://ghcr.io/henry40408/domus)
@@ -170,6 +171,16 @@ WebSocket API, registries, HA OAuth/onboarding, the official HA frontend / Compa
 cargo fmt
 cargo clippy --all-targets -- -D warnings
 cargo nextest run
+```
+
+### Coverage
+
+CI uploads coverage to [Codecov](https://codecov.io/gh/henry40408/domus) using
+[cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) (`src/main.rs` is excluded, see `codecov.yml`).
+Forks need a `CODECOV_TOKEN` repository secret. To run it locally:
+
+```sh
+cargo llvm-cov nextest --html
 ```
 
 ## License

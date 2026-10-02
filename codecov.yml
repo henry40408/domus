@@ -1,0 +1,4 @@
+# The binary entrypoint only executes in a live process (socket bind) and is
+# not unit-testable; exclude it from the coverage denominator.
+ignore:
+  - "src/main.rs"
