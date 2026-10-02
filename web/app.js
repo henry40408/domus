@@ -4,6 +4,40 @@
 const root = document.getElementById("root");
 const toastBox = document.getElementById("toast");
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+// 24x24 stroke icons (paths only), drawn in currentColor.
+const circle = (cx, cy, r) => `M${cx - r} ${cy}a${r} ${r} 0 1 0 ${2 * r} 0a${r} ${r} 0 1 0 ${-2 * r} 0`;
+const ICONS = {
+  home: ["M3 11l9-8 9 8", "M5 10v10h14V10", "M10 20v-6h4v6"],
+  dashboard: ["M3 3h7v9H3z", "M14 3h7v5h-7z", "M14 12h7v9h-7z", "M3 16h7v5H3z"],
+  folder: ["M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"],
+  bulb: ["M9 18h6", "M10 21h4", "M12 3a6 6 0 0 0-4 10.5c.7.7 1 1.5 1 2.5h6c0-1 .3-1.8 1-2.5A6 6 0 0 0 12 3z"],
+  key: [circle(8, 15, 4), "M10.8 12.2L20 3", "M16 7l3 3", "M14 9l2 2"],
+  users: ["M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2", circle(9, 7, 4), "M22 21v-2a4 4 0 0 0-3-3.9", "M16 3.1a4 4 0 0 1 0 7.8"],
+  settings: ["M4 6h6", "M14 6h6", "M4 12h12", "M20 12h0", "M4 18h2", "M10 18h10", circle(12, 6, 2), circle(18, 12, 2), circle(8, 18, 2)],
+  plus: ["M12 5v14", "M5 12h14"],
+  alert: ["M12 3l10 18H2z", "M12 10v5", "M12 18h0"],
+  lock: ["M5 11h14v10H5z", "M8 11V7a4 4 0 0 1 8 0v4"],
+  grip: ["M9 6h0", "M15 6h0", "M9 12h0", "M15 12h0", "M9 18h0", "M15 18h0"],
+  up: ["M12 19V5", "M5 12l7-7 7 7"],
+  down: ["M12 5v14", "M19 12l-7 7-7-7"],
+  play: ["M7 4l13 8-13 8z"],
+};
+
+function icon(name) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  for (const [k, v] of Object.entries({
+    viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2",
+    "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true", class: "ico",
+  })) svg.setAttribute(k, v);
+  for (const d of ICONS[name]) {
+    const path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("d", d);
+    svg.append(path);
+  }
+  return svg;
+}
+
 function el(tag, props, ...children) {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(props || {})) {
@@ -78,12 +112,12 @@ function ago(secs) {
 // ------------------------------------------------------------------ data
 
 const TABS = [
-  ["dashboard", "📊", "Dashboard"],
-  ["groups", "🗂️", "Groups", true],
-  ["devices", "💡", "Devices"],
-  ["tokens", "🔑", "Tokens"],
-  ["users", "👥", "Users", true],
-  ["settings", "⚙️", "Settings"],
+  ["dashboard", "dashboard", "Dashboard"],
+  ["groups", "folder", "Groups", true],
+  ["devices", "bulb", "Devices"],
+  ["tokens", "key", "Tokens"],
+  ["users", "users", "Users", true],
+  ["settings", "settings", "Settings"],
 ];
 
 /** the logged-in user: { id, username, is_admin } */
@@ -134,11 +168,11 @@ function authScreen(setupDone) {
 
 function shell() {
   const main = el("main", {});
-  const nav = el("nav", {}, el("h1", {}, "🏠 domus"),
-    ...visibleTabs().map(([id, icon, name]) => el("a", {
+  const nav = el("nav", {}, el("h1", {}, icon("home"), " domus"),
+    ...visibleTabs().map(([id, ico, name]) => el("a", {
       class: "tab" + (id === ui.tab ? " active" : ""),
       href: "#" + id,
-    }, icon + " " + name)),
+    }, icon(ico), name)),
     data.hue ? el("div", { class: "bridge muted" },
       el("span", { class: "dot" + (data.hue.paired && data.hue.running ? "" : " off") }),
       !data.hue.paired ? "Bridge not paired" : data.hue.running ? "Bridge connected" : "Bridge disconnected") : "",
@@ -207,11 +241,11 @@ function groups() {
       class: !d.isNew && g.name === d.name ? "active" : "",
       onclick: () => select(g.name),
     }, g.name + " ", el("span", { class: "pill" }, String(g.members.length)))),
-    el("button", { class: d.isNew ? "active" : "", onclick: () => select(null) }, "＋ New group"));
+    el("button", { class: d.isNew ? "active" : "", onclick: () => select(null) }, icon("plus"), " New group"));
 
   const gsel = el("select", { class: "gsel", onchange: (e) => select(e.target.value === "" ? null : e.target.value) },
     ...data.groups.map((g) => el("option", { value: g.name, selected: !d.isNew && g.name === d.name }, g.name)),
-    el("option", { value: "", selected: d.isNew }, "＋ New group"));
+    el("option", { value: "", selected: d.isNew }, "New group"));
 
   return [
     el("h2", {}, "Groups"),
@@ -256,17 +290,17 @@ function groupEditor(d) {
     const count = d.members.length + (d.expose ? 1 : 0);
     pickTab.textContent = "Pick (" + d.members.length + ")";
     warn.replaceChildren(count > 12
-      ? el("div", { class: "warn" }, "⚠️ " + count + " entries; older watches may fail to load more than about a dozen.")
+      ? el("div", { class: "warn" }, icon("alert"), " " + count + " entries; older watches may fail to load more than about a dozen.")
       : "");
     let dragId = null;
     order.replaceChildren(
-      d.expose ? el("li", { class: "fixed" }, el("span", {}, "🔒"), el("span", { class: "grow" }, "All lights"), el("span", { class: "pill" }, "first")) : "",
+      d.expose ? el("li", { class: "fixed" }, el("span", {}, icon("lock")), el("span", { class: "grow" }, "All lights"), el("span", { class: "pill" }, "first")) : "",
       ...d.members.map((id) => {
         const li = el("li", { draggable: true },
-          el("span", { class: "handle" }, "⠿"),
+          el("span", { class: "handle" }, icon("grip")),
           el("span", { class: "grow" }, label(id)),
-          el("button", { class: "icon", onclick: () => move(id, -1) }, "↑"),
-          el("button", { class: "icon", onclick: () => move(id, 1) }, "↓"));
+          el("button", { class: "icon", onclick: () => move(id, -1), title: "Move up" }, icon("up")),
+          el("button", { class: "icon", onclick: () => move(id, 1), title: "Move down" }, icon("down")));
         li.addEventListener("dragstart", () => { dragId = id; li.classList.add("drag"); });
         li.addEventListener("dragend", () => li.classList.remove("drag"));
         li.addEventListener("dragover", (e) => e.preventDefault());
@@ -286,7 +320,7 @@ function groupEditor(d) {
         const e = find(id);
         const scene = e && isScene(e);
         const on = e && !scene && e.state === "on";
-        return el("div", { class: "w-item" }, el("span", {}, label(id)), el("span", { class: on ? "w-on" : "" }, scene ? "▶" : on ? "On" : "Off"));
+        return el("div", { class: "w-item" }, el("span", {}, label(id)), el("span", { class: on ? "w-on" : "" }, scene ? icon("play") : on ? "On" : "Off"));
       }));
   }
   exposeBox.addEventListener("change", () => { d.expose = exposeBox.checked; markDirty(); derived(); });

@@ -19,6 +19,9 @@ button:hover { border-color: var(--accent); }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 button.danger { color: var(--danger); }
 button.icon { padding: 2px 8px; }
+.ico { width: 1.15em; height: 1.15em; flex: none; vertical-align: -0.2em; }
+nav h1 .ico { width: 1em; height: 1em; }
+.w-item .ico { width: .9em; height: .9em; }
 button:disabled { opacity: .5; cursor: default; }
 input[type=text], input[type=password], input[type=search], select {
   border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 7px 10px; width: 100%;
