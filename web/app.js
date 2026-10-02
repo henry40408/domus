@@ -101,6 +101,7 @@ function copyButton(text, label) {
 }
 
 const fmtDate = (secs) => new Date(secs * 1000).toLocaleDateString();
+const fmtDateTime = (secs) => (secs ? new Date(secs * 1000).toLocaleString() : "");
 function ago(secs) {
   if (!secs) return "never";
   const d = Math.max(0, Math.floor(Date.now() / 1000 - secs));
@@ -502,7 +503,7 @@ function tokens() {
           el("span", { class: "meta" }, (t.scope ? "Groups: " + t.scope.join(", ") : "Full access") + (t.read_only ? ", read-only" : "")),
           el("span", { class: "meta" }, t.expires ? (t.expires * 1000 < Date.now() ? "Expired " : "Expires ") + fmtDate(t.expires) : "Never expires"),
           el("span", { class: "meta" }, "Created " + fmtDate(t.created)),
-          el("span", { class: "meta" }, "Last used " + ago(t.last_used)))))
+          el("span", { class: "meta", title: fmtDateTime(t.last_used) }, "Last used " + ago(t.last_used)))))
         : el("p", { class: "muted" }, "No tokens yet.")),
   ];
 }
@@ -615,7 +616,7 @@ function sessionsList() {
         }),
       }, "Sign out"),
       el("span", { class: "meta" }, "Signed in " + fmtDate(x.created)),
-      el("span", { class: "meta" }, "Last active " + ago(x.last_seen))))),
+      el("span", { class: "meta", title: fmtDateTime(x.last_seen) }, "Last active " + ago(x.last_seen))))),
     others ? el("button", {
       onclick: () => guarded(async () => {
         if (!confirm("Sign out of " + others + " other " + (others === 1 ? "device" : "devices") + "?")) return;
