@@ -16,8 +16,30 @@ fn prepare_data_dir(dir: &std::path::Path) -> std::io::Result<()> {
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
 }
 
+/// `domus healthcheck`: asks the server on this host whether it is healthy and exits 0 or 1.
+/// The container's `HEALTHCHECK` uses it because the image has no shell or curl.
+async fn healthcheck() -> ! {
+    let env = match Env::from_env() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("domus: {e}");
+            std::process::exit(2);
+        }
+    };
+    match domus::health::check(&domus::health::health_url(env.bind)).await {
+        Ok(()) => std::process::exit(0),
+        Err(e) => {
+            eprintln!("domus: unhealthy: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+        healthcheck().await;
+    }
     let env = match Env::from_env() {
         Ok(e) => e,
         Err(e) => {
