@@ -1,5 +1,6 @@
 //! Admin API (`/api/domus/*`, session cookie) and the embedded admin page.
 
+use axum::Extension;
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
@@ -13,7 +14,7 @@ use serde_json::{Value, json};
 use crate::api::AppState;
 use crate::core::{CallError, LightAction, group_light_id};
 use crate::hue::{PairError, bridge_base, pair};
-use crate::store::{HueBridge, SESSION_TTL_SECS};
+use crate::store::{HueBridge, SESSION_TTL_SECS, User};
 use crate::util::{hash_password, random_hex, sha256_hex, verify_password};
 
 const COOKIE: &str = "domus_session";
@@ -36,11 +37,9 @@ fn session_token(headers: &HeaderMap) -> Option<String> {
         .map(|(_, v)| v.to_string())
 }
 
-async fn logged_in(app: &AppState, headers: &HeaderMap) -> bool {
-    match session_token(headers) {
-        Some(t) => app.core.store().session_valid(&sha256_hex(&t)).await,
-        None => false,
-    }
+async fn current_user(app: &AppState, headers: &HeaderMap) -> Option<User> {
+    let t = session_token(headers)?;
+    app.core.store().session_user(&sha256_hex(&t)).await
 }
 
 fn secure_request(headers: &HeaderMap) -> bool {
@@ -58,9 +57,12 @@ fn cookie_header(value: &str, max_age: i64, secure: bool) -> String {
     c
 }
 
-async fn start_session(app: &AppState, headers: &HeaderMap) -> Response {
+async fn start_session(app: &AppState, headers: &HeaderMap, user_id: i64) -> Response {
     let token = random_hex(32);
-    app.core.store().create_session(&sha256_hex(&token)).await;
+    app.core
+        .store()
+        .create_session(&sha256_hex(&token), user_id)
+        .await;
     (
         [(
             header::SET_COOKIE,
@@ -71,59 +73,87 @@ async fn start_session(app: &AppState, headers: &HeaderMap) -> Response {
         .into_response()
 }
 
-async fn require_session(State(app): State<AppState>, req: Request, next: Next) -> Response {
-    if logged_in(&app, req.headers()).await {
+async fn require_session(State(app): State<AppState>, mut req: Request, next: Next) -> Response {
+    match current_user(&app, req.headers()).await {
+        Some(user) => {
+            req.extensions_mut().insert(user);
+            next.run(req).await
+        }
+        None => message(StatusCode::UNAUTHORIZED, "Login required."),
+    }
+}
+
+/// Runs after `require_session`, which provides the `User`.
+async fn require_admin(req: Request, next: Next) -> Response {
+    if req.extensions().get::<User>().is_some_and(|u| u.is_admin) {
         next.run(req).await
     } else {
-        message(StatusCode::UNAUTHORIZED, "Login required.")
+        message(StatusCode::FORBIDDEN, "Admin only.")
     }
 }
 
 // --------------------------------------------------------------- handlers
 
 async fn status(State(app): State<AppState>, headers: HeaderMap) -> Json<Value> {
+    let user = current_user(&app, &headers).await;
     Json(json!({
-        "setup_done": app.core.store().owner_hash().await.is_some(),
-        "logged_in": logged_in(&app, &headers).await,
+        "setup_done": app.core.store().user_count().await > 0,
+        "logged_in": user.is_some(),
+        "user": user,
         "hue_paired": app.core.store().hue_get().await.is_some(),
     }))
 }
 
 #[derive(Deserialize)]
-struct Password {
+struct Credentials {
+    username: String,
     password: String,
 }
+
+fn valid_username(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '@'))
+}
+
+const USERNAME_HINT: &str = "Username: letters, digits, _ - . and @ only (max 64).";
+const PASSWORD_HINT: &str = "Password must be at least 8 characters.";
 
 async fn setup(
     State(app): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<Password>,
+    Json(body): Json<Credentials>,
 ) -> Response {
-    if body.password.chars().count() < MIN_PASSWORD_LEN {
-        return message(
-            StatusCode::BAD_REQUEST,
-            "Password must be at least 8 characters.",
-        );
+    let username = body.username.trim();
+    if !valid_username(username) {
+        return message(StatusCode::BAD_REQUEST, USERNAME_HINT);
     }
-    if !app
+    if body.password.chars().count() < MIN_PASSWORD_LEN {
+        return message(StatusCode::BAD_REQUEST, PASSWORD_HINT);
+    }
+    match app
         .core
         .store()
-        .set_owner_if_absent(&hash_password(&body.password))
+        .create_first_admin(username, &hash_password(&body.password))
         .await
     {
-        return message(StatusCode::CONFLICT, "Already set up.");
+        Some(id) => start_session(&app, &headers, id).await,
+        None => message(StatusCode::CONFLICT, "Already set up."),
     }
-    start_session(&app, &headers).await
 }
 
 async fn login(
     State(app): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<Password>,
+    Json(body): Json<Credentials>,
 ) -> Response {
-    match app.core.store().owner_hash().await {
-        Some(h) if verify_password(&body.password, &h) => start_session(&app, &headers).await,
-        _ => message(StatusCode::UNAUTHORIZED, "Wrong password."),
+    match app.core.store().user_login(body.username.trim()).await {
+        Some((user, hash)) if verify_password(&body.password, &hash) => {
+            start_session(&app, &headers, user.id).await
+        }
+        _ => message(StatusCode::UNAUTHORIZED, "Wrong username or password."),
     }
 }
 
@@ -139,6 +169,111 @@ async fn logout(State(app): State<AppState>, headers: HeaderMap) -> Response {
         Json(json!({"ok": true})),
     )
         .into_response()
+}
+
+#[derive(Deserialize)]
+struct PasswordChange {
+    current: String,
+    new: String,
+}
+
+/// Changes the caller's own password; every session is ended and a fresh one is started.
+async fn password_change(
+    State(app): State<AppState>,
+    Extension(me): Extension<User>,
+    headers: HeaderMap,
+    Json(body): Json<PasswordChange>,
+) -> Response {
+    let store = app.core.store();
+    match store.user_hash(me.id).await {
+        Some(h) if verify_password(&body.current, &h) => {}
+        _ => return message(StatusCode::UNAUTHORIZED, "Current password is wrong."),
+    }
+    if body.new.chars().count() < MIN_PASSWORD_LEN {
+        return message(StatusCode::BAD_REQUEST, PASSWORD_HINT);
+    }
+    store.set_password(me.id, &hash_password(&body.new)).await;
+    store.delete_user_sessions(me.id).await;
+    start_session(&app, &headers, me.id).await
+}
+
+async fn users(State(app): State<AppState>) -> Json<Value> {
+    Json(json!(app.core.store().list_users().await))
+}
+
+#[derive(Deserialize)]
+struct NewUser {
+    username: String,
+    password: String,
+    #[serde(default)]
+    is_admin: bool,
+}
+
+async fn user_create(State(app): State<AppState>, Json(body): Json<NewUser>) -> Response {
+    let username = body.username.trim();
+    if !valid_username(username) {
+        return message(StatusCode::BAD_REQUEST, USERNAME_HINT);
+    }
+    if body.password.chars().count() < MIN_PASSWORD_LEN {
+        return message(StatusCode::BAD_REQUEST, PASSWORD_HINT);
+    }
+    match app
+        .core
+        .store()
+        .create_user(username, &hash_password(&body.password), body.is_admin)
+        .await
+    {
+        Some(id) => Json(json!({"id": id, "username": username})).into_response(),
+        None => message(StatusCode::CONFLICT, "That username is taken."),
+    }
+}
+
+#[derive(Deserialize)]
+struct UserUpdate {
+    is_admin: Option<bool>,
+    password: Option<String>,
+}
+
+async fn user_update(
+    State(app): State<AppState>,
+    Path(id): Path<i64>,
+    Json(body): Json<UserUpdate>,
+) -> Response {
+    let store = app.core.store();
+    let Some(target) = store.list_users().await.into_iter().find(|u| u.id == id) else {
+        return message(StatusCode::NOT_FOUND, "No such user.");
+    };
+    if let Some(pw) = &body.password
+        && pw.chars().count() < MIN_PASSWORD_LEN
+    {
+        return message(StatusCode::BAD_REQUEST, PASSWORD_HINT);
+    }
+    if body.is_admin == Some(false) && target.is_admin && store.admin_count().await <= 1 {
+        return message(StatusCode::BAD_REQUEST, "Keep at least one admin.");
+    }
+    if let Some(admin) = body.is_admin {
+        store.set_admin(id, admin).await;
+    }
+    if let Some(pw) = &body.password {
+        store.set_password(id, &hash_password(pw)).await;
+        store.delete_user_sessions(id).await;
+    }
+    Json(json!({"ok": true})).into_response()
+}
+
+async fn user_delete(
+    State(app): State<AppState>,
+    Extension(me): Extension<User>,
+    Path(id): Path<i64>,
+) -> Response {
+    if id == me.id {
+        return message(StatusCode::BAD_REQUEST, "You cannot delete yourself.");
+    }
+    if app.core.store().delete_user(id).await {
+        Json(json!({"ok": true})).into_response()
+    } else {
+        message(StatusCode::NOT_FOUND, "No such user.")
+    }
 }
 
 async fn hue_status(State(app): State<AppState>) -> Json<Value> {
@@ -325,8 +460,13 @@ async fn group_delete(State(app): State<AppState>, Path(name): Path<String>) -> 
     }
 }
 
-async fn tokens(State(app): State<AppState>) -> Json<Value> {
-    Json(json!(app.core.store().list_tokens().await))
+/// Admins see and manage every token; everyone else only their own.
+fn token_owner(me: &User) -> Option<i64> {
+    (!me.is_admin).then_some(me.id)
+}
+
+async fn tokens(State(app): State<AppState>, Extension(me): Extension<User>) -> Json<Value> {
+    Json(json!(app.core.store().list_tokens(token_owner(&me)).await))
 }
 
 #[derive(Deserialize)]
@@ -336,7 +476,11 @@ struct TokenBody {
     scope: Option<Vec<String>>,
 }
 
-async fn token_create(State(app): State<AppState>, Json(body): Json<TokenBody>) -> Response {
+async fn token_create(
+    State(app): State<AppState>,
+    Extension(me): Extension<User>,
+    Json(body): Json<TokenBody>,
+) -> Response {
     let name = body.name.trim();
     if name.is_empty() || name.chars().count() > 64 {
         return message(
@@ -368,7 +512,7 @@ async fn token_create(State(app): State<AppState>, Json(body): Json<TokenBody>) 
     match app
         .core
         .store()
-        .create_token(name, &sha256_hex(&token), scope.as_deref())
+        .create_token(me.id, name, &sha256_hex(&token), scope.as_deref())
         .await
     {
         // The plaintext is returned exactly once; only its hash is stored.
@@ -380,8 +524,12 @@ async fn token_create(State(app): State<AppState>, Json(body): Json<TokenBody>) 
     }
 }
 
-async fn token_revoke(State(app): State<AppState>, Path(id): Path<i64>) -> Response {
-    if app.core.store().revoke_token(id).await {
+async fn token_revoke(
+    State(app): State<AppState>,
+    Extension(me): Extension<User>,
+    Path(id): Path<i64>,
+) -> Response {
+    if app.core.store().revoke_token(id, token_owner(&me)).await {
         Json(json!({"ok": true})).into_response()
     } else {
         message(StatusCode::NOT_FOUND, "No such token.")
@@ -413,17 +561,23 @@ fn mime_for(path: &str) -> &'static str {
 
 /// Mounted at `/api/domus`.
 pub fn router(app: AppState) -> Router {
-    let protected = Router::new()
-        .route("/logout", post(logout))
+    let admin = Router::new()
         .route("/hue", get(hue_status))
         .route("/hue/pair", post(hue_pair))
+        .route("/groups/{name}", put(group_put))
+        .route("/groups/{name}", delete(group_delete))
+        .route("/users", get(users).post(user_create))
+        .route("/users/{id}", put(user_update).delete(user_delete))
+        .layer(middleware::from_fn(require_admin));
+    let protected = Router::new()
+        .route("/logout", post(logout))
+        .route("/password", post(password_change))
         .route("/lights", get(lights))
         .route("/devices/test", post(device_test))
         .route("/groups", get(groups))
-        .route("/groups/{name}", put(group_put))
-        .route("/groups/{name}", delete(group_delete))
         .route("/tokens", get(tokens).post(token_create))
         .route("/tokens/{id}", delete(token_revoke))
+        .merge(admin)
         .layer(middleware::from_fn_with_state(app.clone(), require_session));
     Router::new()
         .route("/status", get(status))
@@ -500,7 +654,21 @@ mod tests {
         let (_, _, v) = call(&r, "GET", "/api/domus/status", None, "").await;
         assert_eq!(
             v,
-            json!({"setup_done": false, "logged_in": false, "hue_paired": false})
+            json!({"setup_done": false, "logged_in": false, "user": null, "hue_paired": false})
+        );
+
+        // bad username
+        assert_eq!(
+            call(
+                &r,
+                "POST",
+                "/api/domus/setup",
+                None,
+                r#"{"username":"a b","password":"correct horse"}"#
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
         );
 
         // too short
@@ -510,7 +678,7 @@ mod tests {
                 "POST",
                 "/api/domus/setup",
                 None,
-                r#"{"password":"short"}"#
+                r#"{"username":"admin","password":"short"}"#
             )
             .await
             .0,
@@ -522,7 +690,7 @@ mod tests {
             "POST",
             "/api/domus/setup",
             None,
-            r#"{"password":"correct horse"}"#,
+            r#"{"username":"admin","password":"correct horse"}"#,
         )
         .await;
         assert_eq!(s, StatusCode::OK);
@@ -538,7 +706,7 @@ mod tests {
                 "POST",
                 "/api/domus/setup",
                 None,
-                r#"{"password":"another one"}"#
+                r#"{"username":"second","password":"another one"}"#
             )
             .await
             .0,
@@ -547,6 +715,8 @@ mod tests {
 
         let (_, _, v) = call(&r, "GET", "/api/domus/status", Some(&cookie), "").await;
         assert_eq!(v["logged_in"], true);
+        assert_eq!(v["user"]["username"], "admin");
+        assert_eq!(v["user"]["is_admin"], true);
 
         // wrong / right password
         assert_eq!(
@@ -555,7 +725,7 @@ mod tests {
                 "POST",
                 "/api/domus/login",
                 None,
-                r#"{"password":"nope nope"}"#
+                r#"{"username":"admin","password":"nope nope"}"#
             )
             .await
             .0,
@@ -567,7 +737,7 @@ mod tests {
                 "POST",
                 "/api/domus/login",
                 None,
-                r#"{"password":"correct horse"}"#
+                r#"{"username":"admin","password":"correct horse"}"#
             )
             .await
             .0,
@@ -589,6 +759,250 @@ mod tests {
         );
     }
 
+    /// Sets up the admin, adds a regular user and logs both in; returns their cookies.
+    async fn admin_and_member(r: &Router) -> (String, String) {
+        let (_, h, _) = call(
+            r,
+            "POST",
+            "/api/domus/setup",
+            None,
+            r#"{"username":"admin","password":"correct horse"}"#,
+        )
+        .await;
+        let admin = cookie_of(&h);
+        let (s, ..) = call(
+            r,
+            "POST",
+            "/api/domus/users",
+            Some(&admin),
+            r#"{"username":"bob","password":"bob's password"}"#,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let (_, h, _) = call(
+            r,
+            "POST",
+            "/api/domus/login",
+            None,
+            r#"{"username":"BOB","password":"bob's password"}"#,
+        )
+        .await;
+        (admin, cookie_of(&h))
+    }
+
+    #[tokio::test]
+    async fn members_cannot_use_admin_routes() {
+        let (r, _) = setup_app().await;
+        let (admin, bob) = admin_and_member(&r).await;
+        for (m, u) in [
+            ("GET", "/api/domus/hue"),
+            ("POST", "/api/domus/hue/pair"),
+            ("PUT", "/api/domus/groups/G"),
+            ("DELETE", "/api/domus/groups/G"),
+            ("GET", "/api/domus/users"),
+            ("POST", "/api/domus/users"),
+            ("PUT", "/api/domus/users/1"),
+            ("DELETE", "/api/domus/users/1"),
+        ] {
+            assert_eq!(
+                call(&r, m, u, Some(&bob), "{}").await.0,
+                StatusCode::FORBIDDEN,
+                "{m} {u}"
+            );
+        }
+        // what a member may do
+        for u in [
+            "/api/domus/lights",
+            "/api/domus/groups",
+            "/api/domus/tokens",
+        ] {
+            assert_eq!(
+                call(&r, "GET", u, Some(&bob), "").await.0,
+                StatusCode::OK,
+                "{u}"
+            );
+        }
+        assert_eq!(
+            call(&r, "GET", "/api/domus/users", Some(&admin), "")
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let (_, _, v) = call(&r, "GET", "/api/domus/status", Some(&bob), "").await;
+        assert_eq!(
+            (
+                v["user"]["username"].as_str(),
+                v["user"]["is_admin"].as_bool()
+            ),
+            (Some("bob"), Some(false))
+        );
+    }
+
+    #[tokio::test]
+    async fn tokens_belong_to_their_owner() {
+        let (r, app) = setup_app().await;
+        let (admin, bob) = admin_and_member(&r).await;
+        let post = |c: &str, name: &str| {
+            let (r, c, body) = (r.clone(), c.to_string(), format!(r#"{{"name":"{name}"}}"#));
+            async move { call(&r, "POST", "/api/domus/tokens", Some(&c), &body).await }
+        };
+        let (_, _, a) = post(&admin, "admin-watch").await;
+        let (_, _, b) = post(&bob, "bob-watch").await;
+
+        let names = |v: &Value| -> Vec<String> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().into())
+                .collect()
+        };
+        let (_, _, mine) = call(&r, "GET", "/api/domus/tokens", Some(&bob), "").await;
+        assert_eq!(names(&mine), ["bob-watch"]);
+        let (_, _, all) = call(&r, "GET", "/api/domus/tokens", Some(&admin), "").await;
+        assert_eq!(names(&all), ["admin-watch", "bob-watch"]);
+        assert_eq!(all[1]["username"], "bob");
+
+        // bob cannot revoke the admin's token; the admin can revoke bob's
+        let revoke = |c: &str, v: &Value| {
+            let (r, c, uri) = (
+                r.clone(),
+                c.to_string(),
+                format!("/api/domus/tokens/{}", v["id"]),
+            );
+            async move { call(&r, "DELETE", &uri, Some(&c), "").await.0 }
+        };
+        assert_eq!(revoke(&bob, &a).await, StatusCode::NOT_FOUND);
+        assert_eq!(revoke(&admin, &b).await, StatusCode::OK);
+        let hash = sha256_hex(a["token"].as_str().unwrap());
+        assert!(app.core.store().token_scope(&hash).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn user_management_rules() {
+        let (r, app) = setup_app().await;
+        let (admin, bob) = admin_and_member(&r).await;
+        let put = |c: &str, uri: &str, body: &str| {
+            let (r, c, uri, body) = (r.clone(), c.to_string(), uri.to_string(), body.to_string());
+            async move { call(&r, "PUT", &uri, Some(&c), &body).await.0 }
+        };
+        let bob_id = app.core.store().user_login("bob").await.unwrap().0.id;
+        let bob_uri = format!("/api/domus/users/{bob_id}");
+
+        // duplicates (case-insensitive) and weak passwords are refused
+        let dup = r#"{"username":"Bob","password":"long enough"}"#;
+        assert_eq!(
+            call(&r, "POST", "/api/domus/users", Some(&admin), dup)
+                .await
+                .0,
+            StatusCode::CONFLICT
+        );
+        let weak = r#"{"username":"eve","password":"short"}"#;
+        assert_eq!(
+            call(&r, "POST", "/api/domus/users", Some(&admin), weak)
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+
+        // the last admin can be neither demoted nor deleted; nobody deletes themselves
+        assert_eq!(
+            put(&admin, "/api/domus/users/1", r#"{"is_admin":false}"#).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call(&r, "DELETE", "/api/domus/users/1", Some(&admin), "")
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+
+        // an admin reset signs the user out and the new password works
+        assert_eq!(
+            put(&admin, &bob_uri, r#"{"password":"reset reset"}"#).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(&r, "GET", "/api/domus/tokens", Some(&bob), "").await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let login = r#"{"username":"bob","password":"reset reset"}"#;
+        assert_eq!(
+            call(&r, "POST", "/api/domus/login", None, login).await.0,
+            StatusCode::OK
+        );
+
+        // promote bob, then the original admin may be demoted
+        assert_eq!(
+            put(&admin, &bob_uri, r#"{"is_admin":true}"#).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            put(&admin, "/api/domus/users/1", r#"{"is_admin":false}"#).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            put(&admin, "/api/domus/users/99", "{}").await,
+            StatusCode::FORBIDDEN
+        );
+
+        // deleting a user ends their session
+        let (_, h, _) = call(&r, "POST", "/api/domus/login", None, login).await;
+        let bob = cookie_of(&h);
+        assert_eq!(
+            call(&r, "DELETE", "/api/domus/users/1", Some(&bob), "")
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(&r, "GET", "/api/domus/tokens", Some(&admin), "")
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn changing_own_password() {
+        let (r, _) = setup_app().await;
+        let (_, bob) = admin_and_member(&r).await;
+        let change = |body: &str| {
+            let (r, bob, body) = (r.clone(), bob.clone(), body.to_string());
+            async move { call(&r, "POST", "/api/domus/password", Some(&bob), &body).await }
+        };
+        assert_eq!(
+            change(r#"{"current":"wrong","new":"brand new pw"}"#)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            change(r#"{"current":"bob's password","new":"short"}"#)
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        let (s, h, _) = change(r#"{"current":"bob's password","new":"brand new pw"}"#).await;
+        assert_eq!(s, StatusCode::OK);
+        // the old session is gone, the fresh one works
+        assert_eq!(
+            call(&r, "GET", "/api/domus/tokens", Some(&bob), "").await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let fresh = cookie_of(&h);
+        assert_eq!(
+            call(&r, "GET", "/api/domus/tokens", Some(&fresh), "")
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let login = r#"{"username":"bob","password":"brand new pw"}"#;
+        assert_eq!(
+            call(&r, "POST", "/api/domus/login", None, login).await.0,
+            StatusCode::OK
+        );
+    }
+
     #[tokio::test]
     async fn secure_cookie_behind_https_proxy() {
         let (r, _) = setup_app().await;
@@ -597,7 +1011,9 @@ mod tests {
             .uri("/api/domus/setup")
             .header("content-type", "application/json")
             .header("x-forwarded-proto", "https")
-            .body(Body::from(r#"{"password":"correct horse"}"#))
+            .body(Body::from(
+                r#"{"username":"admin","password":"correct horse"}"#,
+            ))
             .unwrap();
         let resp = r.clone().oneshot(req).await.unwrap();
         assert!(
@@ -645,7 +1061,7 @@ mod tests {
             "POST",
             "/api/domus/setup",
             None,
-            r#"{"password":"correct horse"}"#,
+            r#"{"username":"admin","password":"correct horse"}"#,
         )
         .await;
         let c = cookie_of(&h);
@@ -689,7 +1105,7 @@ mod tests {
             "POST",
             "/api/domus/setup",
             None,
-            r#"{"password":"correct horse"}"#,
+            r#"{"username":"admin","password":"correct horse"}"#,
         )
         .await;
         let c = cookie_of(&h);
@@ -882,7 +1298,7 @@ mod tests {
             "POST",
             "/api/domus/setup",
             None,
-            r#"{"password":"correct horse"}"#,
+            r#"{"username":"admin","password":"correct horse"}"#,
         )
         .await;
         let c = cookie_of(&h);
@@ -950,7 +1366,7 @@ mod tests {
         app.core.set_state("light.hue_a", "off", Map::new());
         app.core.set_state("light.hue_bad", "off", Map::new());
         app.core.set_state("scene.hue_s", "unknown", Map::new());
-        let body = r#"{"password":"correct horse"}"#;
+        let body = r#"{"username":"admin","password":"correct horse"}"#;
         let (_, h, _) = call(&r, "POST", "/api/domus/setup", None, body).await;
         let c = cookie_of(&h);
         let post = |b: &'static str| {

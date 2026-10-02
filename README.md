@@ -18,7 +18,7 @@ subset needed by [hasscontrol](https://github.com/hatl/hasscontrol) (a Garmin wa
 - **Home Assistant REST subset** - Works with hasscontrol out of the box
 - **Hue CLIP v2** - Lights and scenes from your Hue Bridge
 - **Groups** - Pick and order the lights and scenes a watch sees; optional all-lights switch per group
-- **Admin page** - Pair the bridge, edit groups, manage tokens and test devices; works on phones too
+- **Admin page** - Pair the bridge, edit groups, manage users and tokens, test devices; works on phones too
 - **Docker Ready** - Single binary with all assets embedded, multi-platform images
 
 ## Quick Start
@@ -34,7 +34,7 @@ docker run -d \
 ```
 
 `main` tracks the default branch; releases also get semver tags (`0.1.0`, `0.1`).
-Open `http://localhost:8123` and set the admin password on first start, then continue with [Usage](#usage).
+Open `http://localhost:8123` and create the admin account on first start, then continue with [Usage](#usage).
 
 ### Building from Source
 
@@ -58,9 +58,9 @@ Everything else is configured in the admin page at `/`.
 
 ## Usage
 
-Admin page tabs: Dashboard, Groups, Devices, Tokens, Settings.
+Admin page tabs: Dashboard, Groups (admin), Devices, Tokens, Users (admin), Settings. Regular users see Dashboard, Devices, Tokens and Settings, and only their own tokens.
 
-1. Set the admin password (first start only).
+1. Create the admin account (username and password; first start only). Add more users in Users; admins manage the bridge, groups and users, regular users control lights and manage their own tokens. Upgrading from v0.1.0 turns the old password into the user `admin`; everyone must log in again.
 2. Pair the Hue Bridge (Settings): enter its IP, press the bridge's link button, click **Pair**.
 3. Create a group (e.g. `Garmin`, Groups), tick lights and scenes, order them, and save. A watch preview shows what hasscontrol will list.
 4. Create a long-lived access token (Tokens; shown once, only its hash is stored; "last used" is tracked). Tokens look like `domus_` + 32 hex characters. Optionally limit a token to chosen groups: it can then only reach those groups, their members and the group's light switch. Out-of-scope reads return 404 and out-of-scope service targets are skipped. Tokens without a scope keep full access.
@@ -150,7 +150,7 @@ For LAN-only use, get a certificate via DNS-01 (Let's Encrypt) for a name that r
 ## Security notes
 
 - The Hue application key is stored in plaintext in the SQLite DB; protect the data directory.
-- Admin password: argon2id. Access tokens: SHA-256 hashes. Sessions: HttpOnly, SameSite=Strict cookie.
+- User passwords: argon2id. Access tokens: SHA-256 hashes. Sessions: HttpOnly, SameSite=Strict cookie.
 - There is no login rate limiting; do not expose the admin page to the open internet without one at the proxy.
 
 ## Not implemented (yet)

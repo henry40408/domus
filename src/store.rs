@@ -1,4 +1,4 @@
-//! SQLite persistence: owner, sessions, long-lived tokens, Hue bridge, groups.
+//! SQLite persistence: users, sessions, long-lived tokens, Hue bridge, groups.
 
 use serde::Serialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
@@ -19,6 +19,25 @@ pub struct TokenInfo {
     pub last_used: Option<i64>,
     /// Group names the token may use; `None` means unrestricted.
     pub scope: Option<Vec<String>>,
+    pub user_id: Option<i64>,
+    pub username: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct User {
+    pub id: i64,
+    pub username: String,
+    pub is_admin: bool,
+    pub created: i64,
+}
+
+fn user_row(r: &sqlx::sqlite::SqliteRow) -> User {
+    User {
+        id: r.get(0),
+        username: r.get(1),
+        is_admin: r.get(2),
+        created: r.get(3),
+    }
 }
 
 /// What a token may touch: `None` is everything, otherwise only the listed groups and their members.
@@ -61,52 +80,156 @@ impl Store {
         Ok(Self { pool })
     }
 
-    // owner
+    // users
 
-    pub async fn owner_hash(&self) -> Option<String> {
-        sqlx::query_scalar("SELECT password_hash FROM owner WHERE id = 1")
+    pub async fn user_count(&self) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM users")
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(0)
+    }
+
+    /// `None` if the username is taken (names are case-insensitive).
+    pub async fn create_user(
+        &self,
+        username: &str,
+        password_hash: &str,
+        is_admin: bool,
+    ) -> Option<i64> {
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, is_admin, created) VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(username)
+        .bind(password_hash)
+        .bind(is_admin)
+        .bind(now_secs())
+        .execute(&self.pool)
+        .await
+        .ok()
+        .map(|r| r.last_insert_rowid())
+    }
+
+    /// Creates the first user as an admin, only while no user exists.
+    pub async fn create_first_admin(&self, username: &str, password_hash: &str) -> Option<i64> {
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, is_admin, created)
+             SELECT ?1, ?2, 1, ?3 WHERE NOT EXISTS (SELECT 1 FROM users)",
+        )
+        .bind(username)
+        .bind(password_hash)
+        .bind(now_secs())
+        .execute(&self.pool)
+        .await
+        .ok()
+        .filter(|r| r.rows_affected() == 1)
+        .map(|r| r.last_insert_rowid())
+    }
+
+    /// The user and their password hash, for logging in.
+    pub async fn user_login(&self, username: &str) -> Option<(User, String)> {
+        sqlx::query(
+            "SELECT id, username, is_admin, created, password_hash FROM users WHERE username = ?1",
+        )
+        .bind(username)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|r| (user_row(&r), r.get(4)))
+    }
+
+    pub async fn user_hash(&self, id: i64) -> Option<String> {
+        sqlx::query_scalar("SELECT password_hash FROM users WHERE id = ?1")
+            .bind(id)
             .fetch_optional(&self.pool)
             .await
             .ok()
             .flatten()
     }
 
-    /// Returns false if an owner already exists.
-    pub async fn set_owner_if_absent(&self, password_hash: &str) -> bool {
-        sqlx::query("INSERT OR IGNORE INTO owner (id, password_hash) VALUES (1, ?1)")
+    pub async fn list_users(&self) -> Vec<User> {
+        sqlx::query("SELECT id, username, is_admin, created FROM users ORDER BY id")
+            .fetch_all(&self.pool)
+            .await
+            .map(|rows| rows.iter().map(user_row).collect())
+            .unwrap_or_default()
+    }
+
+    pub async fn admin_count(&self) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_admin = 1")
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(0)
+    }
+
+    pub async fn set_password(&self, id: i64, password_hash: &str) -> bool {
+        sqlx::query("UPDATE users SET password_hash = ?2 WHERE id = ?1")
+            .bind(id)
             .bind(password_hash)
             .execute(&self.pool)
             .await
-            .map(|r| r.rows_affected() == 1)
+            .map(|r| r.rows_affected() > 0)
+            .unwrap_or(false)
+    }
+
+    pub async fn set_admin(&self, id: i64, is_admin: bool) -> bool {
+        sqlx::query("UPDATE users SET is_admin = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(is_admin)
+            .execute(&self.pool)
+            .await
+            .map(|r| r.rows_affected() > 0)
+            .unwrap_or(false)
+    }
+
+    /// Removes the user together with their sessions and tokens.
+    pub async fn delete_user(&self, id: i64) -> bool {
+        let _ = sqlx::query("DELETE FROM sessions WHERE user_id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM tokens WHERE user_id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await;
+        sqlx::query("DELETE FROM users WHERE id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map(|r| r.rows_affected() > 0)
             .unwrap_or(false)
     }
 
     // sessions
 
-    pub async fn create_session(&self, token_hash: &str) {
+    pub async fn create_session(&self, token_hash: &str, user_id: i64) {
         let expires = now_secs() + SESSION_TTL_SECS;
         let _ = sqlx::query("DELETE FROM sessions WHERE expires < ?1")
             .bind(now_secs())
             .execute(&self.pool)
             .await;
-        let _ =
-            sqlx::query("INSERT OR REPLACE INTO sessions (token_hash, expires) VALUES (?1, ?2)")
-                .bind(token_hash)
-                .bind(expires)
-                .execute(&self.pool)
-                .await;
+        let _ = sqlx::query(
+            "INSERT OR REPLACE INTO sessions (token_hash, expires, user_id) VALUES (?1, ?2, ?3)",
+        )
+        .bind(token_hash)
+        .bind(expires)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await;
     }
 
-    pub async fn session_valid(&self, token_hash: &str) -> bool {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM sessions WHERE token_hash = ?1 AND expires > ?2",
+    pub async fn session_user(&self, token_hash: &str) -> Option<User> {
+        sqlx::query(
+            "SELECT u.id, u.username, u.is_admin, u.created FROM sessions s
+             JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?1 AND s.expires > ?2",
         )
         .bind(token_hash)
         .bind(now_secs())
         .fetch_optional(&self.pool)
         .await
-        .map(|o| o.is_some())
-        .unwrap_or(false)
+        .ok()
+        .flatten()
+        .map(|r| user_row(&r))
     }
 
     pub async fn delete_session(&self, token_hash: &str) {
@@ -116,47 +239,69 @@ impl Store {
             .await;
     }
 
+    /// Ends every session of the user (after a password change).
+    pub async fn delete_user_sessions(&self, user_id: i64) {
+        let _ = sqlx::query("DELETE FROM sessions WHERE user_id = ?1")
+            .bind(user_id)
+            .execute(&self.pool)
+            .await;
+    }
+
     // long-lived tokens (only the hash is stored)
 
     pub async fn create_token(
         &self,
+        user_id: i64,
         name: &str,
         token_hash: &str,
         scope: Option<&[String]>,
     ) -> Option<i64> {
         let scope = scope.map(|s| serde_json::to_string(s).unwrap_or_else(|_| "[]".into()));
-        sqlx::query("INSERT INTO tokens (name, token_hash, created, scope) VALUES (?1, ?2, ?3, ?4)")
-            .bind(name)
-            .bind(token_hash)
-            .bind(now_secs())
-            .bind(scope)
-            .execute(&self.pool)
-            .await
-            .ok()
-            .map(|r| r.last_insert_rowid())
+        sqlx::query(
+            "INSERT INTO tokens (name, token_hash, created, scope, user_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(name)
+        .bind(token_hash)
+        .bind(now_secs())
+        .bind(scope)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await
+        .ok()
+        .map(|r| r.last_insert_rowid())
     }
 
-    pub async fn list_tokens(&self) -> Vec<TokenInfo> {
-        sqlx::query("SELECT id, name, created, last_used, scope FROM tokens ORDER BY id")
-            .fetch_all(&self.pool)
-            .await
-            .map(|rows| {
-                rows.iter()
-                    .map(|r| TokenInfo {
-                        id: r.get(0),
-                        name: r.get(1),
-                        created: r.get(2),
-                        last_used: r.get(3),
-                        scope: parse_scope(r.get(4)),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+    /// All tokens, or only those of `user_id` when given.
+    pub async fn list_tokens(&self, user_id: Option<i64>) -> Vec<TokenInfo> {
+        sqlx::query(
+            "SELECT t.id, t.name, t.created, t.last_used, t.scope, t.user_id, u.username
+             FROM tokens t LEFT JOIN users u ON u.id = t.user_id
+             WHERE ?1 IS NULL OR t.user_id = ?1 ORDER BY t.id",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| {
+            rows.iter()
+                .map(|r| TokenInfo {
+                    id: r.get(0),
+                    name: r.get(1),
+                    created: r.get(2),
+                    last_used: r.get(3),
+                    scope: parse_scope(r.get(4)),
+                    user_id: r.get(5),
+                    username: r.get(6),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
     }
 
-    pub async fn revoke_token(&self, id: i64) -> bool {
-        sqlx::query("DELETE FROM tokens WHERE id = ?1")
+    /// Revokes a token; with `user_id` only if it belongs to that user.
+    pub async fn revoke_token(&self, id: i64, user_id: Option<i64>) -> bool {
+        sqlx::query("DELETE FROM tokens WHERE id = ?1 AND (?2 IS NULL OR user_id = ?2)")
             .bind(id)
+            .bind(user_id)
             .execute(&self.pool)
             .await
             .map(|r| r.rows_affected() > 0)
@@ -356,41 +501,79 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn owner_set_once() {
+    async fn first_admin_only_while_no_user_exists() {
         let s = Store::open_memory().await.unwrap();
-        assert!(s.owner_hash().await.is_none());
-        assert!(s.set_owner_if_absent("a").await);
-        assert!(!s.set_owner_if_absent("b").await);
-        assert_eq!(s.owner_hash().await.as_deref(), Some("a"));
+        assert_eq!(s.user_count().await, 0);
+        let id = s.create_first_admin("Root", "a").await.unwrap();
+        assert!(s.create_first_admin("other", "b").await.is_none());
+        let (user, hash) = s.user_login("root").await.unwrap();
+        assert_eq!((user.id, user.is_admin, hash.as_str()), (id, true, "a"));
+        assert_eq!(s.user_login("root").await.unwrap().0.username, "Root");
+    }
+
+    #[tokio::test]
+    async fn user_management() {
+        let s = Store::open_memory().await.unwrap();
+        let admin = s.create_first_admin("admin", "a").await.unwrap();
+        let bob = s.create_user("bob", "b", false).await.unwrap();
+        assert!(
+            s.create_user("BOB", "x", false).await.is_none(),
+            "case-insensitive"
+        );
+        assert_eq!(s.admin_count().await, 1);
+        assert!(s.set_admin(bob, true).await);
+        assert_eq!(s.admin_count().await, 2);
+        assert!(s.set_password(bob, "new").await);
+        assert_eq!(s.user_hash(bob).await.as_deref(), Some("new"));
+        assert_eq!(s.list_users().await.len(), 2);
+
+        s.create_session("sb", bob).await;
+        s.create_token(bob, "watch", "hb", None).await.unwrap();
+        assert!(s.delete_user(bob).await);
+        assert!(!s.delete_user(bob).await);
+        assert!(s.session_user("sb").await.is_none());
+        assert!(
+            s.token_scope("hb").await.is_none(),
+            "tokens go with the user"
+        );
+        assert_eq!(s.list_users().await[0].id, admin);
     }
 
     #[tokio::test]
     async fn token_lifecycle() {
         let s = Store::open_memory().await.unwrap();
-        let id = s.create_token("watch", "h1", None).await.unwrap();
-        assert!(s.list_tokens().await[0].last_used.is_none());
+        let (a, b) = (
+            s.create_user("a", "x", false).await.unwrap(),
+            s.create_user("b", "x", false).await.unwrap(),
+        );
+        let id = s.create_token(a, "watch", "h1", None).await.unwrap();
+        s.create_token(b, "other", "h3", None).await.unwrap();
+        assert!(s.list_tokens(Some(a)).await[0].last_used.is_none());
         assert!(s.token_scope("h1").await.is_some());
-        assert!(s.list_tokens().await[0].last_used.is_some());
+        assert!(s.list_tokens(Some(a)).await[0].last_used.is_some());
         assert!(!s.token_scope("h2").await.is_some());
-        assert_eq!(s.list_tokens().await.len(), 1);
-        assert_eq!(s.list_tokens().await[0].name, "watch");
-        assert!(s.revoke_token(id).await);
+        assert_eq!(s.list_tokens(Some(a)).await.len(), 1);
+        assert_eq!(s.list_tokens(Some(a)).await[0].name, "watch");
+        assert_eq!(s.list_tokens(None).await.len(), 2);
+        assert_eq!(s.list_tokens(None).await[1].username.as_deref(), Some("b"));
+        assert!(!s.revoke_token(id, Some(b)).await, "not b's token");
+        assert!(s.revoke_token(id, Some(a)).await);
         assert!(!s.token_scope("h1").await.is_some());
-        assert!(!s.revoke_token(id).await);
+        assert!(!s.revoke_token(id, None).await);
     }
 
     #[tokio::test]
     async fn token_scope_roundtrip() {
         let s = Store::open_memory().await.unwrap();
-        s.create_token("open", "h-open", None).await.unwrap();
+        s.create_token(1, "open", "h-open", None).await.unwrap();
         let scope = ["a".to_string(), "b".to_string()];
-        s.create_token("scoped", "h-scoped", Some(&scope))
+        s.create_token(1, "scoped", "h-scoped", Some(&scope))
             .await
             .unwrap();
         assert_eq!(s.token_scope("h-open").await, Some(None));
         assert_eq!(s.token_scope("h-scoped").await, Some(Some(scope.to_vec())));
         assert_eq!(s.token_scope("nope").await, None);
-        let list = s.list_tokens().await;
+        let list = s.list_tokens(None).await;
         assert_eq!(list[0].scope, None);
         assert_eq!(list[1].scope.as_deref(), Some(&scope[..]));
     }
@@ -405,11 +588,15 @@ mod tests {
     #[tokio::test]
     async fn session_lifecycle() {
         let s = Store::open_memory().await.unwrap();
-        assert!(!s.session_valid("x").await);
-        s.create_session("x").await;
-        assert!(s.session_valid("x").await);
+        let id = s.create_user("u", "h", false).await.unwrap();
+        assert!(s.session_user("x").await.is_none());
+        s.create_session("x", id).await;
+        assert_eq!(s.session_user("x").await.unwrap().username, "u");
         s.delete_session("x").await;
-        assert!(!s.session_valid("x").await);
+        assert!(s.session_user("x").await.is_none());
+        s.create_session("y", id).await;
+        s.delete_user_sessions(id).await;
+        assert!(s.session_user("y").await.is_none());
     }
 
     #[tokio::test]
@@ -494,7 +681,13 @@ mod tests {
         .await
         .unwrap();
         let s = Store::init(pool).await.unwrap();
-        assert_eq!(s.owner_hash().await.as_deref(), Some("hash"));
+        let (admin, hash) = s.user_login("admin").await.unwrap();
+        assert_eq!((admin.id, admin.is_admin, hash.as_str()), (1, true, "hash"));
+        assert_eq!(
+            s.list_tokens(Some(1)).await.len(),
+            1,
+            "token now belongs to the admin"
+        );
         assert!(s.token_scope("th").await.is_some());
         assert_eq!(s.hue_get().await.unwrap().ip, "10.0.0.2");
         assert!(s.group_exposed("garmin").await);
@@ -508,10 +701,10 @@ mod tests {
         let path = dir.join("domus.db");
         {
             let s = Store::open(&path).await.unwrap();
-            s.set_owner_if_absent("a").await;
+            s.create_first_admin("root", "a").await;
         }
         let s = Store::open(&path).await.unwrap();
-        assert_eq!(s.owner_hash().await.as_deref(), Some("a"));
+        assert_eq!(s.user_hash(1).await.as_deref(), Some("a"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
