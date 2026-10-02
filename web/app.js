@@ -399,11 +399,16 @@ function devices() {
 
 function tokens() {
   const name = el("input", { type: "text", placeholder: "Token name, e.g. Garmin watch" });
+  const boxes = data.groups.map((g) => ({ g, box: el("input", { type: "checkbox" }) }));
   const create = () => guarded(async () => {
-    const t = await api("POST", "/tokens", { name: name.value });
+    const picked = boxes.filter((b) => b.box.checked).map((b) => b.g.name);
+    const t = await api("POST", "/tokens", { name: name.value, scope: picked.length ? picked : null });
     ui.fresh = t.token;
     await refresh();
   });
+  const picker = boxes.length && el("div", { class: "scope" },
+    el("p", { class: "muted" }, "Limit to groups (leave all unchecked for full access):"),
+    ...boxes.map((b) => el("label", {}, b.box, " " + b.g.name)));
   name.addEventListener("keydown", (e) => { if (e.key === "Enter") create(); });
   const fresh = ui.fresh && el("div", { class: "warn" },
     "Copy this token now; it is shown only once. Click it to select all.",
@@ -414,6 +419,7 @@ function tokens() {
     el("p", { class: "sub" }, "Long-lived access tokens. Only a hash is stored."),
     el("div", { class: "card" },
       el("div", { class: "row" }, el("div", { class: "grow" }, name), el("button", { class: "primary", onclick: create }, "Create token")),
+      picker,
       fresh,
       data.tokens.length
         ? el("ul", { class: "rows" }, ...data.tokens.map((t) => el("li", {},
@@ -426,6 +432,7 @@ function tokens() {
               await refresh();
             }),
           }, "Revoke"),
+          el("span", { class: "meta" }, t.scope ? "Groups: " + t.scope.join(", ") : "Full access"),
           el("span", { class: "meta" }, "Created " + fmtDate(t.created)),
           el("span", { class: "meta" }, "Last used " + ago(t.last_used)))))
         : el("p", { class: "muted" }, "No tokens yet.")),

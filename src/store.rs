@@ -17,6 +17,16 @@ pub struct TokenInfo {
     pub created: i64,
     /// Unix seconds of the last authenticated request (coarse: refreshed at most once a minute).
     pub last_used: Option<i64>,
+    /// Group names the token may use; `None` means unrestricted.
+    pub scope: Option<Vec<String>>,
+}
+
+/// What a token may touch: `None` is everything, otherwise only the listed groups and their members.
+pub type Scope = Option<Vec<String>>;
+
+fn parse_scope(raw: Option<String>) -> Scope {
+    // An unreadable value must not widen access: it becomes an empty scope (nothing allowed).
+    raw.map(|r| serde_json::from_str(&r).unwrap_or_default())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,11 +118,18 @@ impl Store {
 
     // long-lived tokens (only the hash is stored)
 
-    pub async fn create_token(&self, name: &str, token_hash: &str) -> Option<i64> {
-        sqlx::query("INSERT INTO tokens (name, token_hash, created) VALUES (?1, ?2, ?3)")
+    pub async fn create_token(
+        &self,
+        name: &str,
+        token_hash: &str,
+        scope: Option<&[String]>,
+    ) -> Option<i64> {
+        let scope = scope.map(|s| serde_json::to_string(s).unwrap_or_else(|_| "[]".into()));
+        sqlx::query("INSERT INTO tokens (name, token_hash, created, scope) VALUES (?1, ?2, ?3, ?4)")
             .bind(name)
             .bind(token_hash)
             .bind(now_secs())
+            .bind(scope)
             .execute(&self.pool)
             .await
             .ok()
@@ -120,7 +137,7 @@ impl Store {
     }
 
     pub async fn list_tokens(&self) -> Vec<TokenInfo> {
-        sqlx::query("SELECT id, name, created, last_used FROM tokens ORDER BY id")
+        sqlx::query("SELECT id, name, created, last_used, scope FROM tokens ORDER BY id")
             .fetch_all(&self.pool)
             .await
             .map(|rows| {
@@ -130,6 +147,7 @@ impl Store {
                         name: r.get(1),
                         created: r.get(2),
                         last_used: r.get(3),
+                        scope: parse_scope(r.get(4)),
                     })
                     .collect()
             })
@@ -145,14 +163,18 @@ impl Store {
             .unwrap_or(false)
     }
 
-    pub async fn token_valid(&self, token_hash: &str) -> bool {
-        let valid = sqlx::query_scalar::<_, i64>("SELECT 1 FROM tokens WHERE token_hash = ?1")
-            .bind(token_hash)
-            .fetch_optional(&self.pool)
-            .await
-            .map(|o| o.is_some())
-            .unwrap_or(false);
-        if valid {
+    /// Authenticates a token by its hash: `None` if unknown, otherwise its scope.
+    pub async fn token_scope(&self, token_hash: &str) -> Option<Scope> {
+        // Outer Option: is there such a token; inner: its (nullable) scope column.
+        let row: Option<Option<String>> =
+            sqlx::query_scalar("SELECT scope FROM tokens WHERE token_hash = ?1")
+                .bind(token_hash)
+                .fetch_optional(&self.pool)
+                .await
+                .ok()
+                .flatten();
+        let scope = row.map(parse_scope);
+        if scope.is_some() {
             // Throttled so a polling client does not write on every request.
             let now = now_secs();
             let _ = sqlx::query(
@@ -165,7 +187,7 @@ impl Store {
             .execute(&self.pool)
             .await;
         }
-        valid
+        scope
     }
 
     // Hue bridge
@@ -345,16 +367,39 @@ mod tests {
     #[tokio::test]
     async fn token_lifecycle() {
         let s = Store::open_memory().await.unwrap();
-        let id = s.create_token("watch", "h1").await.unwrap();
+        let id = s.create_token("watch", "h1", None).await.unwrap();
         assert!(s.list_tokens().await[0].last_used.is_none());
-        assert!(s.token_valid("h1").await);
+        assert!(s.token_scope("h1").await.is_some());
         assert!(s.list_tokens().await[0].last_used.is_some());
-        assert!(!s.token_valid("h2").await);
+        assert!(!s.token_scope("h2").await.is_some());
         assert_eq!(s.list_tokens().await.len(), 1);
         assert_eq!(s.list_tokens().await[0].name, "watch");
         assert!(s.revoke_token(id).await);
-        assert!(!s.token_valid("h1").await);
+        assert!(!s.token_scope("h1").await.is_some());
         assert!(!s.revoke_token(id).await);
+    }
+
+    #[tokio::test]
+    async fn token_scope_roundtrip() {
+        let s = Store::open_memory().await.unwrap();
+        s.create_token("open", "h-open", None).await.unwrap();
+        let scope = ["a".to_string(), "b".to_string()];
+        s.create_token("scoped", "h-scoped", Some(&scope))
+            .await
+            .unwrap();
+        assert_eq!(s.token_scope("h-open").await, Some(None));
+        assert_eq!(s.token_scope("h-scoped").await, Some(Some(scope.to_vec())));
+        assert_eq!(s.token_scope("nope").await, None);
+        let list = s.list_tokens().await;
+        assert_eq!(list[0].scope, None);
+        assert_eq!(list[1].scope.as_deref(), Some(&scope[..]));
+    }
+
+    #[test]
+    fn unparseable_scope_allows_nothing() {
+        assert_eq!(parse_scope(None), None);
+        assert_eq!(parse_scope(Some("[\"a\"]".into())), Some(vec!["a".into()]));
+        assert_eq!(parse_scope(Some("not json".into())), Some(Vec::new()));
     }
 
     #[tokio::test]
@@ -450,7 +495,7 @@ mod tests {
         .unwrap();
         let s = Store::init(pool).await.unwrap();
         assert_eq!(s.owner_hash().await.as_deref(), Some("hash"));
-        assert!(s.token_valid("th").await);
+        assert!(s.token_scope("th").await.is_some());
         assert_eq!(s.hue_get().await.unwrap().ip, "10.0.0.2");
         assert!(s.group_exposed("garmin").await);
         assert_eq!(s.group_members("garmin").await, vec!["light.a"]);

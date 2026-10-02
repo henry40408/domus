@@ -332,6 +332,8 @@ async fn tokens(State(app): State<AppState>) -> Json<Value> {
 #[derive(Deserialize)]
 struct TokenBody {
     name: String,
+    /// Groups the token may use; omitted or null means unrestricted.
+    scope: Option<Vec<String>>,
 }
 
 async fn token_create(State(app): State<AppState>, Json(body): Json<TokenBody>) -> Response {
@@ -342,12 +344,31 @@ async fn token_create(State(app): State<AppState>, Json(body): Json<TokenBody>) 
             "Give the token a name (max 64 characters).",
         );
     }
+    let scope = match body.scope {
+        None => None,
+        Some(mut groups) => {
+            groups.sort();
+            groups.dedup();
+            if groups.is_empty() {
+                return message(
+                    StatusCode::BAD_REQUEST,
+                    "Pick at least one group, or leave the token unrestricted.",
+                );
+            }
+            for g in &groups {
+                if !app.core.store().group_exists(g).await {
+                    return message(StatusCode::BAD_REQUEST, &format!("No such group: {g}."));
+                }
+            }
+            Some(groups)
+        }
+    };
     // 128 bits of entropy; the prefix makes the token recognisable to people and secret scanners.
     let token = format!("{TOKEN_PREFIX}{}", random_hex(16));
     match app
         .core
         .store()
-        .create_token(name, &sha256_hex(&token))
+        .create_token(name, &sha256_hex(&token), scope.as_deref())
         .await
     {
         // The plaintext is returned exactly once; only its hash is stored.
@@ -617,6 +638,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn token_scope_is_validated_and_listed() {
+        let (r, app) = setup_app().await;
+        let (_, h, _) = call(
+            &r,
+            "POST",
+            "/api/domus/setup",
+            None,
+            r#"{"password":"correct horse"}"#,
+        )
+        .await;
+        let c = cookie_of(&h);
+        app.core
+            .store()
+            .group_set("Garmin", &["light.hue_a".into()])
+            .await
+            .unwrap();
+
+        let post = |body: &'static str| {
+            let (r, c) = (r.clone(), c.clone());
+            async move { call(&r, "POST", "/api/domus/tokens", Some(&c), body).await }
+        };
+        assert_eq!(
+            post(r#"{"name":"a","scope":[]}"#).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post(r#"{"name":"a","scope":["Nope"]}"#).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        let (s, _, v) = post(r#"{"name":"a","scope":["Garmin","Garmin"]}"#).await;
+        assert_eq!(s, StatusCode::OK);
+        let hash = sha256_hex(v["token"].as_str().unwrap());
+        assert_eq!(
+            app.core.store().token_scope(&hash).await,
+            Some(Some(vec!["Garmin".to_string()]))
+        );
+        assert_eq!(post(r#"{"name":"open"}"#).await.0, StatusCode::OK);
+
+        let (_, _, list) = call(&r, "GET", "/api/domus/tokens", Some(&c), "").await;
+        assert_eq!(list[0]["scope"], json!(["Garmin"]));
+        assert!(list[1]["scope"].is_null());
+    }
+
+    #[tokio::test]
     async fn tokens_groups_and_lights() {
         let (r, app) = setup_app().await;
         let (_, h, _) = call(
@@ -644,7 +709,13 @@ mod tests {
             token.starts_with("domus_") && token.len() == 6 + 32,
             "{token}"
         );
-        assert!(app.core.store().token_valid(&sha256_hex(&token)).await);
+        assert!(
+            app.core
+                .store()
+                .token_scope(&sha256_hex(&token))
+                .await
+                .is_some()
+        );
         let (_, _, list) = call(&r, "GET", "/api/domus/tokens", Some(&c), "").await;
         assert_eq!(list[0]["name"], "watch");
         assert!(list[0].get("token").is_none());
@@ -667,7 +738,13 @@ mod tests {
             .0,
             StatusCode::OK
         );
-        assert!(!app.core.store().token_valid(&sha256_hex(&token)).await);
+        assert!(
+            !app.core
+                .store()
+                .token_scope(&sha256_hex(&token))
+                .await
+                .is_some()
+        );
         assert_eq!(
             call(
                 &r,
