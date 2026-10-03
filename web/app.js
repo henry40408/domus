@@ -318,9 +318,19 @@ function groupEditor(d) {
           el("button", { class: "icon", onclick: () => move(id, -1), title: "Move up" }, icon("up")),
           el("button", { class: "icon", onclick: () => move(id, 1), title: "Move down" }, icon("down")));
         li.addEventListener("dragstart", () => { dragId = id; li.classList.add("drag"); });
-        li.addEventListener("dragend", () => li.classList.remove("drag"));
-        li.addEventListener("dragover", (e) => e.preventDefault());
+        const clearDrop = () => li.classList.remove("drop-before", "drop-after");
+        li.addEventListener("dragend", () => { li.classList.remove("drag"); clearDrop(); });
+        li.addEventListener("dragover", (e) => {
+          e.preventDefault();
+          if (!dragId || dragId === id) return;
+          // the dragged item takes over the target's slot: above it when moving up, below it when moving down
+          const down = d.members.indexOf(dragId) < d.members.indexOf(id);
+          li.classList.toggle("drop-after", down);
+          li.classList.toggle("drop-before", !down);
+        });
+        li.addEventListener("dragleave", clearDrop);
         li.addEventListener("drop", () => {
+          clearDrop();
           if (!dragId || dragId === id) return;
           const rest = d.members.filter((x) => x !== dragId);
           rest.splice(rest.indexOf(id), 0, dragId);
