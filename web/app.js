@@ -144,8 +144,10 @@ async function load() {
 
 const isScene = (e) => e.entity_id.startsWith("scene.");
 const isGroupLight = (e) => e.entity_id.startsWith("light.domus_group_");
-const realLights = () => data.entities.filter((e) => !isScene(e) && !isGroupLight(e));
-const scenes = () => data.entities.filter(isScene);
+// A scene's name is "Room: Name", so sorting by name also groups scenes by room.
+const byName = (a, b) => (a.name || a.entity_id).localeCompare(b.name || b.entity_id, undefined, { numeric: true, sensitivity: "base" });
+const realLights = () => data.entities.filter((e) => !isScene(e) && !isGroupLight(e)).sort(byName);
+const scenes = () => data.entities.filter(isScene).sort(byName);
 const find = (id) => data.entities.find((e) => e.entity_id === id);
 const label = (id) => { const e = find(id); return (e && e.name) || id; };
 
