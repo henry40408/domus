@@ -15,6 +15,7 @@ use crate::core::{BoxFut, Core, Integration, LightAction};
 pub const INTEGRATION_NAME: &str = "hue";
 const ENTITY_PREFIX: &str = "light.hue_";
 const SCENE_PREFIX: &str = "scene.hue_";
+const SMART_SCENE_TYPE: &str = "smart_scene";
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 
@@ -98,6 +99,8 @@ pub struct HueScene {
     /// Name of the room or zone the scene belongs to.
     pub group: Option<String>,
     pub active: bool,
+    /// A Hue smart scene (e.g. Natural light): its own resource type and recall action.
+    pub smart: bool,
 }
 
 fn short_id(uuid: &str) -> String {
@@ -119,6 +122,7 @@ impl HueScene {
                 .and_then(Value::as_str)
                 .and_then(|rid| groups.get(rid).cloned()),
             active: scene_active(v).unwrap_or(false),
+            smart: v.get("type").and_then(Value::as_str) == Some(SMART_SCENE_TYPE),
         })
     }
 
@@ -140,9 +144,11 @@ impl HueScene {
     }
 }
 
-/// `status.active` is `inactive`, `static` or `dynamic_palette`.
+/// A scene's `status.active` is `inactive`, `static` or `dynamic_palette`; a smart scene's
+/// `state` is `inactive` or `active`.
 fn scene_active(v: &Value) -> Option<bool> {
     v.pointer("/status/active")
+        .or_else(|| v.get("state"))
         .and_then(Value::as_str)
         .map(|s| s != "inactive")
 }
@@ -290,9 +296,14 @@ impl HueClient {
             .collect())
     }
 
-    /// Scenes with their room/zone names resolved.
+    /// Scenes and smart scenes with their room/zone names resolved.
     pub async fn list_scenes(&self) -> Result<Vec<HueScene>, String> {
-        let scenes = self.list_resource("scene").await?;
+        let mut scenes = self.list_resource("scene").await?;
+        // Older bridges may not know smart scenes: keep the plain scenes in that case.
+        match self.list_resource(SMART_SCENE_TYPE).await {
+            Ok(smart) => scenes.extend(smart),
+            Err(e) => warn!("hue: smart scene sync failed: {e}"),
+        }
         let mut groups = HashMap::new();
         for kind in ["room", "zone"] {
             for g in self.list_resource(kind).await? {
@@ -310,12 +321,17 @@ impl HueClient {
             .collect())
     }
 
-    pub async fn recall_scene(&self, id: &str) -> Result<(), String> {
+    pub async fn recall_scene(&self, id: &str, smart: bool) -> Result<(), String> {
+        let (kind, action) = if smart {
+            (SMART_SCENE_TYPE, "activate")
+        } else {
+            ("scene", "active")
+        };
         let resp = self
             .http
-            .put(format!("{}/clip/v2/resource/scene/{id}", self.base))
+            .put(format!("{}/clip/v2/resource/{kind}/{id}", self.base))
             .header("hue-application-key", &self.key)
-            .json(&json!({"recall": {"action": "active"}}))
+            .json(&json!({"recall": {"action": action}}))
             .send()
             .await
             .map_err(|e| e.to_string())?;
@@ -482,7 +498,7 @@ impl HueIntegration {
                 .flatten()
             {
                 let item_type = item.get("type").and_then(Value::as_str);
-                if item_type == Some("scene") {
+                if matches!(item_type, Some("scene" | SMART_SCENE_TYPE)) {
                     match kind {
                         "update" => self.apply_scene_update(&mut inner, item),
                         "add" | "delete" => resync = true,
@@ -571,13 +587,16 @@ impl Integration for HueIntegration {
 
     fn activate_scene<'a>(&'a self, entity_id: &'a str) -> BoxFut<'a, Result<(), String>> {
         Box::pin(async move {
-            let uuid = self
-                .inner()
-                .scene_by_entity
-                .get(entity_id)
-                .cloned()
-                .ok_or_else(|| format!("unknown scene {entity_id}"))?;
-            self.client.recall_scene(&uuid).await
+            let (uuid, smart) = {
+                let inner = self.inner();
+                let uuid = inner
+                    .scene_by_entity
+                    .get(entity_id)
+                    .ok_or_else(|| format!("unknown scene {entity_id}"))?;
+                let smart = inner.scenes.get(uuid).is_some_and(|s| s.smart);
+                (uuid.clone(), smart)
+            };
+            self.client.recall_scene(&uuid, smart).await
         })
     }
 
@@ -738,6 +757,7 @@ mod tests {
     struct Mock {
         lights: Arc<StdMutex<Vec<Value>>>,
         scenes: Arc<StdMutex<Vec<Value>>>,
+        smart_scenes: Arc<StdMutex<Vec<Value>>>,
         rooms: Arc<StdMutex<Vec<Value>>>,
         puts: Arc<StdMutex<Vec<(String, Value)>>>,
         events: Arc<StdMutex<Vec<String>>>,
@@ -749,6 +769,9 @@ mod tests {
         }
         async fn list_scenes(State(m): State<Mock>) -> Json<Value> {
             Json(json!({"errors": [], "data": m.scenes.lock().unwrap().clone()}))
+        }
+        async fn list_smart_scenes(State(m): State<Mock>) -> Json<Value> {
+            Json(json!({"errors": [], "data": m.smart_scenes.lock().unwrap().clone()}))
         }
         async fn list_rooms(State(m): State<Mock>) -> Json<Value> {
             Json(json!({"errors": [], "data": m.rooms.lock().unwrap().clone()}))
@@ -783,6 +806,8 @@ mod tests {
             .route("/clip/v2/resource/light/{id}", put(put_light))
             .route("/clip/v2/resource/scene", get(list_scenes))
             .route("/clip/v2/resource/scene/{id}", put(put_light))
+            .route("/clip/v2/resource/smart_scene", get(list_smart_scenes))
+            .route("/clip/v2/resource/smart_scene/{id}", put(put_light))
             .route("/clip/v2/resource/room", get(list_rooms))
             .route("/clip/v2/resource/zone", get(list_zones))
             .route("/eventstream/clip/v2", get(events))
@@ -862,6 +887,66 @@ mod tests {
     fn scene_json(id: &str, name: &str, room: &str, active: &str) -> Value {
         json!({"id": id, "type": "scene", "metadata": {"name": name},
                "group": {"rid": room, "rtype": "room"}, "status": {"active": active}})
+    }
+
+    fn smart_scene_json(id: &str, name: &str, room: &str, state: &str) -> Value {
+        json!({"id": id, "type": "smart_scene", "metadata": {"name": name},
+               "group": {"rid": room, "rtype": "room"}, "state": state})
+    }
+
+    #[tokio::test]
+    async fn smart_scenes_sync_recall_and_events() {
+        let mock = Mock::default();
+        *mock.rooms.lock().unwrap() =
+            vec![json!({"id": "room-1", "type": "room", "metadata": {"name": "Living Room"}})];
+        *mock.scenes.lock().unwrap() =
+            vec![scene_json("cccccccc-0000", "Relax", "room-1", "inactive")];
+        *mock.smart_scenes.lock().unwrap() = vec![smart_scene_json(
+            "dddddddd-0000",
+            "Natural light",
+            "room-1",
+            "inactive",
+        )];
+        let base = mock_server(mock.clone()).await;
+
+        let core = Core::new(Arc::new(Store::open_memory().await.unwrap()));
+        let hue = HueIntegration::new(HueClient::new(&base, "key"), core.clone());
+        core.set_integration(INTEGRATION_NAME, hue.clone());
+        hue.sync().await.unwrap();
+
+        let id = "scene.hue_dddddddd";
+        let s = core.get_state(id).unwrap();
+        assert_eq!(s.state, "unknown");
+        assert_eq!(s.attributes["friendly_name"], "Living Room: Natural light");
+        assert!(hue.owns(id));
+        assert!(core.get_state("scene.hue_cccccccc").is_some());
+
+        // recall uses the smart scene action and leaves plain scenes alone
+        core.activate_scene(id).await.unwrap();
+        {
+            let puts = mock.puts.lock().unwrap();
+            assert_eq!(puts[0].0, "dddddddd-0000");
+            assert_eq!(puts[0].1, json!({"recall": {"action": "activate"}}));
+        }
+        assert!(core.get_state(id).unwrap().state.contains('T'));
+
+        // activation from the Hue app (inactive -> active) moves the stamp
+        core.set_state(id, "unknown", Map::new());
+        let ev = |v: &str| {
+            json!([{"type": "update", "data": [{"id": "dddddddd-0000", "type": "smart_scene", "state": v}]}])
+                .to_string()
+        };
+        assert!(!hue.apply_event_payload(&ev("active")));
+        assert!(core.get_state(id).unwrap().state.contains('T'));
+
+        // add/delete asks for a resync; removal drops the entity
+        let del =
+            json!([{"type": "delete", "data": [{"id": "x", "type": "smart_scene"}]}]).to_string();
+        assert!(hue.apply_event_payload(&del));
+        mock.smart_scenes.lock().unwrap().clear();
+        hue.sync().await.unwrap();
+        assert!(core.get_state(id).is_none());
+        assert!(core.get_state("scene.hue_cccccccc").is_some());
     }
 
     #[tokio::test]
