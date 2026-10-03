@@ -74,6 +74,8 @@ main { padding: 24px 28px; max-width: 1100px; width: 100%; min-width: 0; }
 .members { list-style: none; padding: 0; margin: 0; }
 .members li { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 6px; background: var(--panel); }
 .members li.drag { opacity: .4; }
+.members li.drop-before { box-shadow: 0 -3px 0 var(--accent); }
+.members li.drop-after { box-shadow: 0 3px 0 var(--accent); }
 .members li.fixed { opacity: .7; }
 .handle { cursor: grab; color: var(--muted); }
 details.wp > summary { cursor: pointer; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; margin: 14px 0 6px; }
