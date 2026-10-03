@@ -1332,13 +1332,11 @@ mod tests {
         let (admin, _) = admin_and_member(&r).await;
         let mut stream = open_events(&r, Some(&admin)).await.into_body();
         app.shutdown.send_replace(true);
-        let end = tokio::time::timeout(Duration::from_secs(2), async {
-            while let Some(frame) = stream.frame().await {
-                frame.unwrap();
-            }
-        })
-        .await;
-        assert!(end.is_ok(), "the stream closes when the server shuts down");
+        let end = tokio::time::timeout(Duration::from_secs(2), stream.frame()).await;
+        assert!(
+            matches!(end, Ok(None)),
+            "the stream closes when the server shuts down"
+        );
     }
 
     #[tokio::test]
