@@ -85,7 +85,9 @@ async fn main() {
     let core = Core::new(store);
     let hue = HueManager::new(core.clone());
     resume_hue(&core, &hue).await;
-    let app = build_app(AppState::new(core, hue).with_setup_code(setup_code));
+    let state = AppState::new(core, hue).with_setup_code(setup_code);
+    let stopping = state.shutdown.clone();
+    let app = build_app(state);
 
     let listener = match tokio::net::TcpListener::bind(env.bind).await {
         Ok(l) => l,
@@ -99,7 +101,7 @@ async fn main() {
         domus::GIT_VERSION,
         env.bind
     );
-    let shutdown = async {
+    let shutdown = async move {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("install SIGTERM handler");
         tokio::select! {
@@ -107,6 +109,7 @@ async fn main() {
             _ = term.recv() => {}
         }
         info!("shutting down");
+        stopping.send_replace(true);
     };
     if let Err(e) = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)

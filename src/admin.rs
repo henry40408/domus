@@ -8,7 +8,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -339,6 +339,7 @@ async fn events(
         .map(|t| sha256_hex(&t))
         .unwrap_or_default();
     let rx = app.core.subscribe();
+    let mut down = app.shutdown.subscribe();
     let ticker =
         tokio::time::interval_at(tokio::time::Instant::now() + EVENTS_RECHECK, EVENTS_RECHECK);
     let stream = futures_util::stream::unfold((rx, ticker), move |(mut rx, mut ticker)| {
@@ -367,6 +368,10 @@ async fn events(
                 return Some((Ok(Event::default().event("change").data(id)), (rx, ticker)));
             }
         }
+    });
+    // Graceful shutdown waits for open responses, so end the stream when it starts.
+    let stream = stream.take_until(async move {
+        let _ = down.wait_for(|stopping| *stopping).await;
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
@@ -1319,6 +1324,21 @@ mod tests {
             end.is_ok(),
             "the stream closes after the session is revoked"
         );
+    }
+
+    #[tokio::test]
+    async fn events_end_on_shutdown() {
+        let (r, app) = setup_app().await;
+        let (admin, _) = admin_and_member(&r).await;
+        let mut stream = open_events(&r, Some(&admin)).await.into_body();
+        app.shutdown.send_replace(true);
+        let end = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(frame) = stream.frame().await {
+                frame.unwrap();
+            }
+        })
+        .await;
+        assert!(end.is_ok(), "the stream closes when the server shuts down");
     }
 
     #[tokio::test]
