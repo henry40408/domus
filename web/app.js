@@ -569,7 +569,7 @@ function devices() {
   return [
     el("h2", {}, "Devices"),
     el("p", { class: "sub" }, "Test your Hue setup without the watch."),
-    el("div", { class: "card" }, el("div", { class: "section-title" }, "Lights"),
+    el("div", { class: "card" }, el("div", { class: "section-title" }, "Lights ", el("span", { class: "hint-inline" }, "· click to expand")),
       lightRows.length ? el("ul", { class: "rows" }, ...lightRows) : el("p", { class: "muted" }, "No lights yet. Pair the Hue Bridge in Settings.")),
     rooms.length ? el("div", { class: "card" }, el("div", { class: "section-title" }, "Rooms & zones"), el("ul", { class: "rows" }, ...rooms)) : "",
     el("div", { class: "card" }, el("div", { class: "section-title" }, "Scenes"),
