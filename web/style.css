@@ -130,6 +130,7 @@ input.kelvin::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; 
 .toast.show { opacity: 1; transform: none; }
 
 @media (max-width: 760px) {
+  :root { --savebar-h: calc(44px + var(--s3) * 2 + env(safe-area-inset-bottom)); }
   .app { grid-template-columns: minmax(0, 1fr); align-content: start; }
   nav { position: sticky; top: 0; z-index: 4; height: auto; display: flex; overflow-x: auto; padding: var(--s2); gap: var(--s1); border-right: 0; border-bottom: 1px solid var(--line); }
   nav { flex-direction: row; }
@@ -137,7 +138,7 @@ input.kelvin::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; 
   nav .account, nav .bridge + .account { margin-top: 0; padding: 0 0 0 var(--s1); }
   nav .account .logout { min-height: 44px; }
   nav a.tab { white-space: nowrap; min-height: 44px; padding: var(--s3) var(--s2); gap: var(--s2); }
-  main { padding: var(--s4) var(--s4) 90px; }
+  main { padding: var(--s4) var(--s4) calc(var(--savebar-h) + var(--s4)); }
   h2 { font-size: 20px; }
   .card { padding: var(--s3); }
   button { min-height: 44px; }
@@ -159,9 +160,9 @@ input.kelvin::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; 
   .subtabs button { flex: 1; }
   .editor[data-sub=pick] .pane-order, .editor[data-sub=order] .pane-pick { display: none; }
   .handle { display: none; }
-  .savebar { position: fixed; left: 0; right: 0; bottom: 0; margin: 0; padding: var(--s3) var(--s4) calc(var(--s3) + env(safe-area-inset-bottom)); background: var(--panel); border-top: 1px solid var(--line); z-index: 4; }
+  .savebar { position: fixed; left: 0; right: 0; bottom: 0; margin: 0; padding: var(--s3) var(--s4) calc(var(--s3) + env(safe-area-inset-bottom)); min-height: var(--savebar-h); background: var(--panel); border-top: 1px solid var(--line); z-index: 4; }
   .savebar .primary { flex: 1; }
   .savebar .hint { display: none; }
-  .toast { left: 14px; right: 14px; bottom: 76px; text-align: center; }
+  .toast { left: var(--s4); right: var(--s4); bottom: calc(var(--savebar-h) + var(--s3)); text-align: center; }
   .cards { grid-template-columns: 1fr 1fr; }
 }
