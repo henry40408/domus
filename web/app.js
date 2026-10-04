@@ -130,16 +130,16 @@ const visibleTabs = () => TABS.filter(([, , , adminOnly]) => !adminOnly || me.is
 /** hue (admins only), entities (lights + scenes + group lights), groups, tokens, users (admins only) */
 let data = null;
 /** per-view state that survives re-renders */
-const ui = { tab: "dashboard", draft: null, sub: "pick", fresh: null };
+const ui = { tab: "dashboard", draft: null, sub: "pick", fresh: null, open: null, trans: null };
 
 async function load() {
-  const [hue, entities, groups, tokens, users, sessions] = await Promise.all([
+  const [hue, entities, rooms, groups, tokens, users, sessions] = await Promise.all([
     me.is_admin ? api("GET", "/hue") : null,
-    api("GET", "/lights"), api("GET", "/groups"), api("GET", "/tokens"),
+    api("GET", "/lights"), api("GET", "/rooms"), api("GET", "/groups"), api("GET", "/tokens"),
     me.is_admin ? api("GET", "/users") : [],
     api("GET", "/sessions"),
   ]);
-  data = { hue, entities, groups, tokens, users, sessions };
+  data = { hue, entities, rooms, groups, tokens, users, sessions };
 }
 
 const isScene = (e) => e.entity_id.startsWith("scene.");
@@ -221,11 +221,15 @@ function dashboard() {
     el("h2", {}, "Dashboard"),
     el("p", { class: "sub" }, "Overview of what the watch can see."),
     el("div", { class: "cards" },
-      stat("Lights", String(lights.length), lights.filter((l) => l.state === "on").length + " on"),
+      stat("Lights", String(lights.length), lights.filter((l) => l.state === "on").length + " on"
+        + (lights.some(unreachable) ? ", " + lights.filter(unreachable).length + " unreachable" : "")),
       stat("Scenes", String(scenes().length), "from the Hue Bridge"),
       stat("Groups", String(data.groups.length), data.groups.filter((g) => g.expose_light).length + " with an all-lights switch"),
       data.hue ? stat("Hue Bridge", !data.hue.paired ? "Not paired" : data.hue.running ? "Connected" : "Disconnected",
         data.hue.paired ? data.hue.ip : "Pair it in Settings") : ""),
+    lights.some(unreachable) ? el("div", { class: "warn" }, icon("alert"),
+      " Unreachable: " + lights.filter(unreachable).map((l) => l.name || l.entity_id).join(", ")
+      + ". The watch shows them as unavailable.") : "",
     el("div", { class: "card" },
       el("h3", {}, "Set up hasscontrol on the watch"),
       el("ol", { class: "steps" },
@@ -317,6 +321,7 @@ function groupEditor(d) {
         const li = el("li", { draggable: true },
           el("span", { class: "handle" }, icon("grip")),
           el("span", { class: "grow" }, label(id)),
+          find(id) && unreachable(find(id)) ? el("span", { class: "badge bad" }, "Unreachable") : "",
           el("button", { class: "icon", onclick: () => move(id, -1), title: "Move up" }, icon("up")),
           el("button", { class: "icon", onclick: () => move(id, 1), title: "Move down" }, icon("down")));
         li.addEventListener("dragstart", () => { dragId = id; li.classList.add("drag"); });
@@ -348,7 +353,8 @@ function groupEditor(d) {
         const e = find(id);
         const scene = e && isScene(e);
         const on = e && !scene && e.state === "on";
-        return el("div", { class: "w-item" }, el("span", {}, label(id)), el("span", { class: on ? "w-on" : "" }, scene ? icon("play") : on ? "On" : "Off"));
+        const down = e && unreachable(e);
+        return el("div", { class: "w-item" + (down ? " down" : "") }, el("span", {}, label(id)), el("span", { class: on ? "w-on" : "" }, scene ? icon("play") : down ? "n/a" : on ? "On" : "Off"));
       }));
   }
   exposeBox.addEventListener("change", () => { d.expose = exposeBox.checked; markDirty(); derived(); });
@@ -423,26 +429,130 @@ async function deleteGroup(d) {
 
 // ---------------------------------------------------------------- devices
 
-function devices() {
-  const lightRows = realLights().map((l) => {
-    const on = l.state === "on";
-    const pct = typeof l.brightness === "number" ? Math.round(l.brightness / 255 * 100) : null;
+// Color temperature is shown in Kelvin, the unit people know; the API takes mireds or Kelvin.
+const kelvin = (mirek) => Math.round(1e6 / mirek);
+const unreachable = (e) => e.state === "unavailable";
+const supports = (e, mode) => (e.supported_color_modes || []).includes(mode);
+const TRANSITIONS = [[null, "Default"], [0, "Instant"], [1, "1 s"], [3, "3 s"], [10, "10 s"]];
+const SWATCHES = ["#ff3b30", "#ff9500", "#ffd60a", "#34c759", "#00c7be", "#0a84ff", "#bf5af2", "#ff2d92"];
+const pctOf = (e) => (typeof e.brightness === "number" ? Math.round(e.brightness / 255 * 100) : null);
+
+// CIE xy to a display color, for the little chip next to a light's state.
+function xyToHex([x, y]) {
+  if (!y) return "#ffffff";
+  const X = x / y, Z = (1 - x - y) / y;
+  let c = [X * 1.656492 - 0.354851 - Z * 0.255038, -X * 0.707196 + 1.655397 + Z * 0.036152, X * 0.051713 - 0.121364 + Z * 1.01153];
+  const top = Math.max(...c, 1);
+  c = c.map((v) => Math.max(0, v) / top).map((v) => (v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055));
+  return "#" + c.map((v) => Math.round(Math.min(1, v) * 255).toString(16).padStart(2, "0")).join("");
+}
+
+// Sends one test command (a light, or several driven together) and refreshes what the page shows.
+async function control(ids, extra) {
+  const body = { ...extra };
+  if (ids.length === 1) body.entity_id = ids[0]; else body.entity_ids = ids;
+  if (ui.trans !== null) body.transition = ui.trans;
+  await api("POST", "/devices/test", body);
+  await syncLights();
+}
+
+function slider(title, props, show, send, cls) {
+  const input = el("input", { type: "range", class: cls || "", ...props });
+  const out = el("output", {}, show(input.value));
+  input.addEventListener("input", () => { out.textContent = show(input.value); });
+  input.addEventListener("change", () => guarded(() => send(+input.value)));
+  return el("div", { class: "ctl" }, el("span", {}, title), input, out);
+}
+
+function transitionControl() {
+  return el("div", { class: "ctl" }, el("span", {}, "Transition"),
+    el("span", { class: "seg" }, ...TRANSITIONS.map(([v, name]) => el("button", {
+      class: ui.trans === v ? "active" : "",
+      onclick: () => { ui.trans = v; render(); },
+    }, name))), el("span", {}));
+}
+
+function lightPanel(l) {
+  const id = [l.entity_id];
+  const rows = [slider("Brightness", { min: 1, max: 100, value: pctOf(l) ?? 100 }, (v) => v + "%", (v) => control(id, { brightness_pct: v }))];
+  if (supports(l, "color_temp")) {
+    rows.push(slider("White temperature", { min: 2000, max: 6500, step: 100, value: l.color_temp ? kelvin(l.color_temp) : 3000 },
+      (v) => v + " K", (v) => control(id, { color_temp_kelvin: v }), "kelvin"));
+  }
+  if (supports(l, "xy")) {
+    const picker = el("input", { type: "color", value: l.xy_color ? xyToHex(l.xy_color) : "#ffffff", title: "Pick a color" });
+    const rgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+    picker.addEventListener("change", () => guarded(() => control(id, { rgb_color: rgb(picker.value) })));
+    rows.push(el("div", { class: "ctl" }, el("span", {}, "Color"),
+      el("div", { class: "swatches" },
+        ...SWATCHES.map((c) => el("button", { class: "sw", style: "background:" + c, title: c, onclick: () => guarded(() => control(id, { rgb_color: rgb(c) })) })), picker),
+      el("span", {})));
+  }
+  rows.push(transitionControl());
+  return el("div", { class: "panel", onclick: (e) => e.stopPropagation() }, ...rows);
+}
+
+function lightState(l) {
+  if (unreachable(l)) return "Can't reach this light. Check its power and Zigbee range.";
+  if (l.state !== "on") return "Off";
+  const pct = pctOf(l);
+  const parts = [pct === null ? "On" : "Brightness " + pct + "%"];
+  if (l.color_mode === "color_temp" && l.color_temp) parts.push(kelvin(l.color_temp) + " K");
+  if (l.color_mode === "xy" && l.xy_color) parts.push(el("span", {}, el("span", { class: "chip", style: "background:" + xyToHex(l.xy_color) }), "Color"));
+  return parts.flatMap((p, i) => (i ? [" · ", p] : [p]));
+}
+
+function lightBadges(l) {
+  const caps = [el("span", { class: "badge cap" }, "dim")];
+  if (supports(l, "color_temp")) caps.push(el("span", { class: "badge cap" }, "white temp"));
+  if (supports(l, "xy")) caps.push(el("span", { class: "badge cap" }, "color"));
+  if (unreachable(l)) caps.push(el("span", { class: "badge bad" }, "Unreachable"));
+  return caps.flatMap((b, i) => (i ? [" ", b] : [b]));
+}
+
+function roomRows() {
+  return (data.rooms || []).map((r) => {
+    const members = r.entity_ids.map(find).filter(Boolean);
+    const live = members.filter((m) => !unreachable(m));
+    const on = live.some((m) => m.state === "on");
+    const levels = live.filter((m) => m.state === "on").map(pctOf).filter((p) => p !== null);
+    const pct = levels.length ? Math.round(levels.reduce((a, b) => a + b, 0) / levels.length) : null;
     const sw = el("button", {
       class: "switch act" + (on ? " on" : ""),
       title: on ? "Turn off" : "Turn on",
-      onclick: () => guarded(async () => {
-        const r = await api("POST", "/devices/test", { entity_id: l.entity_id, on: !on });
-        l.state = r.state || (on ? "off" : "on");
-        if (on) l.brightness = null;
-        render();
-      }),
+      onclick: () => guarded(() => control(r.entity_ids, { on: !on })),
     });
     return el("li", {},
+      el("span", { class: "name" }, r.name), sw,
+      el("span", { class: "meta" }, el("span", { class: "badge cap" }, r.kind), " ", el("span", { class: "badge cap" }, r.entity_ids.length + " lights")),
+      el("span", { class: "meta" }, (on ? (pct === null ? "On" : "Brightness " + pct + "%") : "Off") + " · " + members.map((m) => m.name || m.entity_id).join(", ")),
+      el("div", { class: "panel inline" },
+        slider("Brightness", { min: 1, max: 100, value: pct ?? 100 }, (v) => v + "%", (v) => control(r.entity_ids, { brightness_pct: v }))));
+  });
+}
+
+function devices() {
+  const lightRows = realLights().map((l) => {
+    const on = l.state === "on";
+    const down = unreachable(l);
+    const sw = el("button", {
+      class: "switch act" + (on ? " on" : ""),
+      title: down ? "Unreachable" : on ? "Turn off" : "Turn on",
+      disabled: down,
+      onclick: (e) => { e.stopPropagation(); guarded(() => control([l.entity_id], { on: !on })); },
+    });
+    return el("li", {
+      class: "light" + (down ? " down" : ""),
+      onclick: () => { ui.open = ui.open === l.entity_id ? null : l.entity_id; render(); },
+    },
       el("span", { class: "name" }, l.name || l.entity_id),
       sw,
+      el("span", { class: "meta" }, ...lightBadges(l)),
       el("span", { class: "meta" }, el("code", {}, l.entity_id)),
-      el("span", { class: "meta" }, on ? (pct === null ? "On" : "Brightness " + pct + "%") : "Off"));
+      el("span", { class: "meta" }, ...[].concat(lightState(l))),
+      ui.open === l.entity_id && !down ? lightPanel(l) : "");
   });
+  const rooms = roomRows();
   const sceneRows = scenes().map((s) => el("li", {},
     el("span", { class: "name" }, s.name || s.entity_id),
     el("button", {
@@ -461,6 +571,7 @@ function devices() {
     el("p", { class: "sub" }, "Test your Hue setup without the watch."),
     el("div", { class: "card" }, el("div", { class: "section-title" }, "Lights"),
       lightRows.length ? el("ul", { class: "rows" }, ...lightRows) : el("p", { class: "muted" }, "No lights yet. Pair the Hue Bridge in Settings.")),
+    rooms.length ? el("div", { class: "card" }, el("div", { class: "section-title" }, "Rooms & zones"), el("ul", { class: "rows" }, ...rooms)) : "",
     el("div", { class: "card" }, el("div", { class: "section-title" }, "Scenes"),
       sceneRows.length ? el("ul", { class: "rows" }, ...sceneRows) : el("p", { class: "muted" }, "No scenes found.")),
   ];

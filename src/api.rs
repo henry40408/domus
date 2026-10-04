@@ -11,7 +11,7 @@ use axum::{Json, Router};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
-use crate::core::{CallError, Core, LightAction};
+use crate::core::{CallError, Core, LightAction, TurnOn};
 use crate::hue::HueManager;
 use crate::store::TokenAuth;
 use crate::throttle::LoginGuard;
@@ -118,6 +118,115 @@ fn requested_brightness(body: &Value) -> Option<u8> {
         .map(|p| (p / 100.0 * 255.0).round().clamp(0.0, 255.0) as u8)
 }
 
+/// Hue's supported color temperature range, in mireds (6535 K to 2000 K).
+const MIREK_RANGE: std::ops::RangeInclusive<f64> = 153.0..=500.0;
+/// Longest fade accepted, so a typo cannot park a light for hours.
+const MAX_TRANSITION_MS: f64 = 3_600_000.0;
+
+fn number_pair(v: &Value) -> Option<(f64, f64)> {
+    match v.as_array()?.as_slice() {
+        [a, b] => Some((a.as_f64()?, b.as_f64()?)),
+        _ => None,
+    }
+}
+
+/// sRGB (0-255 each) to CIE xy, using the wide-gamut matrix Hue documents.
+fn rgb_to_xy(r: f64, g: f64, b: f64) -> (f64, f64) {
+    let lin = |c: f64| {
+        let c = (c / 255.0).clamp(0.0, 1.0);
+        if c > 0.04045 {
+            ((c + 0.055) / 1.055).powf(2.4)
+        } else {
+            c / 12.92
+        }
+    };
+    let (r, g, b) = (lin(r), lin(g), lin(b));
+    let x = r * 0.664511 + g * 0.154324 + b * 0.162028;
+    let y = r * 0.283881 + g * 0.668433 + b * 0.047685;
+    let z = r * 0.000088 + g * 0.072310 + b * 0.986039;
+    let sum = x + y + z;
+    if sum == 0.0 {
+        return (0.3127, 0.3290); // black has no chromaticity: fall back to the white point
+    }
+    let round = |v: f64| (v / sum * 10_000.0).round() / 10_000.0;
+    (round(x), round(y))
+}
+
+/// HSV with full value to sRGB; Home Assistant's `hs_color` is hue 0-360 and saturation 0-100.
+fn hs_to_rgb(h: f64, s: f64) -> (f64, f64, f64) {
+    let (s, h) = ((s / 100.0).clamp(0.0, 1.0), h.rem_euclid(360.0) / 60.0);
+    let c = s;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let m = 1.0 - c;
+    let (r, g, b) = match h as u8 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    ((r + m) * 255.0, (g + m) * 255.0, (b + m) * 255.0)
+}
+
+/// Fade time in ms from `transition` (seconds, like Home Assistant).
+fn requested_transition(body: &Value) -> Result<Option<u32>, &'static str> {
+    match body.get("transition") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => match v.as_f64() {
+            Some(t) if t >= 0.0 => Ok(Some((t * 1000.0).min(MAX_TRANSITION_MS).round() as u32)),
+            _ => Err("transition must be a non-negative number of seconds."),
+        },
+    }
+}
+
+/// Mireds or xy, whichever the request names.
+type Color = (Option<u16>, Option<(f64, f64)>);
+
+/// The color a `turn_on` asks for, as mireds or xy. Home Assistant accepts several spellings;
+/// the first one present wins.
+fn requested_color(body: &Value) -> Result<Color, &'static str> {
+    let mirek = |m: f64| Some(m.clamp(*MIREK_RANGE.start(), *MIREK_RANGE.end()).round() as u16);
+    if let Some(v) = body.get("color_temp") {
+        let m = v
+            .as_f64()
+            .filter(|m| *m > 0.0)
+            .ok_or("color_temp must be mireds.")?;
+        return Ok((mirek(m), None));
+    }
+    for key in ["color_temp_kelvin", "kelvin"] {
+        if let Some(v) = body.get(key) {
+            let k = v
+                .as_f64()
+                .filter(|k| *k > 0.0)
+                .ok_or("Kelvin must be a positive number.")?;
+            return Ok((mirek(1_000_000.0 / k), None));
+        }
+    }
+    if let Some(v) = body.get("xy_color") {
+        let (x, y) = number_pair(v)
+            .filter(|(x, y)| (0.0..=1.0).contains(x) && (0.0..=1.0).contains(y))
+            .ok_or("xy_color must be [x, y] between 0 and 1.")?;
+        return Ok((None, Some((x, y))));
+    }
+    if let Some(v) = body.get("hs_color") {
+        let (h, s) = number_pair(v).ok_or("hs_color must be [hue, saturation].")?;
+        let (r, g, b) = hs_to_rgb(h, s);
+        return Ok((None, Some(rgb_to_xy(r, g, b))));
+    }
+    if let Some(v) = body.get("rgb_color") {
+        let ok = v.as_array().filter(|a| {
+            a.len() == 3
+                && a.iter()
+                    .all(|c| c.as_f64().is_some_and(|c| (0.0..=255.0).contains(&c)))
+        });
+        let a = ok.ok_or("rgb_color must be [r, g, b] between 0 and 255.")?;
+        let c: Vec<f64> = a.iter().filter_map(Value::as_f64).collect();
+        return Ok((None, Some(rgb_to_xy(c[0], c[1], c[2]))));
+    }
+    Ok((None, None))
+}
+
 /// Empty bodies count as `null`; anything else must be valid JSON.
 fn parse_body(body: &Bytes) -> Result<Value, &'static str> {
     if body.is_empty() {
@@ -164,6 +273,27 @@ async fn scene_service(
     Json(changed).into_response()
 }
 
+/// `Ok(None)` for a service that does not exist.
+pub(crate) fn light_action(
+    service: &str,
+    body: &Value,
+) -> Result<Option<LightAction>, &'static str> {
+    let transition_ms = requested_transition(body)?;
+    Ok(match service {
+        "turn_on" => {
+            let (color_temp, xy) = requested_color(body)?;
+            Some(LightAction::TurnOn(TurnOn {
+                brightness: requested_brightness(body),
+                color_temp,
+                xy,
+                transition_ms,
+            }))
+        }
+        "turn_off" => Some(LightAction::TurnOff { transition_ms }),
+        _ => None,
+    })
+}
+
 async fn light_service(
     State(app): State<AppState>,
     Extension(auth): Extension<TokenAuth>,
@@ -177,12 +307,10 @@ async fn light_service(
         Ok(b) => b,
         Err(e) => return message(StatusCode::BAD_REQUEST, e),
     };
-    let action = match service.as_str() {
-        "turn_on" => LightAction::TurnOn {
-            brightness: requested_brightness(&body),
-        },
-        "turn_off" => LightAction::TurnOff,
-        _ => return message(StatusCode::NOT_FOUND, "Service not found."),
+    let action = match light_action(&service, &body) {
+        Ok(Some(a)) => a,
+        Ok(None) => return message(StatusCode::NOT_FOUND, "Service not found."),
+        Err(e) => return message(StatusCode::BAD_REQUEST, e),
     };
     let ids = match requested_entities(&body) {
         Ok(ids) => app.core.expand_entities(&ids).await,
@@ -427,10 +555,7 @@ mod tests {
         assert_eq!(app.core.get_state("light.hue_a").unwrap().state, "on");
         assert_eq!(
             fake.0.lock().unwrap()[0],
-            (
-                "light.hue_a".to_string(),
-                LightAction::TurnOn { brightness: None }
-            )
+            ("light.hue_a".to_string(), LightAction::on())
         );
     }
 
@@ -443,9 +568,10 @@ mod tests {
         assert_eq!(v.as_array().unwrap().len(), 2);
         assert_eq!(
             fake.0.lock().unwrap()[1].1,
-            LightAction::TurnOn {
-                brightness: Some(128)
-            }
+            LightAction::TurnOn(TurnOn {
+                brightness: Some(128),
+                ..TurnOn::default()
+            })
         );
 
         let (_, v) = call(
@@ -457,6 +583,69 @@ mod tests {
         )
         .await;
         assert!(v.as_array().unwrap().iter().all(|s| s["state"] == "off"));
+    }
+
+    #[test]
+    fn color_and_transition_fields_follow_home_assistant() {
+        let action = |service: &str, body: Value| light_action(service, &body);
+        let on = |p: TurnOn| Ok(Some(LightAction::TurnOn(p)));
+
+        assert_eq!(
+            action("turn_on", json!({"color_temp": 300, "transition": 1.5})),
+            on(TurnOn {
+                color_temp: Some(300),
+                transition_ms: Some(1500),
+                ..TurnOn::default()
+            })
+        );
+        // kelvin converts to mireds and is clamped to what Hue can do
+        assert_eq!(
+            action("turn_on", json!({"color_temp_kelvin": 2700})),
+            on(TurnOn {
+                color_temp: Some(370),
+                ..TurnOn::default()
+            })
+        );
+        assert_eq!(
+            action("turn_on", json!({"color_temp": 10})),
+            on(TurnOn {
+                color_temp: Some(153),
+                ..TurnOn::default()
+            })
+        );
+        assert_eq!(
+            action("turn_off", json!({"transition": 3})),
+            Ok(Some(LightAction::TurnOff {
+                transition_ms: Some(3000)
+            }))
+        );
+        // red in sRGB lands near the red corner of the gamut
+        let Ok(Some(LightAction::TurnOn(TurnOn {
+            xy: Some((x, y)), ..
+        }))) = action("turn_on", json!({"rgb_color": [255, 0, 0]}))
+        else {
+            panic!("rgb_color should give xy");
+        };
+        assert!((x - 0.7).abs() < 0.03 && (y - 0.3).abs() < 0.03, "{x} {y}");
+        let Ok(Some(LightAction::TurnOn(TurnOn { xy: Some(hs), .. }))) =
+            action("turn_on", json!({"hs_color": [0, 100]}))
+        else {
+            panic!("hs_color should give xy");
+        };
+        assert_eq!(hs, (x, y), "hs red and rgb red are the same color");
+
+        for bad in [
+            json!({"transition": -1}),
+            json!({"transition": "x"}),
+            json!({"color_temp": 0}),
+            json!({"xy_color": [0.5]}),
+            json!({"xy_color": [2, 0]}),
+            json!({"rgb_color": [1, 2]}),
+            json!({"hs_color": "red"}),
+        ] {
+            assert!(action("turn_on", bad.clone()).is_err(), "{bad}");
+        }
+        assert_eq!(action("toggle", json!({})), Ok(None));
     }
 
     #[tokio::test]

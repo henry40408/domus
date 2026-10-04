@@ -54,10 +54,44 @@ pub struct State {
     pub context: Context,
 }
 
+/// What a `turn_on` asks for; unset fields leave the light as it is.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TurnOn {
+    /// Home Assistant brightness, 0-255.
+    pub brightness: Option<u8>,
+    /// Color temperature in mireds (Hue's `mirek`).
+    pub color_temp: Option<u16>,
+    /// CIE xy chromaticity.
+    pub xy: Option<(f64, f64)>,
+    /// Fade time in milliseconds.
+    pub transition_ms: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum LightAction {
-    TurnOn { brightness: Option<u8> },
-    TurnOff,
+    TurnOn(TurnOn),
+    TurnOff { transition_ms: Option<u32> },
+}
+
+impl LightAction {
+    pub fn on() -> Self {
+        Self::TurnOn(TurnOn::default())
+    }
+
+    pub fn off() -> Self {
+        Self::TurnOff {
+            transition_ms: None,
+        }
+    }
+}
+
+/// Lights an integration can address together in one request, such as a Hue room or zone.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LightSet {
+    pub name: String,
+    /// "room" or "zone".
+    pub kind: String,
+    pub entity_ids: Vec<String>,
 }
 
 /// A source of entities that can also execute service calls for them.
@@ -68,6 +102,21 @@ pub trait Integration: Send + Sync {
         entity_id: &'a str,
         action: &'a LightAction,
     ) -> BoxFut<'a, Result<(), String>>;
+
+    /// The light sets this integration can control with a single request.
+    fn light_sets(&self) -> Vec<LightSet> {
+        Vec::new()
+    }
+
+    /// Runs one action on several lights in a single request when the integration can (e.g. a
+    /// Hue room). `None` means it cannot, and the caller goes light by light.
+    fn call_light_set<'a>(
+        &'a self,
+        _entity_ids: &'a [String],
+        _action: &'a LightAction,
+    ) -> BoxFut<'a, Option<Result<(), String>>> {
+        Box::pin(async { None })
+    }
 
     /// Recalls a scene. Integrations without scenes keep the default.
     fn activate_scene<'a>(&'a self, _entity_id: &'a str) -> BoxFut<'a, Result<(), String>> {
@@ -342,6 +391,30 @@ impl Core {
             return self.call_real_light(entity_id, action).await;
         };
         let members = self.real_members(&name).await;
+        self.call_lights(&members, action)
+            .await
+            .inspect_err(|e| tracing::warn!("group light {name}: {e:?}"))
+    }
+
+    /// Runs an action on several real lights: one request when they form a light set the
+    /// integration can address together, otherwise one call per light in parallel. Succeeds if
+    /// at least one light did.
+    pub async fn call_lights(
+        &self,
+        members: &[String],
+        action: &LightAction,
+    ) -> Result<(), CallError> {
+        if let Some(result) = self.call_light_set(members, action).await {
+            return match result {
+                Ok(()) => {
+                    for m in members {
+                        self.apply_optimistic(m, action);
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(CallError::Failed(e)),
+            };
+        }
         let results =
             futures_util::future::join_all(members.iter().map(|m| self.call_real_light(m, action)))
                 .await;
@@ -351,7 +424,7 @@ impl Core {
             match r {
                 Ok(()) => any_ok = true,
                 Err(e) => {
-                    tracing::warn!("group light {name}: {m} failed: {e:?}");
+                    tracing::warn!("{m} failed: {e:?}");
                     first_error.get_or_insert(e);
                 }
             }
@@ -360,6 +433,26 @@ impl Core {
             (false, Some(e)) => Err(e),
             _ => Ok(()),
         }
+    }
+
+    /// The integration that owns every one of `entity_ids`, if there is exactly one.
+    async fn call_light_set(
+        &self,
+        entity_ids: &[String],
+        action: &LightAction,
+    ) -> Option<Result<(), String>> {
+        let first = entity_ids.first()?;
+        let integration = self.owner_of(first).ok()?;
+        if !entity_ids.iter().all(|e| integration.owns(e)) {
+            return None;
+        }
+        integration.call_light_set(entity_ids, action).await
+    }
+
+    /// Every integration's light sets.
+    pub fn light_sets(&self) -> Vec<LightSet> {
+        let map = self.integrations.read().unwrap_or_else(|e| e.into_inner());
+        map.values().flat_map(|i| i.light_sets()).collect()
     }
 
     fn owner_of(&self, entity_id: &str) -> Result<Arc<dyn Integration>, CallError> {
@@ -401,23 +494,45 @@ impl Core {
             .await
             .map_err(CallError::Failed)?;
 
-        if let Some(old) = self.get_state(entity_id) {
-            let mut attrs = old.attributes;
-            let new_state = match action {
-                LightAction::TurnOn { brightness } => {
-                    if let Some(b) = brightness {
-                        attrs.insert("brightness".into(), json!(b));
-                    }
-                    "on"
-                }
-                LightAction::TurnOff => {
-                    attrs.remove("brightness");
-                    "off"
-                }
-            };
-            self.set_state(entity_id, new_state, attrs);
-        }
+        self.apply_optimistic(entity_id, action);
         Ok(())
+    }
+
+    /// Reflects an accepted action in the state right away; the event stream confirms it later.
+    fn apply_optimistic(&self, entity_id: &str, action: &LightAction) {
+        let Some(old) = self.get_state(entity_id) else {
+            return;
+        };
+        // An unreachable light stays unavailable until the bridge says otherwise.
+        if old.state == "unavailable" {
+            return;
+        }
+        let mut attrs = old.attributes;
+        let new_state = match action {
+            LightAction::TurnOn(p) => {
+                if let Some(b) = p.brightness {
+                    attrs.insert("brightness".into(), json!(b));
+                }
+                if let Some(m) = p.color_temp {
+                    attrs.insert("color_mode".into(), json!("color_temp"));
+                    attrs.insert("color_temp".into(), json!(m));
+                    attrs.remove("xy_color");
+                }
+                if let Some((x, y)) = p.xy {
+                    attrs.insert("color_mode".into(), json!("xy"));
+                    attrs.insert("xy_color".into(), json!([x, y]));
+                    attrs.remove("color_temp");
+                }
+                "on"
+            }
+            LightAction::TurnOff { .. } => {
+                for k in ["brightness", "color_mode", "color_temp", "xy_color"] {
+                    attrs.remove(k);
+                }
+                "off"
+            }
+        };
+        self.set_state(entity_id, new_state, attrs);
     }
 }
 
@@ -538,16 +653,17 @@ mod tests {
         c.set_state("light.fake1", "off", Map::new());
         c.call_light(
             "light.fake1",
-            &LightAction::TurnOn {
+            &LightAction::TurnOn(TurnOn {
                 brightness: Some(128),
-            },
+                ..TurnOn::default()
+            }),
         )
         .await
         .unwrap();
         let s = c.get_state("light.fake1").unwrap();
         assert_eq!(s.state, "on");
         assert_eq!(s.attributes["brightness"], json!(128));
-        c.call_light("light.fake1", &LightAction::TurnOff)
+        c.call_light("light.fake1", &LightAction::off())
             .await
             .unwrap();
         let s = c.get_state("light.fake1").unwrap();
@@ -560,11 +676,11 @@ mod tests {
         let c = core().await;
         c.set_integration("fake", Arc::new(Fake));
         assert_eq!(
-            c.call_light("light.other", &LightAction::TurnOff).await,
+            c.call_light("light.other", &LightAction::off()).await,
             Err(CallError::NoIntegration)
         );
         assert_eq!(
-            c.call_light("light.fake_bad", &LightAction::TurnOff).await,
+            c.call_light("light.fake_bad", &LightAction::off()).await,
             Err(CallError::Failed("boom".into()))
         );
     }
@@ -625,12 +741,10 @@ mod tests {
         let c = group_core(&["light.flaky_a", "light.flaky_b"]).await;
         c.store().group_set_exposed("room", true).await;
         let id = group_light_id("room");
-        c.call_light(&id, &LightAction::TurnOn { brightness: None })
-            .await
-            .unwrap();
+        c.call_light(&id, &LightAction::on()).await.unwrap();
         assert_eq!(c.get_state("light.flaky_a").unwrap().state, "on");
         assert_eq!(c.get_state("light.flaky_b").unwrap().state, "on");
-        c.call_light(&id, &LightAction::TurnOff).await.unwrap();
+        c.call_light(&id, &LightAction::off()).await.unwrap();
         assert_eq!(c.lookup(&id).await.unwrap().state, "off");
     }
 
@@ -639,16 +753,14 @@ mod tests {
         let c = group_core(&["light.flaky_a", "light.flaky_bad"]).await;
         c.store().group_set_exposed("room", true).await;
         let id = group_light_id("room");
-        c.call_light(&id, &LightAction::TurnOn { brightness: None })
-            .await
-            .unwrap();
+        c.call_light(&id, &LightAction::on()).await.unwrap();
         assert_eq!(c.get_state("light.flaky_a").unwrap().state, "on");
         assert_eq!(c.get_state("light.flaky_bad").unwrap().state, "off");
 
         let c = group_core(&["light.flaky_bad"]).await;
         c.store().group_set_exposed("room", true).await;
         assert_eq!(
-            c.call_light(&group_light_id("room"), &LightAction::TurnOff)
+            c.call_light(&group_light_id("room"), &LightAction::off())
                 .await,
             Err(CallError::Failed("boom".into()))
         );
@@ -658,13 +770,13 @@ mod tests {
     async fn group_light_without_exposure_or_members() {
         let c = group_core(&["light.flaky_a"]).await;
         assert_eq!(
-            c.call_light(&group_light_id("room"), &LightAction::TurnOff)
+            c.call_light(&group_light_id("room"), &LightAction::off())
                 .await,
             Err(CallError::NoIntegration)
         );
         c.store().group_set("empty", &[]).await.unwrap();
         c.store().group_set_exposed("empty", true).await;
-        c.call_light(&group_light_id("empty"), &LightAction::TurnOff)
+        c.call_light(&group_light_id("empty"), &LightAction::off())
             .await
             .unwrap();
     }
@@ -683,9 +795,7 @@ mod tests {
             .unwrap();
         c.store().group_set_exposed("room", true).await;
         c.store().group_set_exposed("other", true).await;
-        c.call_light(&a, &LightAction::TurnOn { brightness: None })
-            .await
-            .unwrap();
+        c.call_light(&a, &LightAction::on()).await.unwrap();
         assert_eq!(c.lookup(&b).await.unwrap().state, "on");
         assert_eq!(c.lookup("group.room").await.unwrap().state, "on");
     }
