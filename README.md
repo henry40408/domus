@@ -80,8 +80,13 @@ Home Assistant subset (`Authorization: Bearer <token>`):
 
 - `GET /api/states/{entity_id}` — lights (`light.hue_<8 hex>`) and `group.<name>`
 - `POST /api/services/light/turn_on` / `turn_off` — body `{"entity_id": "…"}`; also accepts
-  `target.entity_id`, arrays, `group.*`, `brightness` (0–255) and `brightness_pct`
+  `target.entity_id`, arrays, `group.*`, `brightness` (0–255) and `brightness_pct`; also
+  `color_temp` (mireds) / `color_temp_kelvin`, `xy_color`, `hs_color`, `rgb_color` and `transition`
+  (seconds). Colors a light cannot show are ignored for that light.
 - `POST /api/services/scene/turn_on` — recalls Hue scenes (`scene.hue_<8 hex>`)
+
+**Unreachable lights.** A light the bridge cannot reach (unplugged, out of Zigbee range) has the state
+`unavailable` and no other attributes, instead of its last known on/off.
 
 **Scenes.** Hue scenes appear as `scene.hue_<8 hex>`, named "Room: Scene". Add them as group members
 (next to lights) and hasscontrol lists them as scenes. Their state is `unknown` until activated, then
@@ -91,8 +96,9 @@ the activation time; activating from the Hue app updates it too. Light calls on 
 single switch for several lights, tick "Add an all-lights switch to this group" on the group your
 watch imports. The group then lists `light.domus_group_<name>` first, controlling all of its lights
 (after changing it, run Refresh entities on the watch). The switch can also be added as a member of
-another group. It is on if any member is on, so toggling an on/off mix turns everything off. Commands go to the real
-members in parallel and succeed if at least one member did. Group lights are not expanded inside other
+another group. It is on if any member is on, so toggling an on/off mix turns everything off. When its members are
+exactly the lights of one Hue room or zone, a command is a single request to that room; otherwise it goes to the real
+members in parallel and succeeds if at least one member did. Group lights are not expanded inside other
 group lights (one level only), so groups cannot loop.
 
 Admin API lives under `/api/domus/*` (session cookie, used by the admin page), including `POST /api/domus/devices/test` (`{"entity_id", "on"}`).

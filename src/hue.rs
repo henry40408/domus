@@ -5,12 +5,12 @@
 
 use futures_util::StreamExt;
 use serde_json::{Map, Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{info, warn};
 
-use crate::core::{BoxFut, Core, Integration, LightAction};
+use crate::core::{BoxFut, Core, Integration, LightAction, LightSet};
 
 pub const INTEGRATION_NAME: &str = "hue";
 const ENTITY_PREFIX: &str = "light.hue_";
@@ -28,6 +28,18 @@ pub struct HueLight {
     pub on: bool,
     /// Hue brightness, 0.0..=100.0
     pub brightness: Option<f64>,
+    /// The device this light belongs to; `zigbee_connectivity` is reported per device.
+    pub owner: Option<String>,
+    /// False when the bridge cannot reach the light (unplugged, out of range).
+    pub reachable: bool,
+    /// Has a `color_temperature` capability.
+    pub supports_ct: bool,
+    /// Has a `color` capability.
+    pub supports_color: bool,
+    /// Color temperature in mireds while the light is in white mode.
+    pub mirek: Option<u16>,
+    /// CIE xy color.
+    pub xy: Option<(f64, f64)>,
 }
 
 /// Hue percent (0-100) to Home Assistant brightness (1-255).
@@ -54,6 +66,15 @@ impl HueLight {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             brightness: v.pointer("/dimming/brightness").and_then(Value::as_f64),
+            owner: v
+                .pointer("/owner/rid")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            reachable: true,
+            supports_ct: v.get("color_temperature").is_some_and(Value::is_object),
+            supports_color: v.get("color").is_some_and(Value::is_object),
+            mirek: mirek_of(v),
+            xy: xy_of(v),
         })
     }
 
@@ -68,6 +89,15 @@ impl HueLight {
         if let Some(n) = v.pointer("/metadata/name").and_then(Value::as_str) {
             self.name = n.to_string();
         }
+        if v.get("color_temperature").is_some() {
+            self.mirek = mirek_of(v);
+        } else if v.get("color").is_some() {
+            // Only the color changed: the light left white mode.
+            self.mirek = None;
+        }
+        if let Some(xy) = xy_of(v) {
+            self.xy = Some(xy);
+        }
     }
 
     /// Stable id derived from the Hue resource uuid, so renames never break groups.
@@ -76,19 +106,157 @@ impl HueLight {
     }
 
     pub fn ha_state(&self) -> &'static str {
-        if self.on { "on" } else { "off" }
+        if !self.reachable {
+            "unavailable"
+        } else if self.on {
+            "on"
+        } else {
+            "off"
+        }
     }
 
     /// Deliberately small: constrained clients (watches) must parse the whole payload.
     pub fn attributes(&self) -> Map<String, Value> {
         let mut m = Map::new();
         m.insert("friendly_name".into(), json!(self.name));
-        if self.on
-            && let Some(b) = self.brightness
-        {
+        if !self.reachable {
+            return m;
+        }
+        let mut modes = vec!["brightness"];
+        if self.supports_ct {
+            modes.push("color_temp");
+        }
+        if self.supports_color {
+            modes.push("xy");
+        }
+        m.insert("supported_color_modes".into(), json!(modes));
+        if !self.on {
+            return m;
+        }
+        if let Some(b) = self.brightness {
             m.insert("brightness".into(), json!(pct_to_ha(b)));
         }
+        match (self.mirek, self.xy) {
+            (Some(mirek), _) if self.supports_ct => {
+                m.insert("color_mode".into(), json!("color_temp"));
+                m.insert("color_temp".into(), json!(mirek));
+            }
+            (_, Some((x, y))) if self.supports_color => {
+                m.insert("color_mode".into(), json!("xy"));
+                m.insert("xy_color".into(), json!([x, y]));
+            }
+            _ => {}
+        }
         m
+    }
+
+    /// The bridge body for an action, leaving out what this light cannot do (a color for a
+    /// white-only bulb would otherwise fail the whole request).
+    pub fn request_body(&self, action: &LightAction) -> Value {
+        light_body(action, self.supports_ct, self.supports_color)
+    }
+}
+
+/// `color_temperature.mirek`, unless the bridge marks it stale (the light is showing a color).
+fn mirek_of(v: &Value) -> Option<u16> {
+    if v.pointer("/color_temperature/mirek_valid")
+        .and_then(Value::as_bool)
+        == Some(false)
+    {
+        return None;
+    }
+    v.pointer("/color_temperature/mirek")
+        .and_then(Value::as_u64)
+        .and_then(|m| u16::try_from(m).ok())
+}
+
+fn xy_of(v: &Value) -> Option<(f64, f64)> {
+    Some((
+        v.pointer("/color/xy/x").and_then(Value::as_f64)?,
+        v.pointer("/color/xy/y").and_then(Value::as_f64)?,
+    ))
+}
+
+/// The CLIP v2 body for an action on a light, or on a `grouped_light`.
+fn light_body(action: &LightAction, supports_ct: bool, supports_color: bool) -> Value {
+    let (mut body, transition) = match action {
+        LightAction::TurnOn(p) => {
+            let mut body = json!({"on": {"on": true}});
+            if let Some(b) = p.brightness {
+                body["dimming"] = json!({"brightness": ha_to_pct(b)});
+            }
+            if let Some(m) = p.color_temp
+                && supports_ct
+            {
+                body["color_temperature"] = json!({"mirek": m});
+            }
+            if let Some((x, y)) = p.xy
+                && supports_color
+            {
+                body["color"] = json!({"xy": {"x": x, "y": y}});
+            }
+            (body, p.transition_ms)
+        }
+        LightAction::TurnOff { transition_ms } => (json!({"on": {"on": false}}), *transition_ms),
+    };
+    if let Some(ms) = transition {
+        body["dynamics"] = json!({"duration": ms});
+    }
+    body
+}
+
+/// A Hue room or zone, whose lights can be driven together through its `grouped_light`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HueRoom {
+    pub name: String,
+    /// "room" or "zone".
+    pub kind: String,
+    /// uuid of the room's `grouped_light` service.
+    pub grouped_light: String,
+    /// Rooms list their devices, zones their lights; resolved to light uuids on sync.
+    pub children: Vec<(String, String)>,
+}
+
+impl HueRoom {
+    pub fn from_resource(v: &Value, kind: &str) -> Option<Self> {
+        let rids = |key: &str| -> Vec<(String, String)> {
+            v.get(key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|c| {
+                    Some((
+                        c.get("rtype")?.as_str()?.to_string(),
+                        c.get("rid")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        };
+        let grouped_light = rids("services")
+            .into_iter()
+            .find(|(t, _)| t == "grouped_light")?
+            .1;
+        Some(Self {
+            name: v.pointer("/metadata/name")?.as_str()?.to_string(),
+            kind: kind.to_string(),
+            grouped_light,
+            children: rids("children"),
+        })
+    }
+
+    /// uuids of the lights in this room. `owners` maps a device uuid to its lights.
+    pub fn light_ids(&self, owners: &HashMap<String, Vec<String>>) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for (kind, rid) in &self.children {
+            match kind.as_str() {
+                "light" => {
+                    out.insert(rid.clone());
+                }
+                "device" => out.extend(owners.get(rid).into_iter().flatten().cloned()),
+                _ => {}
+            }
+        }
+        out
     }
 }
 
@@ -338,25 +506,48 @@ impl HueClient {
         check_put(resp).await
     }
 
-    pub async fn set_light(
-        &self,
-        id: &str,
-        on: bool,
-        brightness_pct: Option<f64>,
-    ) -> Result<(), String> {
-        let mut body = json!({"on": {"on": on}});
-        if let Some(b) = brightness_pct {
-            body["dimming"] = json!({"brightness": b});
+    /// Rooms and zones that have a `grouped_light`.
+    pub async fn list_rooms(&self) -> Result<Vec<HueRoom>, String> {
+        let mut out = Vec::new();
+        for kind in ["room", "zone"] {
+            out.extend(
+                self.list_resource(kind)
+                    .await?
+                    .iter()
+                    .filter_map(|r| HueRoom::from_resource(r, kind)),
+            );
         }
+        Ok(out)
+    }
+
+    /// Maps each `zigbee_connectivity` id to its device and whether the device is reachable.
+    pub async fn list_connectivity(&self) -> Result<HashMap<String, (String, bool)>, String> {
+        Ok(self
+            .list_resource("zigbee_connectivity")
+            .await?
+            .iter()
+            .filter_map(connectivity_of)
+            .collect())
+    }
+
+    async fn put_resource(&self, kind: &str, id: &str, body: &Value) -> Result<(), String> {
         let resp = self
             .http
-            .put(format!("{}/clip/v2/resource/light/{id}", self.base))
+            .put(format!("{}/clip/v2/resource/{kind}/{id}", self.base))
             .header("hue-application-key", &self.key)
-            .json(&body)
+            .json(body)
             .send()
             .await
             .map_err(|e| e.to_string())?;
         check_put(resp).await
+    }
+
+    pub async fn set_light(&self, id: &str, body: &Value) -> Result<(), String> {
+        self.put_resource("light", id, body).await
+    }
+
+    pub async fn set_grouped_light(&self, id: &str, body: &Value) -> Result<(), String> {
+        self.put_resource("grouped_light", id, body).await
     }
 
     async fn event_stream(&self) -> Result<reqwest::Response, String> {
@@ -377,8 +568,27 @@ impl HueClient {
 
 // ------------------------------------------------------------ integration
 
+/// `(zigbee_connectivity id, (device id, reachable))`. Only a disconnected or troubled link
+/// counts as unreachable; `unidirectional_incoming` still carries commands.
+fn connectivity_of(v: &Value) -> Option<(String, (String, bool))> {
+    let id = v.get("id")?.as_str()?.to_string();
+    let device = v.pointer("/owner/rid")?.as_str()?.to_string();
+    let status = v.get("status")?.as_str()?;
+    Some((
+        id,
+        (
+            device,
+            !matches!(status, "disconnected" | "connectivity_issue"),
+        ),
+    ))
+}
+
 #[derive(Default)]
 struct Inner {
+    /// zigbee_connectivity id -> (device id, reachable)
+    connectivity: HashMap<String, (String, bool)>,
+    /// Rooms and zones with their lights resolved.
+    rooms: Vec<(HueRoom, BTreeSet<String>)>,
     lights: HashMap<String, HueLight>,
     by_entity: HashMap<String, String>,
     scenes: HashMap<String, HueScene>,
@@ -416,11 +626,35 @@ impl HueIntegration {
                 None
             }
         };
+        // Reachability and rooms are optional extras: without them lights still work.
+        let connectivity = self.client.list_connectivity().await.unwrap_or_else(|e| {
+            warn!("hue: connectivity sync failed: {e}");
+            HashMap::new()
+        });
+        let rooms = self.client.list_rooms().await.unwrap_or_else(|e| {
+            warn!("hue: room sync failed: {e}");
+            Vec::new()
+        });
+        let mut owners: HashMap<String, Vec<String>> = HashMap::new();
+        for l in &lights {
+            if let Some(o) = &l.owner {
+                owners.entry(o.clone()).or_default().push(l.id.clone());
+            }
+        }
         let mut inner = self.inner();
+        inner.rooms = rooms
+            .into_iter()
+            .map(|r| {
+                let ids = r.light_ids(&owners);
+                (r, ids)
+            })
+            .collect();
+        inner.connectivity = connectivity;
         let old: HashSet<String> = inner.by_entity.keys().cloned().collect();
         inner.lights.clear();
         inner.by_entity.clear();
-        for l in lights {
+        for mut l in lights {
+            l.reachable = Self::device_reachable(&inner.connectivity, l.owner.as_deref());
             let eid = l.entity_id();
             self.core.set_state(&eid, l.ha_state(), l.attributes());
             inner.by_entity.insert(eid, l.id.clone());
@@ -433,6 +667,46 @@ impl HueIntegration {
             Self::replace_scenes(&self.core, &mut inner, scenes);
         }
         Ok(n)
+    }
+
+    /// Lights are reachable unless the bridge says their device's link is down.
+    fn device_reachable(
+        connectivity: &HashMap<String, (String, bool)>,
+        device: Option<&str>,
+    ) -> bool {
+        device.is_none_or(|d| {
+            connectivity
+                .values()
+                .find(|(dev, _)| dev == d)
+                .is_none_or(|(_, ok)| *ok)
+        })
+    }
+
+    /// A `zigbee_connectivity` update: flips every light of that device.
+    fn apply_connectivity_update(&self, inner: &mut Inner, item: &Value) {
+        let Some(id) = item.get("id").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(status) = item.get("status").and_then(Value::as_str) else {
+            return;
+        };
+        let reachable = !matches!(status, "disconnected" | "connectivity_issue");
+        let device = match inner.connectivity.get_mut(id) {
+            Some((device, ok)) => {
+                *ok = reachable;
+                device.clone()
+            }
+            None => return,
+        };
+        for light in inner
+            .lights
+            .values_mut()
+            .filter(|l| l.owner.as_deref() == Some(device.as_str()))
+        {
+            light.reachable = reachable;
+            self.core
+                .set_state(&light.entity_id(), light.ha_state(), light.attributes());
+        }
     }
 
     /// Replaces the known scenes. A scene's state is its last activation time, so an existing
@@ -504,6 +778,18 @@ impl HueIntegration {
                         "add" | "delete" => resync = true,
                         _ => {}
                     }
+                    continue;
+                }
+                if item_type == Some("zigbee_connectivity") {
+                    match kind {
+                        "update" => self.apply_connectivity_update(&mut inner, item),
+                        "add" | "delete" => resync = true,
+                        _ => {}
+                    }
+                    continue;
+                }
+                if matches!(item_type, Some("room" | "zone")) && matches!(kind, "add" | "delete") {
+                    resync = true;
                     continue;
                 }
                 if item_type != Some("light") {
@@ -612,14 +898,52 @@ impl Integration for HueIntegration {
                 .get(entity_id)
                 .cloned()
                 .ok_or_else(|| format!("unknown light {entity_id}"))?;
-            match action {
-                LightAction::TurnOn { brightness } => {
-                    self.client
-                        .set_light(&uuid, true, brightness.map(ha_to_pct))
-                        .await
-                }
-                LightAction::TurnOff => self.client.set_light(&uuid, false, None).await,
-            }
+            let body = self.inner().lights.get(&uuid).map_or_else(
+                || light_body(action, false, false),
+                |l| l.request_body(action),
+            );
+            self.client.set_light(&uuid, &body).await
+        })
+    }
+
+    fn light_sets(&self) -> Vec<LightSet> {
+        let inner = self.inner();
+        inner
+            .rooms
+            .iter()
+            .map(|(room, ids)| LightSet {
+                name: room.name.clone(),
+                kind: room.kind.clone(),
+                entity_ids: ids
+                    .iter()
+                    .filter_map(|id| inner.lights.get(id).map(HueLight::entity_id))
+                    .collect(),
+            })
+            .collect()
+    }
+
+    fn call_light_set<'a>(
+        &'a self,
+        entity_ids: &'a [String],
+        action: &'a LightAction,
+    ) -> BoxFut<'a, Option<Result<(), String>>> {
+        Box::pin(async move {
+            let target = {
+                let inner = self.inner();
+                let wanted: Option<BTreeSet<String>> = entity_ids
+                    .iter()
+                    .map(|e| inner.by_entity.get(e).cloned())
+                    .collect();
+                let wanted = wanted.filter(|w| !w.is_empty())?;
+                // Only a room or zone whose lights are exactly these can stand in for them.
+                inner
+                    .rooms
+                    .iter()
+                    .find(|(_, ids)| *ids == wanted)
+                    .map(|(room, _)| room.grouped_light.clone())?
+            };
+            let body = light_body(action, true, true);
+            Some(self.client.set_grouped_light(&target, &body).await)
         })
     }
 }
@@ -691,6 +1015,7 @@ impl HueManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::TurnOn;
     use crate::store::Store;
     use axum::body::Body;
     use axum::extract::{Path, State};
@@ -721,7 +1046,8 @@ mod tests {
         let a = l.attributes();
         assert_eq!(a["friendly_name"], "Desk");
         assert_eq!(a["brightness"], 128);
-        assert_eq!(a.len(), 2, "attributes must stay small");
+        assert_eq!(a["supported_color_modes"], json!(["brightness"]));
+        assert_eq!(a.len(), 3, "attributes must stay small");
 
         let off = HueLight {
             on: false,
@@ -759,6 +1085,7 @@ mod tests {
         scenes: Arc<StdMutex<Vec<Value>>>,
         smart_scenes: Arc<StdMutex<Vec<Value>>>,
         rooms: Arc<StdMutex<Vec<Value>>>,
+        connectivity: Arc<StdMutex<Vec<Value>>>,
         puts: Arc<StdMutex<Vec<(String, Value)>>>,
         events: Arc<StdMutex<Vec<String>>>,
     }
@@ -775,6 +1102,9 @@ mod tests {
         }
         async fn list_rooms(State(m): State<Mock>) -> Json<Value> {
             Json(json!({"errors": [], "data": m.rooms.lock().unwrap().clone()}))
+        }
+        async fn list_connectivity(State(m): State<Mock>) -> Json<Value> {
+            Json(json!({"errors": [], "data": m.connectivity.lock().unwrap().clone()}))
         }
         async fn list_zones() -> Json<Value> {
             Json(json!({"errors": [], "data": []}))
@@ -810,6 +1140,11 @@ mod tests {
             .route("/clip/v2/resource/smart_scene/{id}", put(put_light))
             .route("/clip/v2/resource/room", get(list_rooms))
             .route("/clip/v2/resource/zone", get(list_zones))
+            .route(
+                "/clip/v2/resource/zigbee_connectivity",
+                get(list_connectivity),
+            )
+            .route("/clip/v2/resource/grouped_light/{id}", put(put_light))
             .route("/eventstream/clip/v2", get(events))
             .route("/api", post(pair_ok))
             .with_state(mock);
@@ -854,9 +1189,10 @@ mod tests {
         // control
         core.call_light(
             "light.hue_bbbbbbbb",
-            &LightAction::TurnOn {
+            &LightAction::TurnOn(TurnOn {
                 brightness: Some(255),
-            },
+                ..TurnOn::default()
+            }),
         )
         .await
         .unwrap();
@@ -882,6 +1218,252 @@ mod tests {
         hue.sync().await.unwrap();
         assert!(core.get_state("light.hue_bbbbbbbb").is_none());
         assert!(!hue.owns("light.hue_bbbbbbbb"));
+    }
+
+    fn rich_light_json(id: &str, owner: &str) -> Value {
+        json!({"id": id, "type": "light", "metadata": {"name": id}, "on": {"on": true},
+               "dimming": {"brightness": 50.0}, "owner": {"rid": owner, "rtype": "device"},
+               "color_temperature": {"mirek": 300, "mirek_valid": true},
+               "color": {"xy": {"x": 0.5, "y": 0.4}}})
+    }
+
+    #[tokio::test]
+    async fn color_state_and_request_bodies() {
+        let mut l = HueLight::from_resource(&rich_light_json("aaaa1111-0", "dev-a")).unwrap();
+        assert_eq!(l.attributes()["color_mode"], "color_temp");
+        assert_eq!(l.attributes()["color_temp"], 300);
+        assert_eq!(
+            l.attributes()["supported_color_modes"],
+            json!(["brightness", "color_temp", "xy"])
+        );
+
+        // a color change leaves white mode, a temperature change comes back
+        l.apply_update(&json!({"color": {"xy": {"x": 0.1, "y": 0.2}}}));
+        assert_eq!(l.attributes()["color_mode"], "xy");
+        assert_eq!(l.attributes()["xy_color"], json!([0.1, 0.2]));
+        assert!(!l.attributes().contains_key("color_temp"));
+        l.apply_update(&json!({"color_temperature": {"mirek": 200, "mirek_valid": true}}));
+        assert_eq!(l.attributes()["color_temp"], 200);
+        // a stale mirek (light showing a color) is ignored
+        l.apply_update(&json!({"color_temperature": {"mirek": 200, "mirek_valid": false}}));
+        assert_eq!(l.attributes()["color_mode"], "xy");
+
+        let on = LightAction::TurnOn(TurnOn {
+            brightness: Some(255),
+            color_temp: Some(250),
+            xy: Some((0.3, 0.3)),
+            transition_ms: Some(1500),
+        });
+        assert_eq!(
+            l.request_body(&on),
+            json!({"on": {"on": true}, "dimming": {"brightness": 100.0},
+                   "color_temperature": {"mirek": 250}, "color": {"xy": {"x": 0.3, "y": 0.3}},
+                   "dynamics": {"duration": 1500}})
+        );
+        // a dim-only light gets neither color field
+        let white = HueLight::from_resource(&light_json("w1", "Bulb", true, 50.0)).unwrap();
+        assert_eq!(
+            white.request_body(&on),
+            json!({"on": {"on": true}, "dimming": {"brightness": 100.0},
+                   "dynamics": {"duration": 1500}})
+        );
+        assert_eq!(
+            white.request_body(&LightAction::TurnOff {
+                transition_ms: Some(400)
+            }),
+            json!({"on": {"on": false}, "dynamics": {"duration": 400}})
+        );
+    }
+
+    #[tokio::test]
+    async fn unreachable_lights_are_unavailable_until_the_link_returns() {
+        let mock = Mock::default();
+        *mock.lights.lock().unwrap() = vec![rich_light_json("aaaa1111-0", "dev-a")];
+        *mock.connectivity.lock().unwrap() = vec![
+            json!({"id": "z1", "type": "zigbee_connectivity", "status": "disconnected",
+                   "owner": {"rid": "dev-a", "rtype": "device"}}),
+        ];
+        *mock.events.lock().unwrap() = vec![
+            json!([{"type": "update", "data": [{"id": "z1", "type": "zigbee_connectivity",
+                    "status": "connected"}]}])
+            .to_string(),
+        ];
+        let base = mock_server(mock).await;
+        let core = Core::new(Arc::new(Store::open_memory().await.unwrap()));
+        let hue = HueIntegration::new(HueClient::new(&base, "key"), core.clone());
+        core.set_integration(INTEGRATION_NAME, hue.clone());
+
+        hue.sync().await.unwrap();
+        let s = core.get_state("light.hue_aaaa1111").unwrap();
+        assert_eq!(s.state, "unavailable");
+        assert_eq!(s.attributes.len(), 1, "no stale brightness or color");
+
+        let _ = hue.stream_once().await;
+        assert_eq!(core.get_state("light.hue_aaaa1111").unwrap().state, "on");
+    }
+
+    #[tokio::test]
+    async fn a_room_is_driven_through_its_grouped_light() {
+        let mock = Mock::default();
+        *mock.lights.lock().unwrap() = vec![
+            rich_light_json("aaaa1111-0", "dev-a"),
+            rich_light_json("bbbb2222-0", "dev-b"),
+            rich_light_json("cccc3333-0", "dev-c"),
+        ];
+        *mock.rooms.lock().unwrap() = vec![json!({
+            "id": "room1", "type": "room", "metadata": {"name": "Study"},
+            "children": [{"rid": "dev-a", "rtype": "device"}, {"rid": "dev-b", "rtype": "device"}],
+            "services": [{"rid": "gl-study", "rtype": "grouped_light"}]})];
+        let base = mock_server(mock.clone()).await;
+        let core = Core::new(Arc::new(Store::open_memory().await.unwrap()));
+        let hue = HueIntegration::new(HueClient::new(&base, "key"), core.clone());
+        core.set_integration(INTEGRATION_NAME, hue.clone());
+        hue.sync().await.unwrap();
+
+        let sets = core.light_sets();
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0].name, "Study");
+        assert_eq!(
+            sets[0].entity_ids,
+            vec!["light.hue_aaaa1111", "light.hue_bbbb2222"]
+        );
+
+        // exactly the room's lights: one request to the grouped_light
+        core.call_lights(&sets[0].entity_ids, &LightAction::off())
+            .await
+            .unwrap();
+        {
+            let puts = mock.puts.lock().unwrap();
+            assert_eq!(puts.len(), 1);
+            assert_eq!(puts[0].0, "gl-study");
+            assert_eq!(puts[0].1, json!({"on": {"on": false}}));
+        }
+        assert_eq!(core.get_state("light.hue_bbbb2222").unwrap().state, "off");
+
+        // any other combination goes light by light
+        mock.puts.lock().unwrap().clear();
+        let two = vec![
+            "light.hue_aaaa1111".to_string(),
+            "light.hue_cccc3333".to_string(),
+        ];
+        core.call_lights(&two, &LightAction::on()).await.unwrap();
+        assert_eq!(mock.puts.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn rooms_and_connectivity_parse_defensively() {
+        let zone = HueRoom::from_resource(
+            &json!({"metadata": {"name": "Z"},
+                    "children": [{"rtype": "light", "rid": "l1"}, {"rtype": "device", "rid": "d1"},
+                                 {"rtype": "other", "rid": "x"}, {"rid": "no-type"}],
+                    "services": [{"rtype": "grouped_light", "rid": "gl"}]}),
+            "zone",
+        )
+        .unwrap();
+        assert_eq!(
+            (zone.kind.as_str(), zone.grouped_light.as_str()),
+            ("zone", "gl")
+        );
+        let owners = HashMap::from([("d1".to_string(), vec!["l2".to_string()])]);
+        assert_eq!(
+            zone.light_ids(&owners),
+            BTreeSet::from(["l1".to_string(), "l2".to_string()])
+        );
+        // no grouped_light, no name, or no children list
+        assert!(HueRoom::from_resource(&json!({"metadata": {"name": "A"}}), "room").is_none());
+        assert!(
+            HueRoom::from_resource(
+                &json!({"services": [{"rtype": "grouped_light", "rid": "gl"}]}),
+                "room"
+            )
+            .is_none()
+        );
+        let bare = HueRoom::from_resource(
+            &json!({"metadata": {"name": "B"}, "services": [{"rtype": "grouped_light", "rid": "g"}]}),
+            "room",
+        )
+        .unwrap();
+        assert!(bare.light_ids(&HashMap::new()).is_empty());
+
+        let link = |status: &str| {
+            connectivity_of(&json!({"id": "z", "status": status, "owner": {"rid": "d"}}))
+        };
+        assert_eq!(link("connected").unwrap().1, ("d".to_string(), true));
+        assert!(link("unidirectional_incoming").unwrap().1.1);
+        assert!(!link("connectivity_issue").unwrap().1.1);
+        assert!(connectivity_of(&json!({"id": "z", "status": "connected"})).is_none());
+        assert!(connectivity_of(&json!({"status": "connected", "owner": {"rid": "d"}})).is_none());
+        assert!(connectivity_of(&json!({"id": "z", "owner": {"rid": "d"}})).is_none());
+    }
+
+    #[tokio::test]
+    async fn odd_events_are_ignored_and_structure_changes_resync() {
+        let mock = Mock::default();
+        *mock.lights.lock().unwrap() = vec![rich_light_json("aaaa1111-0", "dev-a")];
+        *mock.connectivity.lock().unwrap() = vec![
+            json!({"id": "z1", "type": "zigbee_connectivity", "status": "connected",
+                   "owner": {"rid": "dev-a", "rtype": "device"}}),
+        ];
+        let base = mock_server(mock).await;
+        let core = Core::new(Arc::new(Store::open_memory().await.unwrap()));
+        let hue = HueIntegration::new(HueClient::new(&base, "key"), core.clone());
+        core.set_integration(INTEGRATION_NAME, hue.clone());
+        hue.sync().await.unwrap();
+
+        let ev = |kind: &str, item: Value| json!([{"type": kind, "data": [item]}]).to_string();
+        // updates without an id or status, or for an unknown link, change nothing
+        for item in [
+            json!({"type": "zigbee_connectivity", "status": "disconnected"}),
+            json!({"id": "z1", "type": "zigbee_connectivity"}),
+            json!({"id": "unknown", "type": "zigbee_connectivity", "status": "disconnected"}),
+        ] {
+            assert!(!hue.apply_event_payload(&ev("update", item)));
+        }
+        assert_eq!(core.get_state("light.hue_aaaa1111").unwrap().state, "on");
+        // a link going down and a link or room appearing
+        assert!(!hue.apply_event_payload(&ev(
+            "update",
+            json!({"id": "z1", "type": "zigbee_connectivity", "status": "connectivity_issue"})
+        )));
+        assert_eq!(
+            core.get_state("light.hue_aaaa1111").unwrap().state,
+            "unavailable"
+        );
+        assert!(hue.apply_event_payload(&ev("add", json!({"type": "zigbee_connectivity"}))));
+        assert!(hue.apply_event_payload(&ev("delete", json!({"type": "zigbee_connectivity"}))));
+        assert!(hue.apply_event_payload(&ev("add", json!({"type": "room"}))));
+        assert!(hue.apply_event_payload(&ev("delete", json!({"type": "zone"}))));
+        assert!(!hue.apply_event_payload(&ev("update", json!({"type": "room"}))));
+        assert!(!hue.apply_event_payload("not json"));
+
+        // no known light matches: no room request
+        assert!(
+            hue.call_light_set(&["light.hue_zzzzzzzz".to_string()], &LightAction::on())
+                .await
+                .is_none()
+        );
+        assert!(hue.call_light_set(&[], &LightAction::on()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn sync_survives_missing_scenes_connectivity_and_rooms() {
+        async fn lights() -> Json<Value> {
+            Json(
+                json!({"errors": [], "data": [{"id": "aaaa1111-0", "type": "light",
+                "metadata": {"name": "Desk"}, "on": {"on": true}}]}),
+            )
+        }
+        let app = Router::new().route("/clip/v2/resource/light", get(lights));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let core = Core::new(Arc::new(Store::open_memory().await.unwrap()));
+        let hue = HueIntegration::new(HueClient::new(&base, "key"), core.clone());
+        core.set_integration(INTEGRATION_NAME, hue.clone());
+        assert_eq!(hue.sync().await.unwrap(), 1);
+        assert_eq!(core.get_state("light.hue_aaaa1111").unwrap().state, "on");
+        assert!(core.light_sets().is_empty());
     }
 
     fn scene_json(id: &str, name: &str, room: &str, active: &str) -> Value {

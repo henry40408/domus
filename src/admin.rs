@@ -15,8 +15,8 @@ use serde_json::{Value, json};
 use std::convert::Infallible;
 use std::time::Duration;
 
-use crate::api::AppState;
-use crate::core::{CallError, LightAction, group_light_id};
+use crate::api::{AppState, light_action};
+use crate::core::{CallError, group_light_id};
 use crate::hue::{PairError, bridge_base, pair};
 use crate::store::{HueBridge, SESSION_TTL_SECS, User};
 use crate::throttle;
@@ -592,42 +592,84 @@ async fn lights(State(app): State<AppState>, Extension(me): Extension<User>) -> 
         if !app.core.allowed(&me.scope, &s.entity_id).await {
             continue;
         }
-        list.push(json!({
+        let mut item = json!({
             "entity_id": s.entity_id,
             "name": s.attributes.get("friendly_name").cloned().unwrap_or(Value::Null),
             "state": s.state,
             "brightness": s.attributes.get("brightness").cloned().unwrap_or(Value::Null),
-        }));
+        });
+        // Color details exist only for lights that have them.
+        for key in [
+            "color_mode",
+            "color_temp",
+            "xy_color",
+            "supported_color_modes",
+        ] {
+            if let Some(v) = s.attributes.get(key) {
+                item[key] = v.clone();
+            }
+        }
+        list.push(item);
     }
     Json(Value::Array(list))
 }
 
-#[derive(Deserialize)]
-struct TestBody {
-    entity_id: String,
-    /// Lights only: true turns on, false turns off.
-    on: Option<bool>,
+/// Rooms and zones whose lights can be controlled together, limited to what the user may see.
+async fn rooms(State(app): State<AppState>, Extension(me): Extension<User>) -> Json<Value> {
+    let mut list: Vec<Value> = Vec::new();
+    for set in app.core.light_sets() {
+        let mut visible = !set.entity_ids.is_empty();
+        for id in &set.entity_ids {
+            visible &= app.core.allowed(&me.scope, id).await;
+        }
+        if visible {
+            list.push(json!(set));
+        }
+    }
+    Json(Value::Array(list))
 }
 
 /// Runs a light or scene action from the admin page, so the setup can be tested without a watch.
+/// Takes the same color, brightness and `transition` fields as the Home Assistant services, plus
+/// `on` (default true) and either `entity_id` or `entity_ids` (lights to drive together).
 async fn device_test(
     State(app): State<AppState>,
     Extension(me): Extension<User>,
-    Json(body): Json<TestBody>,
+    Json(body): Json<Value>,
 ) -> Response {
-    let id = body.entity_id;
-    if !app.core.allowed(&me.scope, &id).await {
-        return message(StatusCode::NOT_FOUND, "Unknown entity.");
+    let ids: Vec<String> = match (body.get("entity_id"), body.get("entity_ids")) {
+        (Some(Value::String(id)), _) => vec![id.clone()],
+        (_, Some(Value::Array(ids))) => ids
+            .iter()
+            .filter_map(|i| i.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    };
+    let Some(id) = ids.first().cloned() else {
+        return message(StatusCode::BAD_REQUEST, "Missing entity_id.");
+    };
+    for i in &ids {
+        if !app.core.allowed(&me.scope, i).await {
+            return message(StatusCode::NOT_FOUND, "Unknown entity.");
+        }
     }
     let result = if id.starts_with("scene.") {
         app.core.activate_scene(&id).await
-    } else if id.starts_with("light.") {
-        let action = if body.on.unwrap_or(true) {
-            LightAction::TurnOn { brightness: None }
+    } else if ids.iter().all(|i| i.starts_with("light.")) {
+        let service = if body.get("on").and_then(Value::as_bool).unwrap_or(true) {
+            "turn_on"
         } else {
-            LightAction::TurnOff
+            "turn_off"
         };
-        app.core.call_light(&id, &action).await
+        let action = match light_action(service, &body) {
+            Ok(a) => a.expect("turn_on and turn_off are known services"),
+            Err(e) => return message(StatusCode::BAD_REQUEST, e),
+        };
+        if ids.len() == 1 {
+            app.core.call_light(&id, &action).await
+        } else {
+            app.core.call_lights(&ids, &action).await
+        }
     } else {
         return message(
             StatusCode::BAD_REQUEST,
@@ -920,6 +962,7 @@ pub fn router(app: AppState) -> Router {
         .route("/sessions/revoke-others", post(sessions_revoke_others))
         .route("/sessions/{id}", delete(session_revoke))
         .route("/lights", get(lights))
+        .route("/rooms", get(rooms))
         .route("/devices/test", post(device_test))
         .route("/groups", get(groups))
         .route("/tokens", get(tokens).post(token_create))
@@ -938,7 +981,7 @@ pub fn router(app: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::Core;
+    use crate::core::{Core, LightAction, LightSet};
     use crate::hue::HueManager;
     use crate::store::Store;
     use axum::body::Body;
@@ -2298,6 +2341,13 @@ mod tests {
         fn owns(&self, id: &str) -> bool {
             id.starts_with("light.hue_") || id.starts_with("scene.hue_")
         }
+        fn light_sets(&self) -> Vec<LightSet> {
+            vec![LightSet {
+                name: "Study".into(),
+                kind: "room".into(),
+                entity_ids: vec!["light.hue_a".into(), "light.hue_b".into()],
+            }]
+        }
         fn call_light<'a>(
             &'a self,
             id: &'a str,
@@ -2353,6 +2403,48 @@ mod tests {
             post(r#"{"entity_id":"switch.x"}"#).await.0,
             StatusCode::BAD_REQUEST
         );
+
+        // color and transition use the Home Assistant field names and are validated
+        let (s, _, v) =
+            post(r#"{"entity_id":"light.hue_a","color_temp":300,"transition":2}"#).await;
+        assert_eq!((s, v["state"].as_str()), (StatusCode::OK, Some("on")));
+        assert_eq!(
+            post(r#"{"entity_id":"light.hue_a","xy_color":[2,0]}"#)
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        // several lights at once, and the sets that can be driven together
+        let (s, _, v) = post(r#"{"entity_ids":["light.hue_a","light.hue_bad"],"on":true}"#).await;
+        assert_eq!((s, v["state"].as_str()), (StatusCode::OK, Some("on")));
+        assert_eq!(post(r#"{}"#).await.0, StatusCode::BAD_REQUEST);
+        let (s, _, v) = call(&r, "GET", "/api/domus/rooms", Some(&c), "").await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v[0]["name"], "Study");
+        assert_eq!(v[0]["entity_ids"], json!(["light.hue_a", "light.hue_b"]));
+
+        // /lights carries color details only for lights that report them
+        let mut attrs = Map::new();
+        attrs.insert("color_mode".into(), json!("color_temp"));
+        attrs.insert("color_temp".into(), json!(300));
+        attrs.insert(
+            "supported_color_modes".into(),
+            json!(["brightness", "color_temp"]),
+        );
+        app.core.set_state("light.hue_a", "on", attrs);
+        let (_, _, v) = call(&r, "GET", "/api/domus/lights", Some(&c), "").await;
+        let a = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["entity_id"] == "light.hue_a")
+            .unwrap();
+        assert_eq!(a["color_temp"], 300);
+        assert_eq!(
+            a["supported_color_modes"],
+            json!(["brightness", "color_temp"])
+        );
+        assert!(a.get("xy_color").is_none());
 
         // requires a session
         let (s, ..) = call(
