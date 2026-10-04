@@ -403,7 +403,7 @@ function groupEditor(d) {
       el("div", { class: "grow" }, nameInput),
       d.isNew ? "" : copyButton(d.name, "Copy name"),
       d.isNew ? "" : el("button", { class: "danger", onclick: () => guarded(() => deleteGroup(d)) }, "Delete")),
-    el("label", { class: "row check", style: "margin:12px 0" }, exposeBox, "Add an all-lights switch ", exposeCode),
+    el("label", { class: "row check" }, exposeBox, "Add an all-lights switch ", exposeCode),
     warn,
     el("div", { class: "subtabs" }, pickTab, orderTab),
     editor,
@@ -610,7 +610,7 @@ function tokens() {
     el("div", { class: "card" },
       el("div", { class: "row" }, el("div", { class: "grow" }, name), el("button", { class: "primary", onclick: create }, "Create token")),
       picker,
-      el("div", { class: "row check", style: "margin:12px 0" },
+      el("div", { class: "row check" },
         el("label", {}, readOnly, " Read-only (cannot control lights)"), expiry),
       fresh,
       data.tokens.length
@@ -650,7 +650,7 @@ function users() {
     el("p", { class: "sub" }, "Admins manage everything; other users can only control lights and manage their own tokens."),
     el("div", { class: "card" },
       el("div", { class: "row" }, el("div", { class: "grow" }, name), el("div", { class: "grow" }, pw)),
-      el("div", { class: "row check", style: "margin:12px 0" },
+      el("div", { class: "row check" },
         el("label", {}, admin, " Admin"),
         el("button", { class: "primary", onclick: create }, "Add user")),
       el("ul", { class: "rows" }, ...data.users.map((u) => el("li", {},
@@ -730,7 +730,7 @@ function describeAgent(ua) {
 function sessionsList() {
   const others = data.sessions.filter((x) => !x.current).length;
   return el("div", {},
-    el("div", { class: "section-title", style: "margin-top:16px" }, "Where you are signed in"),
+    el("div", { class: "section-title first" }, "Where you are signed in"),
     el("ul", { class: "rows" }, ...data.sessions.map((x) => el("li", {},
       el("span", { class: "name" }, describeAgent(x.user_agent) + (x.current ? " (this device)" : "")),
       x.current ? "" : el("button", {
