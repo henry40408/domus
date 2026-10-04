@@ -781,6 +781,105 @@ mod tests {
             .unwrap();
     }
 
+    /// Controls `light.set_*` lights as one room; `light.set_bad` makes the room request fail.
+    struct Roomy;
+    impl Integration for Roomy {
+        fn owns(&self, id: &str) -> bool {
+            id.starts_with("light.set_")
+        }
+        fn call_light<'a>(
+            &'a self,
+            _id: &'a str,
+            _a: &'a LightAction,
+        ) -> BoxFut<'a, Result<(), String>> {
+            Box::pin(async { Err("must not go light by light".into()) })
+        }
+        fn light_sets(&self) -> Vec<LightSet> {
+            vec![LightSet {
+                name: "Room".into(),
+                kind: "room".into(),
+                entity_ids: vec!["light.set_a".into()],
+            }]
+        }
+        fn call_light_set<'a>(
+            &'a self,
+            ids: &'a [String],
+            _a: &'a LightAction,
+        ) -> BoxFut<'a, Option<Result<(), String>>> {
+            let bad = ids.iter().any(|i| i == "light.set_bad");
+            Box::pin(async move { Some(if bad { Err("room down".into()) } else { Ok(()) }) })
+        }
+    }
+
+    #[tokio::test]
+    async fn light_set_goes_through_one_request_and_applies_optimistically() {
+        let c = core().await;
+        c.set_integration("roomy", Arc::new(Roomy));
+        assert_eq!(c.light_sets().len(), 1);
+        for id in ["light.set_a", "light.set_b"] {
+            c.set_state(id, "off", Map::new());
+        }
+        c.store()
+            .group_set("g", &["light.set_a".into(), "light.set_b".into()])
+            .await
+            .unwrap();
+        c.store().group_set_exposed("g", true).await;
+        let id = group_light_id("g");
+        let action = LightAction::TurnOn(TurnOn {
+            color_temp: Some(300),
+            ..TurnOn::default()
+        });
+        c.call_light(&id, &action).await.unwrap();
+        let s = c.get_state("light.set_b").unwrap();
+        assert_eq!(s.state, "on");
+        assert_eq!(s.attributes["color_temp"], json!(300));
+        assert_eq!(s.attributes["color_mode"], json!("color_temp"));
+
+        // xy replaces a previous white temperature
+        let xy = LightAction::TurnOn(TurnOn {
+            xy: Some((0.5, 0.4)),
+            ..TurnOn::default()
+        });
+        c.call_light(&id, &xy).await.unwrap();
+        let s = c.get_state("light.set_a").unwrap();
+        assert_eq!(s.attributes["color_mode"], json!("xy"));
+        assert!(!s.attributes.contains_key("color_temp"));
+
+        // an unreachable light is left alone
+        c.set_state("light.set_a", "unavailable", Map::new());
+        c.call_light(&id, &LightAction::off()).await.unwrap();
+        assert_eq!(c.get_state("light.set_a").unwrap().state, "unavailable");
+
+        // a failing room request is the call's error
+        c.set_state("light.set_bad", "off", Map::new());
+        c.store()
+            .group_set("g", &["light.set_a".into(), "light.set_bad".into()])
+            .await
+            .unwrap();
+        assert_eq!(
+            c.call_light(&id, &LightAction::off()).await,
+            Err(CallError::Failed("room down".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn lights_from_different_integrations_are_not_one_set() {
+        let c = core().await;
+        c.set_integration("roomy", Arc::new(Roomy));
+        c.set_integration("flaky", Arc::new(Flaky));
+        assert!(
+            c.call_light_set(&[], &LightAction::on()).await.is_none(),
+            "no lights"
+        );
+        let mixed = ["light.set_a".to_string(), "light.flaky_a".to_string()];
+        assert!(c.call_light_set(&mixed, &LightAction::on()).await.is_none());
+        assert!(
+            c.call_light_set(&["light.other".to_string()], &LightAction::on())
+                .await
+                .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn group_lights_that_include_each_other_do_not_recurse() {
         let c = group_core(&["light.flaky_a"]).await;

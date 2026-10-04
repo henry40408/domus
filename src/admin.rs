@@ -662,8 +662,7 @@ async fn device_test(
             "turn_off"
         };
         let action = match light_action(service, &body) {
-            Ok(Some(a)) => a,
-            Ok(None) => return message(StatusCode::BAD_REQUEST, "Unknown service."),
+            Ok(a) => a.expect("turn_on and turn_off are known services"),
             Err(e) => return message(StatusCode::BAD_REQUEST, e),
         };
         if ids.len() == 1 {
@@ -2423,6 +2422,29 @@ mod tests {
         assert_eq!(s, StatusCode::OK);
         assert_eq!(v[0]["name"], "Study");
         assert_eq!(v[0]["entity_ids"], json!(["light.hue_a", "light.hue_b"]));
+
+        // /lights carries color details only for lights that report them
+        let mut attrs = Map::new();
+        attrs.insert("color_mode".into(), json!("color_temp"));
+        attrs.insert("color_temp".into(), json!(300));
+        attrs.insert(
+            "supported_color_modes".into(),
+            json!(["brightness", "color_temp"]),
+        );
+        app.core.set_state("light.hue_a", "on", attrs);
+        let (_, _, v) = call(&r, "GET", "/api/domus/lights", Some(&c), "").await;
+        let a = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["entity_id"] == "light.hue_a")
+            .unwrap();
+        assert_eq!(a["color_temp"], 300);
+        assert_eq!(
+            a["supported_color_modes"],
+            json!(["brightness", "color_temp"])
+        );
+        assert!(a.get("xy_color").is_none());
 
         // requires a session
         let (s, ..) = call(

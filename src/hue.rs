@@ -1350,6 +1350,122 @@ mod tests {
         assert_eq!(mock.puts.lock().unwrap().len(), 2);
     }
 
+    #[test]
+    fn rooms_and_connectivity_parse_defensively() {
+        let zone = HueRoom::from_resource(
+            &json!({"metadata": {"name": "Z"},
+                    "children": [{"rtype": "light", "rid": "l1"}, {"rtype": "device", "rid": "d1"},
+                                 {"rtype": "other", "rid": "x"}, {"rid": "no-type"}],
+                    "services": [{"rtype": "grouped_light", "rid": "gl"}]}),
+            "zone",
+        )
+        .unwrap();
+        assert_eq!(
+            (zone.kind.as_str(), zone.grouped_light.as_str()),
+            ("zone", "gl")
+        );
+        let owners = HashMap::from([("d1".to_string(), vec!["l2".to_string()])]);
+        assert_eq!(
+            zone.light_ids(&owners),
+            BTreeSet::from(["l1".to_string(), "l2".to_string()])
+        );
+        // no grouped_light, no name, or no children list
+        assert!(HueRoom::from_resource(&json!({"metadata": {"name": "A"}}), "room").is_none());
+        assert!(
+            HueRoom::from_resource(
+                &json!({"services": [{"rtype": "grouped_light", "rid": "gl"}]}),
+                "room"
+            )
+            .is_none()
+        );
+        let bare = HueRoom::from_resource(
+            &json!({"metadata": {"name": "B"}, "services": [{"rtype": "grouped_light", "rid": "g"}]}),
+            "room",
+        )
+        .unwrap();
+        assert!(bare.light_ids(&HashMap::new()).is_empty());
+
+        let link = |status: &str| {
+            connectivity_of(&json!({"id": "z", "status": status, "owner": {"rid": "d"}}))
+        };
+        assert_eq!(link("connected").unwrap().1, ("d".to_string(), true));
+        assert!(link("unidirectional_incoming").unwrap().1.1);
+        assert!(!link("connectivity_issue").unwrap().1.1);
+        assert!(connectivity_of(&json!({"id": "z", "status": "connected"})).is_none());
+        assert!(connectivity_of(&json!({"status": "connected", "owner": {"rid": "d"}})).is_none());
+        assert!(connectivity_of(&json!({"id": "z", "owner": {"rid": "d"}})).is_none());
+    }
+
+    #[tokio::test]
+    async fn odd_events_are_ignored_and_structure_changes_resync() {
+        let mock = Mock::default();
+        *mock.lights.lock().unwrap() = vec![rich_light_json("aaaa1111-0", "dev-a")];
+        *mock.connectivity.lock().unwrap() = vec![
+            json!({"id": "z1", "type": "zigbee_connectivity", "status": "connected",
+                   "owner": {"rid": "dev-a", "rtype": "device"}}),
+        ];
+        let base = mock_server(mock).await;
+        let core = Core::new(Arc::new(Store::open_memory().await.unwrap()));
+        let hue = HueIntegration::new(HueClient::new(&base, "key"), core.clone());
+        core.set_integration(INTEGRATION_NAME, hue.clone());
+        hue.sync().await.unwrap();
+
+        let ev = |kind: &str, item: Value| json!([{"type": kind, "data": [item]}]).to_string();
+        // updates without an id or status, or for an unknown link, change nothing
+        for item in [
+            json!({"type": "zigbee_connectivity", "status": "disconnected"}),
+            json!({"id": "z1", "type": "zigbee_connectivity"}),
+            json!({"id": "unknown", "type": "zigbee_connectivity", "status": "disconnected"}),
+        ] {
+            assert!(!hue.apply_event_payload(&ev("update", item)));
+        }
+        assert_eq!(core.get_state("light.hue_aaaa1111").unwrap().state, "on");
+        // a link going down and a link or room appearing
+        assert!(!hue.apply_event_payload(&ev(
+            "update",
+            json!({"id": "z1", "type": "zigbee_connectivity", "status": "connectivity_issue"})
+        )));
+        assert_eq!(
+            core.get_state("light.hue_aaaa1111").unwrap().state,
+            "unavailable"
+        );
+        assert!(hue.apply_event_payload(&ev("add", json!({"type": "zigbee_connectivity"}))));
+        assert!(hue.apply_event_payload(&ev("delete", json!({"type": "zigbee_connectivity"}))));
+        assert!(hue.apply_event_payload(&ev("add", json!({"type": "room"}))));
+        assert!(hue.apply_event_payload(&ev("delete", json!({"type": "zone"}))));
+        assert!(!hue.apply_event_payload(&ev("update", json!({"type": "room"}))));
+        assert!(!hue.apply_event_payload("not json"));
+
+        // no known light matches: no room request
+        assert!(
+            hue.call_light_set(&["light.hue_zzzzzzzz".to_string()], &LightAction::on())
+                .await
+                .is_none()
+        );
+        assert!(hue.call_light_set(&[], &LightAction::on()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn sync_survives_missing_scenes_connectivity_and_rooms() {
+        async fn lights() -> Json<Value> {
+            Json(
+                json!({"errors": [], "data": [{"id": "aaaa1111-0", "type": "light",
+                "metadata": {"name": "Desk"}, "on": {"on": true}}]}),
+            )
+        }
+        let app = Router::new().route("/clip/v2/resource/light", get(lights));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let core = Core::new(Arc::new(Store::open_memory().await.unwrap()));
+        let hue = HueIntegration::new(HueClient::new(&base, "key"), core.clone());
+        core.set_integration(INTEGRATION_NAME, hue.clone());
+        assert_eq!(hue.sync().await.unwrap(), 1);
+        assert_eq!(core.get_state("light.hue_aaaa1111").unwrap().state, "on");
+        assert!(core.light_sets().is_empty());
+    }
+
     fn scene_json(id: &str, name: &str, room: &str, active: &str) -> Value {
         json!({"id": id, "type": "scene", "metadata": {"name": name},
                "group": {"rid": room, "rtype": "room"}, "status": {"active": active}})

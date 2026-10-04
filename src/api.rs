@@ -648,6 +648,40 @@ mod tests {
         assert_eq!(action("toggle", json!({})), Ok(None));
     }
 
+    #[test]
+    fn color_spellings_and_edges() {
+        let xy_of = |body: Value| match light_action("turn_on", &body) {
+            Ok(Some(LightAction::TurnOn(TurnOn { xy: Some(xy), .. }))) => xy,
+            other => panic!("expected xy for {body}: {other:?}"),
+        };
+        // every hue sector produces a color; black falls back to the white point
+        for h in [0, 60, 120, 180, 240, 300] {
+            let (x, y) = xy_of(json!({"hs_color": [h, 100]}));
+            assert!((0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y));
+        }
+        assert_eq!(xy_of(json!({"rgb_color": [0, 0, 0]})), (0.3127, 0.3290));
+        assert_eq!(xy_of(json!({"xy_color": [0.2, 0.4]})), (0.2, 0.4));
+        // dark and bright channels use both gamma branches
+        xy_of(json!({"rgb_color": [3, 3, 3]}));
+        // `kelvin` is an alias, and bad values are refused
+        assert_eq!(
+            light_action("turn_on", &json!({"kelvin": 4000})),
+            Ok(Some(LightAction::TurnOn(TurnOn {
+                color_temp: Some(250),
+                ..TurnOn::default()
+            })))
+        );
+        for bad in [
+            json!({"color_temp_kelvin": 0}),
+            json!({"kelvin": "warm"}),
+            json!({"hs_color": [1]}),
+            json!({"rgb_color": [1, 2, 300]}),
+            json!({"xy_color": ["a", "b"]}),
+        ] {
+            assert!(light_action("turn_on", &bad).is_err(), "{bad}");
+        }
+    }
+
     #[tokio::test]
     async fn service_edge_cases() {
         let (r, ..) = setup().await;
