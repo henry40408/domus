@@ -4,6 +4,9 @@
 const root = document.getElementById("root");
 const toastBox = document.getElementById("toast");
 
+// Enter that confirms an IME candidate (zhuyin, pinyin) must not submit; 229 covers Safari, which ends composition before keydown.
+const isEnter = (e) => e.key === "Enter" && !e.isComposing && e.keyCode !== 229;
+
 const SVG_NS = "http://www.w3.org/2000/svg";
 // 24x24 stroke icons (paths only), drawn in currentColor.
 const circle = (cx, cy, r) => `M${cx - r} ${cy}a${r} ${r} 0 1 0 ${2 * r} 0a${r} ${r} 0 1 0 ${-2 * r} 0`;
@@ -164,7 +167,7 @@ function authScreen(setupDone, needCode) {
       await start();
     }),
   }, setupDone ? "Log in" : "Create admin");
-  for (const input of [user, pw, code]) input.addEventListener("keydown", (e) => { if (e.key === "Enter") go.click(); });
+  for (const input of [user, pw, code]) input.addEventListener("keydown", (e) => { if (isEnter(e)) go.click(); });
   root.replaceChildren(el("div", { class: "auth" },
     el("h2", {}, "domus"),
     el("p", { class: "sub" }, setupDone ? "Log in to continue." : "First-time setup: choose the admin username and password (at least 12 characters)."),
@@ -599,7 +602,7 @@ function tokens() {
   const picker = boxes.length ? el("div", { class: "scope" },
     el("p", { class: "muted" }, me.scope ? "Limit to groups (leave all unchecked for all of yours):" : "Limit to groups (leave all unchecked for full access):"),
     ...boxes.map((b) => el("label", {}, b.box, " " + b.g.name))) : "";
-  name.addEventListener("keydown", (e) => { if (e.key === "Enter") create(); });
+  name.addEventListener("keydown", (e) => { if (isEnter(e)) create(); });
   const fresh = ui.fresh && el("div", { class: "warn" },
     "Copy this token now; it is shown only once. Click it to select all.",
     el("code", { class: "tok" }, ui.fresh),
@@ -644,7 +647,7 @@ function users() {
     await refresh();
     toast("User created", false);
   });
-  pw.addEventListener("keydown", (e) => { if (e.key === "Enter") create(); });
+  pw.addEventListener("keydown", (e) => { if (isEnter(e)) create(); });
   return [
     el("h2", {}, "Users"),
     el("p", { class: "sub" }, "Admins manage everything; other users can only control lights and manage their own tokens."),
@@ -761,7 +764,7 @@ function accountCard() {
     current.value = next.value = "";
     toast("Password changed", false);
   });
-  next.addEventListener("keydown", (e) => { if (e.key === "Enter") change(); });
+  next.addEventListener("keydown", (e) => { if (isEnter(e)) change(); });
   return el("div", { class: "card" },
     el("h3", {}, "Account"),
     el("p", {}, "Signed in as ", el("b", {}, me.username), me.is_admin ? " (admin)" : ""),
