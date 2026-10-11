@@ -502,6 +502,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_requests_are_rejected() {
+        let (r, app) = setup().await;
+        let uri = "/api/mobile_app/registrations";
+        assert_eq!(
+            post_json(&r, uri, Some(TOKEN), json!([1])).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        let mut nested = registration();
+        nested["model"] = json!({"a": 1});
+        assert_eq!(
+            post_json(&r, uri, Some(TOKEN), nested).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        let mut long = registration();
+        long["device_name"] = json!("x".repeat(FIELD_MAX + 1));
+        assert_eq!(
+            post_json(&r, uri, Some(TOKEN), long).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        assert!(app.core.store().list_registrations(None).await.is_empty());
+
+        let id = registered(&r).await;
+        let hook = format!("/api/webhook/{id}");
+        assert_eq!(
+            post_json(&r, &hook, None, json!([1])).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        let resp = r
+            .clone()
+            .oneshot(Request::post(&hook).body(Body::from("not json")).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let (status, body) = post_json(
+            &r,
+            &hook,
+            None,
+            json!({"type": "update_registration", "data": {"os_version": "16"}}),
+        )
+        .await;
+        assert_eq!(
+            (status, body["os_version"].clone()),
+            (StatusCode::OK, json!("16"))
+        );
+    }
+
+    #[tokio::test]
     async fn scoped_tokens_may_not_register() {
         let (r, app) = setup().await;
         let scope = ["Garmin".to_string()];
