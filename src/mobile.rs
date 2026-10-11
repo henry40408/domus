@@ -18,7 +18,8 @@ use crate::store::{RegistrationError, RegistrationFields, TokenAuth};
 use crate::util::{random_hex, sha256_hex};
 
 /// The Home Assistant version domus claims to be: the apps gate features on it, and this is a
-/// release old enough to need no handshake beyond what domus implements.
+/// release old enough to need no handshake beyond what domus implements (the V1 bridge in
+/// `web/external.js`, no `frontend/loaded`). Raising it past 2026.4.2 breaks the Companion apps' main screen.
 pub const HA_VERSION: &str = "2025.12.0";
 /// Longest accepted value of any text field the app reports.
 const FIELD_MAX: usize = 256;

@@ -2400,6 +2400,10 @@ mod tests {
         assert!(!html.contains(ASSET_VERSION_PLACEHOLDER));
         let stamped = format!("/app.js?v={}", crate::GIT_VERSION);
         assert!(html.contains(&stamped));
+        // The Companion apps' bridge is part of the page and defines what they wait for.
+        assert!(html.contains(&format!("/external.js?v={}", crate::GIT_VERSION)));
+        let bridge = body(static_files("/external.js".parse().unwrap()).await).await;
+        assert!(bridge.contains("external_auth") && bridge.contains("connection-status"));
 
         // bare URLs are never pinned, so a stale reference cannot stick
         let bare = static_files("/app.js".parse().unwrap()).await;

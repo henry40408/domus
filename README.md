@@ -10,8 +10,9 @@
 [![Casual Maintenance Intended](https://casuallymaintained.tech/badge.svg)](https://casuallymaintained.tech/)
 [![Vibe Coded](https://img.shields.io/badge/vibe_coded-Claude-d97757?logo=anthropic&logoColor=white)](https://claude.com/claude-code)
 
-domus controls Philips Hue lights through a Hue Bridge (CLIP v2). The MVP implements just the REST
-subset needed by [hasscontrol](https://github.com/hatl/hasscontrol) (a Garmin watch widget).
+domus controls Philips Hue lights through a Hue Bridge (CLIP v2). It implements the Home Assistant REST
+subset needed by [hasscontrol](https://github.com/hatl/hasscontrol) (a Garmin watch widget) and enough
+of the login, `mobile_app` and WebSocket APIs for the official Companion apps to connect.
 
 ## Features
 
@@ -19,6 +20,7 @@ subset needed by [hasscontrol](https://github.com/hatl/hasscontrol) (a Garmin wa
 - **Hue CLIP v2** - Lights and scenes from your Hue Bridge
 - **Groups** - Pick and order the lights and scenes a watch sees; optional all-lights switch per group
 - **Admin page** - Pair the bridge, edit groups, manage users and tokens, test devices; works on phones too
+- **Companion app login** - The official Home Assistant iOS/Android apps can connect (OAuth, mobile_app, WebSocket)
 - **Docker Ready** - Single binary with all assets embedded, multi-platform images
 
 ## Quick Start
@@ -103,6 +105,27 @@ group lights (one level only), so groups cannot loop.
 
 Admin API lives under `/api/domus/*` (session cookie, used by the admin page), including `POST /api/domus/devices/test` (`{"entity_id", "on"}`).
 
+## Home Assistant Companion app
+
+The official Home Assistant apps (iOS, Android) can connect to domus: OAuth login (`/auth/*`),
+`mobile_app` registration and webhook, and a WebSocket API at `/api/websocket`.
+
+1. Run domus reachable from the phone, e.g. `DOMUS_BIND=0.0.0.0:8123`.
+2. In the app, enter the URL by hand: `http://<LAN IP>:8123`. There is no Bonjour/mDNS discovery.
+3. On iOS, allow the Local Network permission. The App Store app does not run in the Simulator; use a real device.
+4. Sign in with a domus user, name the device, and the app registers itself.
+
+Notes:
+
+- domus reports a faked Home Assistant version (`2025.12.0`) so the apps use their older bridge and do not
+  wait for the `frontend/loaded` handshake (2026.8.0+) or use the V2 bridge (2026.4.2+). Do not bump it.
+- The app's main screen is domus's own admin page; it needs its own login (the cookie is not shared).
+- Sensors and locations the app sends are accepted and dropped.
+- WebSocket commands: `ping`, `supported_features`, `auth/current_user`, `get_config`, `get_states`,
+  `subscribe_entities`, `subscribe_events` / `unsubscribe_events` and the device, entity, area, floor and label
+  registry lists (always empty). Others return `unknown_command`.
+- Registered apps are listed (and can be revoked) in the admin page's settings.
+
 ## Docker
 
 ### Docker Compose
@@ -182,7 +205,7 @@ For LAN-only use, get a certificate via DNS-01 (Let's Encrypt) for a name that r
 
 ## Not implemented (yet)
 
-WebSocket API, registries, HA OAuth/onboarding, the official HA frontend / Companion app, other domains
+Registries (the list commands return empty lists), the official HA frontend, mDNS discovery for the Companion apps, other domains
 (switch, scene, …) and other brands.
 
 ## Development
