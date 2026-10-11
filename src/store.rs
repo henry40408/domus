@@ -411,18 +411,6 @@ impl Store {
         .is_some()
     }
 
-    /// Whether the token row still exists, expired or not and without counting as use: a
-    /// WebSocket outlives its access token like it does in Home Assistant, but not its revocation.
-    pub async fn token_exists(&self, token_hash: &str) -> bool {
-        sqlx::query_scalar::<_, i64>("SELECT 1 FROM tokens WHERE token_hash = ?1")
-            .bind(token_hash)
-            .fetch_optional(&self.pool)
-            .await
-            .ok()
-            .flatten()
-            .is_some()
-    }
-
     pub async fn user_by_id(&self, id: i64) -> Option<User> {
         sqlx::query("SELECT id, username, is_admin, created, scope FROM users WHERE id = ?1")
             .bind(id)
@@ -587,22 +575,7 @@ impl Store {
     /// Authenticates a token by its hash: `None` if unknown or expired. The scope is the token's
     /// own narrowed by its owner's, so shrinking a user's groups shrinks their tokens too.
     pub async fn token_auth(&self, token_hash: &str) -> Option<TokenAuth> {
-        let row = sqlx::query(
-            "SELECT t.scope, t.read_only, u.scope, t.user_id, t.refresh_id FROM tokens t LEFT JOIN users u ON u.id = t.user_id
-             WHERE t.token_hash = ?1 AND (t.expires IS NULL OR t.expires > ?2)",
-        )
-        .bind(token_hash)
-        .bind(now_secs())
-        .fetch_optional(&self.pool)
-        .await
-        .ok()
-        .flatten();
-        let auth = row.map(|r| TokenAuth {
-            scope: intersect_scope(&parse_scope(r.get(0)), &parse_scope(r.get(2))),
-            read_only: r.get(1),
-            user_id: r.get(3),
-            refresh_id: r.get(4),
-        });
+        let auth = self.token_view(token_hash).await;
         if auth.is_some() {
             // Throttled so a polling client does not write on every request.
             let now = now_secs();
@@ -617,6 +590,38 @@ impl Store {
             .await;
         }
         auth
+    }
+
+    /// Like `token_auth`, but without counting as use: for long-lived connections that
+    /// re-check their token.
+    pub async fn token_view(&self, token_hash: &str) -> Option<TokenAuth> {
+        let row = sqlx::query(
+            "SELECT t.scope, t.read_only, u.scope, t.user_id, t.refresh_id FROM tokens t LEFT JOIN users u ON u.id = t.user_id
+             WHERE t.token_hash = ?1 AND (t.expires IS NULL OR t.expires > ?2)",
+        )
+        .bind(token_hash)
+        .bind(now_secs())
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten();
+        row.map(|r| TokenAuth {
+            scope: intersect_scope(&parse_scope(r.get(0)), &parse_scope(r.get(2))),
+            read_only: r.get(1),
+            user_id: r.get(3),
+            refresh_id: r.get(4),
+        })
+    }
+
+    /// Whether an app login (refresh token) still exists.
+    pub async fn refresh_exists(&self, refresh_id: i64) -> bool {
+        sqlx::query_scalar::<_, i64>("SELECT 1 FROM refresh_tokens WHERE id = ?1")
+            .bind(refresh_id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
     }
 
     // OAuth refresh tokens (only the hash is stored)

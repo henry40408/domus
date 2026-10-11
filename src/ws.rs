@@ -14,7 +14,7 @@ use serde_json::{Map, Value, json};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::api::AppState;
-use crate::core::State as EntityState;
+use crate::core::{State as EntityState, group_light_id};
 use crate::mobile::{HA_VERSION, config};
 use crate::store::{Scope, TokenAuth, User};
 use crate::util::sha256_hex;
@@ -25,11 +25,18 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const AUTH_TIMEOUT: Duration = Duration::from_millis(300);
 
-/// How often the token is checked for revocation.
+/// How often the login is checked for revocation and the user's groups for changes.
 #[cfg(not(test))]
 const RECHECK: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const RECHECK: Duration = Duration::from_millis(100);
+
+/// A peer that does not take what is sent to it this long is dropped instead of stalling.
+const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+/// Largest message accepted, before and after authentication; the apps send tiny ones.
+const MAX_MESSAGE: usize = 64 * 1024;
+/// Open `subscribe_entities` / `subscribe_events` a connection may hold.
+const MAX_SUBSCRIPTIONS: usize = 16;
 
 /// Registries domus has nothing in; the apps ask for them and expect a list.
 const EMPTY_LISTS: &[&str] = &[
@@ -40,10 +47,12 @@ const EMPTY_LISTS: &[&str] = &[
     "config/label_registry/list",
 ];
 
-/// An open `subscribe_entities`: its message id and the entities it was limited to, if any.
+/// An open `subscribe_entities`: its message id, the entities it was limited to (if any) and
+/// the ones the client currently has, so removals can be told.
 struct Subscription {
     id: u64,
     only: Option<HashSet<String>>,
+    known: HashSet<String>,
 }
 
 impl Subscription {
@@ -57,10 +66,16 @@ struct Session {
     scope: Scope,
     user: Option<User>,
     subs: Vec<Subscription>,
+    /// Ids of `subscribe_events`, acknowledged but never fed.
+    events: HashSet<u64>,
+    /// Message ids must increase, as in Home Assistant.
+    last_id: u64,
 }
 
 async fn upgrade(State(app): State<AppState>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| serve(app, socket))
+    ws.max_message_size(MAX_MESSAGE)
+        .max_frame_size(MAX_MESSAGE)
+        .on_upgrade(move |socket| serve(app, socket))
 }
 
 async fn serve(app: AppState, mut ws: WebSocket) {
@@ -70,13 +85,18 @@ async fn serve(app: AppState, mut ws: WebSocket) {
         _ = run(&app, &mut ws) => {}
         _ = down.wait_for(|stopping| *stopping) => {}
     }
-    let _ = ws.send(Message::Close(None)).await;
+    let _ = send_message(&mut ws, Message::Close(None)).await;
+}
+
+async fn send_message(ws: &mut WebSocket, message: Message) -> Result<(), ()> {
+    match tokio::time::timeout(SEND_TIMEOUT, ws.send(message)).await {
+        Ok(Ok(())) => Ok(()),
+        _ => Err(()),
+    }
 }
 
 async fn send(ws: &mut WebSocket, value: Value) -> Result<(), ()> {
-    ws.send(Message::text(value.to_string()))
-        .await
-        .map_err(|_| ())
+    send_message(ws, Message::text(value.to_string())).await
 }
 
 fn result(id: u64, value: Value) -> Value {
@@ -148,6 +168,8 @@ async fn run(app: &AppState, ws: &mut WebSocket) {
         scope: auth.scope,
         user,
         subs: Vec::new(),
+        events: HashSet::new(),
+        last_id: 0,
     };
     let mut changes = app.core.subscribe();
     let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + RECHECK, RECHECK);
@@ -161,16 +183,14 @@ async fn run(app: &AppState, ws: &mut WebSocket) {
             },
             changed = changes.recv() => match changed {
                 Ok(id) => session.changed(ws, &id).await,
-                // Missed some: every subscriber gets the snapshot again, which replaces what
-                // it had.
+                // Missed some: bring every subscriber up to date.
                 Err(RecvError::Lagged(_)) => session.resync(ws).await,
                 Err(RecvError::Closed) => return,
             },
-            _ = ticker.tick() => {
-                if !app.core.store().token_exists(&hash).await {
-                    return;
-                }
-                Ok(())
+            _ = ticker.tick() => match session.recheck(&hash, &auth.refresh_id).await {
+                Some(true) => session.resync(ws).await,
+                Some(false) => Ok(()),
+                None => return,
             }
         };
         if sent.is_err() {
@@ -214,49 +234,141 @@ fn compressed(s: &EntityState) -> Value {
 }
 
 impl Session {
+    /// Every state the caller may see, synthesised groups and group lights included.
     async fn visible_states(&self, only: Option<&HashSet<String>>) -> Vec<EntityState> {
+        let core = &self.app.core;
+        let mut all = core.all_states();
+        all.extend(core.group_lights().await);
+        for name in core.store().group_names().await {
+            all.extend(core.group_state(&name).await);
+        }
         let mut out = Vec::new();
-        for s in self.app.core.all_states() {
+        for s in all {
             if only.is_some_and(|o| !o.contains(&s.entity_id)) {
                 continue;
             }
-            if self.app.core.allowed(&self.scope, &s.entity_id).await {
+            if core.allowed(&self.scope, &s.entity_id).await {
                 out.push(s);
             }
         }
+        out.sort_by(|a, b| a.entity_id.cmp(&b.entity_id));
         out
     }
 
-    async fn snapshot(&self, sub: &Subscription) -> Value {
-        let added: Map<String, Value> = self
-            .visible_states(sub.only.as_ref())
-            .await
+    /// Brings one subscription up to date: states it lacks or has stale are added (replacing
+    /// whatever the client had), those it has but may no longer see are removed.
+    async fn sync(&mut self, ws: &mut WebSocket, index: usize) -> Result<(), ()> {
+        let sub = &self.subs[index];
+        let states = self.visible_states(sub.only.as_ref()).await;
+        let now: HashSet<String> = states.iter().map(|s| s.entity_id.clone()).collect();
+        let added: Map<String, Value> = states
             .iter()
             .map(|s| (s.entity_id.clone(), compressed(s)))
             .collect();
-        json!({"id": sub.id, "type": "event", "event": {"a": added}})
+        let mut event = json!({"a": added});
+        let gone: Vec<&String> = sub.known.difference(&now).collect();
+        if !gone.is_empty() {
+            event["r"] = json!(gone);
+        }
+        send(ws, json!({"id": sub.id, "type": "event", "event": event})).await?;
+        self.subs[index].known = now;
+        Ok(())
     }
 
-    async fn resync(&self, ws: &mut WebSocket) -> Result<(), ()> {
-        for sub in &self.subs {
-            send(ws, self.snapshot(sub).await).await?;
+    async fn resync(&mut self, ws: &mut WebSocket) -> Result<(), ()> {
+        for index in 0..self.subs.len() {
+            self.sync(ws, index).await?;
         }
         Ok(())
     }
 
-    /// Pushes one entity's new state (or its removal) to the subscriptions that want it.
-    async fn changed(&self, ws: &mut WebSocket, entity_id: &str) -> Result<(), ()> {
-        if self.subs.is_empty() || !self.app.core.allowed(&self.scope, entity_id).await {
+    /// Pushes what a change of one entity does to the states the client can see: the entity
+    /// itself and every group (and group light) it is a member of.
+    async fn changed(&mut self, ws: &mut WebSocket, entity_id: &str) -> Result<(), ()> {
+        if self.subs.is_empty() {
             return Ok(());
         }
-        let event = match self.app.core.get_state(entity_id) {
-            Some(s) => json!({"a": {entity_id: compressed(&s)}}),
-            None => json!({"r": [entity_id]}),
-        };
-        for sub in self.subs.iter().filter(|s| s.wants(entity_id)) {
-            send(ws, json!({"id": sub.id, "type": "event", "event": event})).await?;
+        let core = self.app.core.clone();
+        let mut affected = vec![entity_id.to_string()];
+        for name in core.store().group_names().await {
+            if core
+                .store()
+                .group_members(&name)
+                .await
+                .iter()
+                .any(|m| m == entity_id)
+            {
+                affected.push(format!("group.{name}"));
+                if core.store().group_exposed(&name).await {
+                    affected.push(group_light_id(&name));
+                }
+            }
+        }
+        let mut current: Vec<(String, Option<EntityState>)> = Vec::new();
+        for id in affected {
+            let state = if core.allowed(&self.scope, &id).await {
+                core.lookup(&id).await
+            } else {
+                None
+            };
+            current.push((id, state));
+        }
+        for sub in &mut self.subs {
+            let mut added = Map::new();
+            let mut removed = Vec::new();
+            for (id, state) in &current {
+                if !sub.wants(id) {
+                    continue;
+                }
+                match state {
+                    Some(s) => {
+                        added.insert(id.clone(), compressed(s));
+                        sub.known.insert(id.clone());
+                    }
+                    None if sub.known.remove(id) => removed.push(id.clone()),
+                    None => {}
+                }
+            }
+            let mut event = Map::new();
+            if !added.is_empty() {
+                event.insert("a".into(), Value::Object(added));
+            }
+            if !removed.is_empty() {
+                event.insert("r".into(), json!(removed));
+            }
+            if !event.is_empty() {
+                send(ws, json!({"id": sub.id, "type": "event", "event": event})).await?;
+            }
         }
         Ok(())
+    }
+
+    /// Periodic check: `None` when the login is gone (the connection ends), `Some(true)` when
+    /// what the caller may see changed (resync), `Some(false)` otherwise. Like Home Assistant,
+    /// an app connection lives as long as its login, not its short-lived access token.
+    async fn recheck(&mut self, hash: &str, refresh_id: &Option<i64>) -> Option<bool> {
+        let store = self.app.core.store();
+        let user = match self.user.as_ref() {
+            Some(u) => store.user_by_id(u.id).await,
+            None => None,
+        };
+        let scope = match refresh_id {
+            Some(id) => {
+                if !store.refresh_exists(*id).await {
+                    return None;
+                }
+                // App logins carry no scope of their own: it is the user's.
+                user.as_ref().and_then(|u| u.scope.clone())
+            }
+            None => store.token_view(hash).await?.scope,
+        };
+        if self.user.is_some() && user.is_none() {
+            return None;
+        }
+        self.user = user;
+        let changed = scope != self.scope;
+        self.scope = scope;
+        Some(changed)
     }
 
     async fn command(&mut self, ws: &mut WebSocket, text: &str) -> Result<(), ()> {
@@ -274,15 +386,34 @@ impl Session {
             )
             .await;
         };
+        if id <= self.last_id {
+            return send(
+                ws,
+                failure(Some(id), "id_reuse", "Identifier values have to increase."),
+            )
+            .await;
+        }
+        self.last_id = id;
         let kind = msg.get("type").and_then(Value::as_str).unwrap_or_default();
         let reply = match kind {
             "ping" => json!({"id": id, "type": "pong"}),
-            "supported_features" | "subscribe_events" => result(id, Value::Null),
+            "supported_features" => result(id, Value::Null),
+            "subscribe_events" => {
+                if self.subs.len() + self.events.len() >= MAX_SUBSCRIPTIONS {
+                    failure(Some(id), "too_many", "Too many subscriptions.")
+                } else {
+                    self.events.insert(id);
+                    result(id, Value::Null)
+                }
+            }
             "unsubscribe_events" => {
                 let target = msg.get("subscription").and_then(Value::as_u64);
-                let before = self.subs.len();
+                let before = self.subs.len() + self.events.len();
                 self.subs.retain(|s| Some(s.id) != target);
-                if self.subs.len() == before {
+                if let Some(t) = target {
+                    self.events.remove(&t);
+                }
+                if self.subs.len() + self.events.len() == before {
                     failure(Some(id), "not_found", "Subscription not found.")
                 } else {
                     result(id, Value::Null)
@@ -296,18 +427,24 @@ impl Session {
                 result(id, json!(states))
             }
             "subscribe_entities" => {
-                let only = msg.get("entity_ids").and_then(Value::as_array).map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                });
-                let sub = Subscription { id, only };
-                // The result comes first, then the snapshot as the first event.
-                send(ws, result(id, Value::Null)).await?;
-                let snapshot = self.snapshot(&sub).await;
-                self.subs.retain(|s| s.id != id);
-                self.subs.push(sub);
-                snapshot
+                if self.subs.len() + self.events.len() >= MAX_SUBSCRIPTIONS {
+                    failure(Some(id), "too_many", "Too many subscriptions.")
+                } else {
+                    let only = msg.get("entity_ids").and_then(Value::as_array).map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    });
+                    self.subs.push(Subscription {
+                        id,
+                        only,
+                        known: HashSet::new(),
+                    });
+                    // The result comes first, then the snapshot as the first event.
+                    send(ws, result(id, Value::Null)).await?;
+                    let index = self.subs.len() - 1;
+                    return self.sync(ws, index).await;
+                }
             }
             k if EMPTY_LISTS.contains(&k) => result(id, json!([])),
             _ => failure(Some(id), "unknown_command", "Unknown command."),
@@ -562,9 +699,9 @@ mod tests {
     #[tokio::test]
     async fn scoped_tokens_only_see_their_groups() {
         let (app, addr) = serve_app().await;
+        let store = app.core.store().clone();
         let scope = ["Garmin".to_string()];
-        app.core
-            .store()
+        store
             .create_token(
                 1,
                 "scoped",
@@ -575,22 +712,131 @@ mod tests {
             )
             .await
             .unwrap();
-        app.core.set_state("group.Garmin", "on", Map::new());
+        app.core.set_state("light.a", "on", Map::new());
         app.core.set_state("light.other", "on", Map::new());
+        store
+            .group_set("Garmin", &["light.a".to_string()])
+            .await
+            .unwrap();
+        store.group_set_exposed("Garmin", true).await;
         let mut c = authed(addr, "scoped").await;
 
+        // the real member, the group and its group light; not what is outside the group
         tell(&mut c, json!({"id": 1, "type": "get_states"})).await;
         let v = recv(&mut c).await;
-        assert_eq!(v["result"].as_array().unwrap().len(), 1);
-        assert_eq!(v["result"][0]["entity_id"], "group.Garmin");
+        let ids: Vec<&str> = v["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["entity_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["group.Garmin", "light.a", "light.domus_group_Garmin"]);
 
         tell(&mut c, json!({"id": 2, "type": "subscribe_entities"})).await;
         recv(&mut c).await;
         let snap = recv(&mut c).await;
-        assert_eq!(snap["event"]["a"].as_object().unwrap().len(), 1);
+        assert_eq!(snap["event"]["a"].as_object().unwrap().len(), 3);
+        // outside the scope: nothing is sent, so the next event is about the group
         app.core.set_state("light.other", "off", Map::new());
-        app.core.set_state("group.Garmin", "off", Map::new());
-        assert_eq!(recv(&mut c).await["event"]["a"]["group.Garmin"]["s"], "off");
+        app.core.set_state("light.a", "off", Map::new());
+        let v = recv(&mut c).await;
+        let a = v["event"]["a"].as_object().unwrap();
+        assert_eq!(a["light.a"]["s"], "off");
+        assert_eq!(a["group.Garmin"]["s"], "off");
+        assert_eq!(a["light.domus_group_Garmin"]["s"], "off");
+        assert!(!a.contains_key("light.other"));
+    }
+
+    #[tokio::test]
+    async fn narrowing_a_users_groups_takes_effect_on_open_connections() {
+        let (app, addr) = serve_app().await;
+        let store = app.core.store().clone();
+        let bob = store.create_user("bob", "x", false).await.unwrap();
+        store
+            .create_token(bob, "bob", &sha256_hex("bob"), None, false, None)
+            .await
+            .unwrap();
+        app.core.set_state("light.a", "on", Map::new());
+        app.core.set_state("light.b", "on", Map::new());
+        store
+            .group_set("One", &["light.a".to_string()])
+            .await
+            .unwrap();
+        let mut c = authed(addr, "bob").await;
+        tell(&mut c, json!({"id": 1, "type": "subscribe_entities"})).await;
+        recv(&mut c).await;
+        assert_eq!(
+            recv(&mut c).await["event"]["a"].as_object().unwrap().len(),
+            3
+        );
+
+        assert!(store.set_user_scope(bob, Some(&["One".to_string()])).await);
+        let v = recv(&mut c).await;
+        let removed = v["event"]["r"].as_array().unwrap();
+        assert_eq!(removed, &[json!("light.b")]);
+        tell(&mut c, json!({"id": 2, "type": "get_states"})).await;
+        assert_eq!(recv(&mut c).await["result"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn app_connections_outlive_their_access_token() {
+        let (app, addr) = serve_app().await;
+        let store = app.core.store().clone();
+        let refresh = store
+            .refresh_create(1, "https://home-assistant.io/iOS", &sha256_hex("r"))
+            .await
+            .unwrap();
+        assert!(
+            store
+                .create_app_token(1, "app", &sha256_hex("first"), i64::MAX, refresh)
+                .await
+        );
+        let mut c = authed(addr, "first").await;
+        // the app refreshed: the old access token is replaced by a new one
+        assert!(
+            store
+                .create_app_token(1, "app", &sha256_hex("second"), i64::MAX, refresh)
+                .await
+        );
+        tokio::time::sleep(RECHECK * 3).await;
+        tell(&mut c, json!({"id": 1, "type": "ping"})).await;
+        assert_eq!(recv(&mut c).await["type"], "pong");
+        // logging the app out ends it
+        store.delete_user_refresh_tokens(1).await;
+        assert!(closed(&mut c).await);
+    }
+
+    #[tokio::test]
+    async fn ids_must_increase_and_subscriptions_are_capped() {
+        let (_, addr) = serve_app().await;
+        let mut c = authed(addr, TOKEN).await;
+        tell(&mut c, json!({"id": 5, "type": "ping"})).await;
+        assert_eq!(recv(&mut c).await["type"], "pong");
+        tell(&mut c, json!({"id": 5, "type": "ping"})).await;
+        assert_eq!(recv(&mut c).await["error"]["code"], "id_reuse");
+        for id in 6..6 + MAX_SUBSCRIPTIONS as u64 {
+            tell(&mut c, json!({"id": id, "type": "subscribe_events"})).await;
+            assert_eq!(recv(&mut c).await["success"], true);
+        }
+        tell(&mut c, json!({"id": 100, "type": "subscribe_entities"})).await;
+        assert_eq!(recv(&mut c).await["error"]["code"], "too_many");
+        tell(
+            &mut c,
+            json!({"id": 101, "type": "unsubscribe_events", "subscription": 6}),
+        )
+        .await;
+        assert_eq!(recv(&mut c).await["success"], true);
+    }
+
+    #[tokio::test]
+    async fn oversized_messages_end_the_connection() {
+        let (_, addr) = serve_app().await;
+        let mut c = connect(addr).await;
+        recv(&mut c).await;
+        c.send(Msg::text("x".repeat(MAX_MESSAGE + 1)))
+            .await
+            .unwrap();
+        assert!(closed(&mut c).await);
     }
 
     #[tokio::test]
