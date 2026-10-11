@@ -170,3 +170,9 @@ input.kelvin::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; 
 .auth { max-width: 360px; margin: 0 auto; padding: var(--s6) var(--s4); }
 .auth form p { margin: 0 0 var(--s3); }
 .auth button { width: 100%; }
+
+/* Only shown inside the Companion apps (see external.js). */
+.app-settings {
+  position: fixed; right: var(--s4); bottom: calc(var(--s4) + env(safe-area-inset-bottom));
+  z-index: 10; font-size: 13px; box-shadow: 0 2px 8px rgb(0 0 0 / 0.2);
+}
