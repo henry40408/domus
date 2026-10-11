@@ -101,6 +101,11 @@ async fn main() {
         domus::GIT_VERSION,
         env.bind
     );
+    let advertiser = if env.mdns {
+        domus::discovery::start(env.bind, &env.data_dir)
+    } else {
+        None
+    };
     let shutdown = async move {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("install SIGTERM handler");
@@ -111,10 +116,13 @@ async fn main() {
         info!("shutting down");
         stopping.send_replace(true);
     };
-    if let Err(e) = axum::serve(listener, app)
+    let served = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
-        .await
-    {
+        .await;
+    if let Some(daemon) = advertiser {
+        domus::discovery::stop(&daemon);
+    }
+    if let Err(e) = served {
         eprintln!("domus: server error: {e}");
         std::process::exit(1);
     }

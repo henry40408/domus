@@ -57,6 +57,7 @@ Configuration is environment variables only:
 | `DOMUS_BIND`      | `127.0.0.1:8123` | Listen address (plain HTTP). The container image sets `0.0.0.0:8123`. |
 | `DOMUS_DATA_DIR`  | `./data`         | SQLite location (dir mode `0700`, `domus.db` `0600`). The container image sets `/data`. |
 | `DOMUS_LOG`       | `info`           | Log filter (`tracing` env-filter syntax)            |
+| `DOMUS_MDNS`      | on               | Advertise `_home-assistant._tcp` over mDNS so the Companion apps find domus; only when not bound to loopback. `0`/`false`/`off`/`no` disables. |
 | `DOMUS_SETUP_CODE`| random           | Code required to create the first admin (only while no user exists). When unset, a random one is printed at startup. |
 
 Everything else is configured in the admin page at `/`.
@@ -111,7 +112,8 @@ The official Home Assistant apps (iOS, Android) can connect to domus: OAuth logi
 `mobile_app` registration and webhook, and a WebSocket API at `/api/websocket`.
 
 1. Run domus reachable from the phone, e.g. `DOMUS_BIND=0.0.0.0:8123`.
-2. In the app, enter the URL by hand: `http://<LAN IP>:8123`. There is no Bonjour/mDNS discovery.
+2. Open the app: domus shows up as a server to pick (mDNS/Bonjour, `_home-assistant._tcp`). If it does not
+   (other subnet, Docker bridge network, mDNS blocked), enter the URL by hand: `http://<LAN IP>:8123`.
 3. On iOS, allow the Local Network permission. The App Store app does not run in the Simulator; use a real device.
 4. Sign in with a domus user, name the device, and the app registers itself.
 
@@ -120,6 +122,9 @@ Notes:
 - domus reports a faked Home Assistant version (`2025.12.0`) so the apps use their older bridge and do not
   wait for the `frontend/loaded` handshake (2026.8.0+) or use the V2 bridge (2026.4.2+). Do not bump it.
 - The app's main screen is domus's own admin page; it needs its own login (the cookie is not shared).
+- In Docker, multicast does not leave a bridge network, so mDNS only works with `network_mode: host` on
+  Linux (not Docker Desktop); otherwise enter the URL by hand. domus keeps a random id in `instance-id` in
+  the data dir so the apps recognise it after a restart.
 - Sensors and locations the app sends are accepted and dropped.
 - WebSocket commands: `ping`, `supported_features`, `auth/current_user`, `get_config`, `get_states`,
   `subscribe_entities`, `subscribe_events` / `unsubscribe_events` and the device, entity, area, floor and label
@@ -205,7 +210,7 @@ For LAN-only use, get a certificate via DNS-01 (Let's Encrypt) for a name that r
 
 ## Not implemented (yet)
 
-Registries (the list commands return empty lists), the official HA frontend, mDNS discovery for the Companion apps, other domains
+Registries (the list commands return empty lists), the official HA frontend, other domains
 (switch, scene, …) and other brands.
 
 ## Development
