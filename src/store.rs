@@ -253,6 +253,10 @@ impl Store {
             .bind(id)
             .execute(&self.pool)
             .await;
+        let _ = sqlx::query("DELETE FROM refresh_tokens WHERE user_id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await;
         sqlx::query("DELETE FROM users WHERE id = ?1")
             .bind(id)
             .execute(&self.pool)
@@ -454,7 +458,22 @@ impl Store {
     }
 
     /// Revokes a token; with `user_id` only if it belongs to that user.
+    /// An app's access token takes its refresh token with it, so the app really is logged out.
     pub async fn revoke_token(&self, id: i64, user_id: Option<i64>) -> bool {
+        let refresh_id = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT refresh_id FROM tokens WHERE id = ?1 AND (?2 IS NULL OR user_id = ?2)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .flatten();
+        if let Some(refresh_id) = refresh_id {
+            self.refresh_delete(refresh_id).await;
+            return true;
+        }
         sqlx::query("DELETE FROM tokens WHERE id = ?1 AND (?2 IS NULL OR user_id = ?2)")
             .bind(id)
             .bind(user_id)
@@ -495,6 +514,168 @@ impl Store {
             .await;
         }
         auth
+    }
+
+    // OAuth refresh tokens (only the hash is stored)
+
+    /// Refresh tokens unused for this long stop working, like Home Assistant's.
+    const REFRESH_IDLE_SECS: i64 = 90 * 24 * 3600;
+
+    /// Returns the id of the new refresh token.
+    pub async fn refresh_create(
+        &self,
+        user_id: i64,
+        client_id: &str,
+        token_hash: &str,
+    ) -> Option<i64> {
+        let now = now_secs();
+        let _ = sqlx::query(
+            "DELETE FROM tokens WHERE refresh_id IN
+               (SELECT id FROM refresh_tokens WHERE COALESCE(last_used, created) < ?1)",
+        )
+        .bind(now - Self::REFRESH_IDLE_SECS)
+        .execute(&self.pool)
+        .await;
+        let _ = sqlx::query("DELETE FROM refresh_tokens WHERE COALESCE(last_used, created) < ?1")
+            .bind(now - Self::REFRESH_IDLE_SECS)
+            .execute(&self.pool)
+            .await;
+        sqlx::query(
+            "INSERT INTO refresh_tokens (token_hash, user_id, client_id, created)
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(token_hash)
+        .bind(user_id)
+        .bind(client_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .ok()
+        .map(|r| r.last_insert_rowid())
+    }
+
+    /// `(refresh id, user id)` of a live refresh token issued to `client_id` for an existing user.
+    pub async fn refresh_lookup(&self, token_hash: &str, client_id: &str) -> Option<(i64, i64)> {
+        sqlx::query(
+            "SELECT r.id, r.user_id FROM refresh_tokens r JOIN users u ON u.id = r.user_id
+             WHERE r.token_hash = ?1 AND r.client_id = ?2 AND COALESCE(r.last_used, r.created) >= ?3",
+        )
+        .bind(token_hash)
+        .bind(client_id)
+        .bind(now_secs() - Self::REFRESH_IDLE_SECS)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|r| (r.get(0), r.get(1)))
+    }
+
+    /// Mints a short-lived access token tied to a refresh token; any older one stops working, so
+    /// at most one stays live (of two racing refreshes the later one wins).
+    pub async fn create_app_token(
+        &self,
+        user_id: i64,
+        name: &str,
+        token_hash: &str,
+        expires: i64,
+        refresh_id: i64,
+    ) -> bool {
+        let now = now_secs();
+        let Ok(inserted) = sqlx::query(
+            "INSERT INTO tokens (name, token_hash, created, user_id, read_only, expires, refresh_id)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)",
+        )
+        .bind(name)
+        .bind(token_hash)
+        .bind(now)
+        .bind(user_id)
+        .bind(expires)
+        .bind(refresh_id)
+        .execute(&self.pool)
+        .await
+        else {
+            return false;
+        };
+        let _ = sqlx::query("DELETE FROM tokens WHERE refresh_id = ?1 AND id < ?2")
+            .bind(refresh_id)
+            .bind(inserted.last_insert_rowid())
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("UPDATE refresh_tokens SET last_used = ?2 WHERE id = ?1")
+            .bind(refresh_id)
+            .bind(now)
+            .execute(&self.pool)
+            .await;
+        true
+    }
+
+    /// Ends a refresh token and every access token minted from it.
+    async fn refresh_delete(&self, refresh_id: i64) {
+        let _ = sqlx::query("DELETE FROM tokens WHERE refresh_id = ?1")
+            .bind(refresh_id)
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM refresh_tokens WHERE id = ?1")
+            .bind(refresh_id)
+            .execute(&self.pool)
+            .await;
+    }
+
+    /// Revokes a refresh token (and its access tokens) by its hash.
+    pub async fn refresh_revoke(&self, token_hash: &str) -> bool {
+        let id: Option<i64> =
+            sqlx::query_scalar("SELECT id FROM refresh_tokens WHERE token_hash = ?1")
+                .bind(token_hash)
+                .fetch_optional(&self.pool)
+                .await
+                .ok()
+                .flatten();
+        match id {
+            Some(id) => {
+                self.refresh_delete(id).await;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Revokes an access token; one minted from a refresh token takes that refresh token with it,
+    /// so the app has to log in again.
+    pub async fn access_revoke(&self, access_hash: &str) -> bool {
+        let row = sqlx::query("SELECT id, refresh_id FROM tokens WHERE token_hash = ?1")
+            .bind(access_hash)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten();
+        let Some(row) = row else {
+            return false;
+        };
+        let refresh_id: Option<i64> = row.get(1);
+        match refresh_id {
+            Some(id) => self.refresh_delete(id).await,
+            None => {
+                let _ = sqlx::query("DELETE FROM tokens WHERE id = ?1")
+                    .bind(row.get::<i64, _>(0))
+                    .execute(&self.pool)
+                    .await;
+            }
+        }
+        true
+    }
+
+    /// Ends all of a user's app logins (after a password change).
+    pub async fn delete_user_refresh_tokens(&self, user_id: i64) {
+        let _ = sqlx::query(
+            "DELETE FROM tokens WHERE refresh_id IN (SELECT id FROM refresh_tokens WHERE user_id = ?1)",
+        )
+        .bind(user_id)
+        .execute(&self.pool)
+        .await;
+        let _ = sqlx::query("DELETE FROM refresh_tokens WHERE user_id = ?1")
+            .bind(user_id)
+            .execute(&self.pool)
+            .await;
     }
 
     // Hue bridge
