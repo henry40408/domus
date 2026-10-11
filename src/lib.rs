@@ -10,6 +10,7 @@ pub mod core;
 pub mod env;
 pub mod health;
 pub mod hue;
+pub mod mobile;
 pub mod oauth;
 pub mod store;
 pub mod throttle;
@@ -67,6 +68,7 @@ pub fn build_app(app: AppState) -> Router {
         .merge(health)
         .merge(api::router(app.clone()))
         .merge(oauth::router(app.clone()))
+        .merge(mobile::router(app.clone()))
         .nest("/api/domus", admin::router(app))
         .fallback(admin::static_files)
         .layer(middleware::from_fn(security_headers))

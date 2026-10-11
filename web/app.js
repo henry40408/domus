@@ -136,13 +136,14 @@ let data = null;
 const ui = { tab: "dashboard", draft: null, sub: "pick", fresh: null, open: null, trans: null };
 
 async function load() {
-  const [hue, entities, rooms, groups, tokens, users, sessions] = await Promise.all([
+  const [hue, entities, rooms, groups, tokens, users, sessions, apps] = await Promise.all([
     me.is_admin ? api("GET", "/hue") : null,
     api("GET", "/lights"), api("GET", "/rooms"), api("GET", "/groups"), api("GET", "/tokens"),
     me.is_admin ? api("GET", "/users") : [],
     api("GET", "/sessions"),
+    api("GET", "/apps"),
   ]);
-  data = { hue, entities, rooms, groups, tokens, users, sessions };
+  data = { hue, entities, rooms, groups, tokens, users, sessions, apps };
 }
 
 const isScene = (e) => e.entity_id.startsWith("scene.");
@@ -778,8 +779,32 @@ function settings() {
     el("h2", {}, "Settings"),
     el("p", { class: "sub" }, me.is_admin ? "Hue Bridge and account." : "Your account."),
     me.is_admin ? hueCard() : "",
+    appsCard(),
     accountCard(),
   ];
+}
+
+/** Home Assistant Companion apps that registered with this server. */
+function appsCard() {
+  return el("div", { class: "card" },
+    el("h3", {}, "Companion apps"),
+    el("p", { class: "muted" }, "Official Home Assistant apps connected to domus. Removing one also logs that app out, so it has to sign in again."),
+    data.apps.length
+      ? el("ul", { class: "rows" }, ...data.apps.map((a) => el("li", {},
+        el("span", { class: "name" }, a.device_name),
+        el("button", {
+          class: "danger act",
+          onclick: () => guarded(async () => {
+            if (!confirm("Remove “" + a.device_name + "”? The app has to register again.")) return;
+            await api("DELETE", "/apps/" + a.id);
+            await refresh();
+          }),
+        }, "Remove"),
+        me.is_admin ? el("span", { class: "meta" }, "Owner " + (a.username || "unknown")) : "",
+        el("span", { class: "meta" }, [a.app_name, a.app_version].join(" ") + " on " + [a.manufacturer, a.model].join(" ")),
+        el("span", { class: "meta" }, "Registered " + fmtDate(a.created)),
+        el("span", { class: "meta", title: fmtDateTime(a.last_seen) }, "Last seen " + ago(a.last_seen)))))
+      : el("p", { class: "muted" }, "No app has registered yet."));
 }
 
 // ------------------------------------------------------------------ start

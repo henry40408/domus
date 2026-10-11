@@ -59,7 +59,11 @@ fn bearer(req: &Request) -> Option<&str> {
     scheme.eq_ignore_ascii_case("bearer").then(|| token.trim())
 }
 
-async fn require_token(State(app): State<AppState>, mut req: Request, next: Next) -> Response {
+pub(crate) async fn require_token(
+    State(app): State<AppState>,
+    mut req: Request,
+    next: Next,
+) -> Response {
     let hash = bearer(&req).map(sha256_hex);
     let auth = match hash {
         Some(h) => app.core.store().token_auth(&h).await,

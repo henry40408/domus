@@ -878,6 +878,31 @@ async fn token_create(
     }
 }
 
+/// Companion app devices: all of them for an admin, otherwise only the caller's own.
+async fn apps(State(app): State<AppState>, Extension(me): Extension<User>) -> Json<Value> {
+    Json(json!(
+        app.core.store().list_registrations(token_owner(&me)).await
+    ))
+}
+
+async fn app_revoke(
+    State(app): State<AppState>,
+    Extension(me): Extension<User>,
+    Path(id): Path<i64>,
+) -> Response {
+    if app
+        .core
+        .store()
+        .delete_registration(id, token_owner(&me))
+        .await
+    {
+        tracing::info!(target: "audit", user = %me.username, id, "app device removed");
+        Json(json!({"ok": true})).into_response()
+    } else {
+        message(StatusCode::NOT_FOUND, "No such app device.")
+    }
+}
+
 async fn token_revoke(
     State(app): State<AppState>,
     Extension(me): Extension<User>,
@@ -969,6 +994,8 @@ pub fn router(app: AppState) -> Router {
         .route("/groups", get(groups))
         .route("/tokens", get(tokens).post(token_create))
         .route("/tokens/{id}", delete(token_revoke))
+        .route("/apps", get(apps))
+        .route("/apps/{id}", delete(app_revoke))
         .merge(admin)
         .layer(middleware::from_fn_with_state(app.clone(), require_session));
     Router::new()
@@ -1178,6 +1205,64 @@ mod tests {
         )
         .await;
         (admin, cookie_of(&h))
+    }
+
+    #[tokio::test]
+    async fn app_devices_are_listed_and_removed_per_owner() {
+        use crate::store::RegistrationFields;
+        let (r, app) = setup_app().await;
+        let (admin, bob) = admin_and_member(&r).await;
+        let store = app.core.store();
+        let fields = |name: &str| RegistrationFields {
+            app_id: "io.homeassistant.companion.ios".into(),
+            app_name: "Home Assistant".into(),
+            app_version: "2025.12".into(),
+            device_id: None,
+            device_name: name.into(),
+            manufacturer: "Apple".into(),
+            model: "iPhone".into(),
+            os_name: "iOS".into(),
+            os_version: None,
+        };
+        // admin is user 1, bob user 2
+        store
+            .registration_create(1, None, "h-admin", &fields("admin phone"))
+            .await
+            .unwrap();
+        let bob_reg = store
+            .registration_create(2, None, "h-bob", &fields("bob phone"))
+            .await
+            .unwrap();
+
+        let (_, _, all) = call(&r, "GET", "/api/domus/apps", Some(&admin), "").await;
+        assert_eq!(all.as_array().unwrap().len(), 2);
+        let (_, _, mine) = call(&r, "GET", "/api/domus/apps", Some(&bob), "").await;
+        assert_eq!(mine.as_array().unwrap().len(), 1);
+        assert_eq!(mine[0]["device_name"], "bob phone");
+
+        // bob cannot remove the admin's device, and missing ids are 404
+        let admin_reg = all
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["device_name"] == "admin phone")
+            .unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        let uri = |id: i64| format!("/api/domus/apps/{id}");
+        assert_eq!(
+            call(&r, "DELETE", &uri(admin_reg), Some(&bob), "").await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            call(&r, "DELETE", &uri(9999), Some(&bob), "").await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            call(&r, "DELETE", &uri(bob_reg), Some(&bob), "").await.0,
+            StatusCode::OK
+        );
+        assert_eq!(store.list_registrations(None).await.len(), 1);
     }
 
     #[tokio::test]
