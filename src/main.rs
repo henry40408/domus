@@ -120,10 +120,7 @@ async fn main() {
         .with_graceful_shutdown(shutdown)
         .await;
     if let Some(daemon) = advertiser {
-        // Goodbye packets go out on the daemon's thread; give it a moment so phones drop the entry.
-        if let Ok(done) = daemon.shutdown() {
-            let _ = done.recv_timeout(std::time::Duration::from_secs(1));
-        }
+        domus::discovery::stop(&daemon);
     }
     if let Err(e) = served {
         eprintln!("domus: server error: {e}");

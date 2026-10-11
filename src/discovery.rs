@@ -6,6 +6,7 @@ use crate::util::random_hex;
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::path::Path;
+use std::time::Duration;
 use tracing::{info, warn};
 
 const SERVICE_TYPE: &str = "_home-assistant._tcp.local.";
@@ -100,38 +101,32 @@ pub fn start(bind: SocketAddr, data_dir: &Path) -> Option<ServiceDaemon> {
     let uuid = instance_id(data_dir);
     // The short id keeps two domus instances on one LAN from replacing each other.
     let name = format!("domus-{}", &uuid[..8]);
-    let host = format!("{name}.local.");
-    let info = match ServiceInfo::new(
-        SERVICE_TYPE,
-        &name,
-        &host,
-        ip,
-        bind.port(),
-        properties(ip, bind.port(), &uuid).as_slice(),
-    ) {
-        Ok(i) => i,
-        Err(e) => {
-            warn!("mDNS discovery disabled: {e}");
-            return None;
-        }
-    };
-    let daemon = match ServiceDaemon::new() {
-        Ok(d) => d,
-        Err(e) => {
-            warn!("mDNS discovery disabled: {e}");
-            return None;
-        }
-    };
-    if let Err(e) = daemon.register(info) {
-        warn!("mDNS discovery disabled: {e}");
-        let _ = daemon.shutdown();
-        return None;
-    }
-    info!(
-        "advertising on the LAN as {SERVICE_TYPE} at {ip}:{}",
-        bind.port()
-    );
+    let port = bind.port();
+    let daemon = register(&name, ip, port, &uuid)
+        .inspect_err(|e| warn!("mDNS discovery disabled: {e}"))
+        .ok()?;
+    info!("advertising on the LAN as {SERVICE_TYPE} at {ip}:{port}");
     Some(daemon)
+}
+
+fn register(name: &str, ip: IpAddr, port: u16, uuid: &str) -> mdns_sd::Result<ServiceDaemon> {
+    let host = format!("{name}.local.");
+    let props = properties(ip, port, uuid);
+    let info = ServiceInfo::new(SERVICE_TYPE, name, &host, ip, port, props.as_slice())?;
+    let daemon = ServiceDaemon::new()?;
+    if let Err(e) = daemon.register(info) {
+        let _ = daemon.shutdown();
+        return Err(e);
+    }
+    Ok(daemon)
+}
+
+/// Stops advertising. The goodbye packets go out on the daemon's own thread, so wait a moment for
+/// them: phones then drop the entry instead of listing a stopped server until its TTL runs out.
+pub fn stop(daemon: &ServiceDaemon) {
+    if let Ok(done) = daemon.shutdown() {
+        let _ = done.recv_timeout(Duration::from_secs(1));
+    }
 }
 
 #[cfg(test)]
@@ -198,13 +193,25 @@ mod tests {
     }
 
     #[test]
-    fn starting_on_all_interfaces_does_not_panic() {
-        let dir = std::env::temp_dir().join(format!("domus-mdns-{}", random_hex(8)));
-        std::fs::create_dir_all(&dir).unwrap();
+    fn registering_and_stopping_does_not_panic() {
         // Sandboxes may have no multicast; the daemon is optional, so either outcome is fine.
-        if let Some(daemon) = start("0.0.0.0:8123".parse().unwrap(), &dir) {
-            let _ = daemon.shutdown();
+        if let Ok(daemon) = register("domus-test", "192.168.1.20".parse().unwrap(), 8123, "u") {
+            stop(&daemon);
         }
-        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn invalid_names_are_rejected_instead_of_panicking() {
+        let ip = "192.168.1.20".parse().unwrap();
+        assert!(register("", ip, 8123, "u").is_err());
+    }
+
+    #[test]
+    fn an_unwritable_data_dir_still_gives_an_id() {
+        let dir = std::env::temp_dir().join(format!("domus-missing-{}", random_hex(8)));
+        assert!(is_uuid(&instance_id(&dir)));
+        if let Some(daemon) = start("0.0.0.0:8123".parse().unwrap(), &dir) {
+            stop(&daemon);
+        }
     }
 }
