@@ -27,25 +27,34 @@ const TOKEN_PREFIX: &str = "domus_";
 /// Past this many pending codes, expired ones are dropped on the next insert.
 const MAX_CODES: usize = 1_000;
 
-/// Client ids of the official apps with the custom-scheme redirect each one uses (release
-/// builds, then debug builds). Anything else would hand out a code to a stranger.
-const CLIENTS: [(&str, &str); 4] = [
-    (
-        "https://home-assistant.io/iOS",
-        "homeassistant://auth-callback",
-    ),
-    (
-        "https://home-assistant.io/android",
-        "homeassistant://auth-callback",
-    ),
-    (
-        "https://home-assistant.io/iOS/dev-auth",
-        "homeassistant-dev://auth-callback",
-    ),
-    (
-        "https://home-assistant.io/android/dev-auth",
-        "homeassistant-dev://auth-callback",
-    ),
+const RELEASE_REDIRECT: &str = "homeassistant://auth-callback";
+const DEBUG_REDIRECT: &str = "homeassistant-dev://auth-callback";
+
+/// An official app and the one custom-scheme redirect it uses.
+struct Client {
+    client_id: &'static str,
+    redirect_uri: &'static str,
+}
+
+/// The official apps (release builds, then debug builds). Anything else would hand out a code
+/// to a stranger.
+const CLIENTS: [Client; 4] = [
+    Client {
+        client_id: "https://home-assistant.io/iOS",
+        redirect_uri: RELEASE_REDIRECT,
+    },
+    Client {
+        client_id: "https://home-assistant.io/android",
+        redirect_uri: RELEASE_REDIRECT,
+    },
+    Client {
+        client_id: "https://home-assistant.io/iOS/dev-auth",
+        redirect_uri: DEBUG_REDIRECT,
+    },
+    Client {
+        client_id: "https://home-assistant.io/android/dev-auth",
+        redirect_uri: DEBUG_REDIRECT,
+    },
 ];
 
 struct PendingCode {
@@ -85,7 +94,9 @@ impl AuthCodes {
 }
 
 fn valid_client(client_id: &str, redirect_uri: &str) -> bool {
-    CLIENTS.contains(&(client_id, redirect_uri))
+    CLIENTS
+        .iter()
+        .any(|c| c.client_id == client_id && c.redirect_uri == redirect_uri)
 }
 
 fn no_store(resp: impl IntoResponse) -> Response {
