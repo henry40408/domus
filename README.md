@@ -122,7 +122,7 @@ Notes:
 - domus reports a faked Home Assistant version (`2025.12.0`) so the apps use their older bridge and do not
   wait for the `frontend/loaded` handshake (2026.8.0+) or use the V2 bridge (2026.4.2+). Do not bump it.
 - The app's main screen is domus's own admin page; it needs its own login (the cookie is not shared).
-  The app's own settings (servers, sensors, ...) are behind the floating "App settings" button.
+  The app's own settings (servers, sensors, ...) are behind the round gear button at the bottom right.
 - In Docker, multicast does not leave a bridge network, so mDNS only works with `network_mode: host` on
   Linux (not Docker Desktop); otherwise enter the URL by hand. domus keeps a random id in `instance-id` in
   the data dir so the apps recognise it after a restart.
