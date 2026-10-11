@@ -818,6 +818,8 @@ mod tests {
             tell(&mut c, json!({"id": id, "type": "subscribe_events"})).await;
             assert_eq!(recv(&mut c).await["success"], true);
         }
+        tell(&mut c, json!({"id": 99, "type": "subscribe_events"})).await;
+        assert_eq!(recv(&mut c).await["error"]["code"], "too_many");
         tell(&mut c, json!({"id": 100, "type": "subscribe_entities"})).await;
         assert_eq!(recv(&mut c).await["error"]["code"], "too_many");
         tell(
@@ -826,6 +828,31 @@ mod tests {
         )
         .await;
         assert_eq!(recv(&mut c).await["success"], true);
+    }
+
+    #[tokio::test]
+    async fn binary_frames_are_ignored_and_close_ends_the_session() {
+        let (_, addr) = serve_app().await;
+        let mut c = authed(addr, TOKEN).await;
+        c.send(Msg::Binary(vec![1, 2, 3].into())).await.unwrap();
+        tell(&mut c, json!({"id": 1, "type": "ping"})).await;
+        assert_eq!(recv(&mut c).await["type"], "pong");
+        c.send(Msg::Close(None)).await.unwrap();
+        assert!(closed(&mut c).await);
+    }
+
+    #[tokio::test]
+    async fn deleting_the_user_ends_the_connection() {
+        let (app, addr) = serve_app().await;
+        let store = app.core.store().clone();
+        let bob = store.create_user("bob", "x", false).await.unwrap();
+        store
+            .create_token(bob, "bob", &sha256_hex("bob"), None, false, None)
+            .await
+            .unwrap();
+        let mut c = authed(addr, "bob").await;
+        assert!(store.delete_user(bob).await);
+        assert!(closed(&mut c).await);
     }
 
     #[tokio::test]
