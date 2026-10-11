@@ -144,7 +144,7 @@ input.kelvin::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; 
   button { min-height: 44px; }
   button.icon { min-width: 44px; }
   .pick { min-height: 44px; padding: var(--s2); }
-  .pick input, .check input { width: 22px; height: 22px; }
+  input[type=checkbox] { width: 22px; height: 22px; vertical-align: middle; }
   .switch { width: 52px; height: 30px; min-height: 0; }
   .switch::after { width: 24px; height: 24px; }
   .switch.on::after { left: 25px; }
