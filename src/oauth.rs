@@ -118,29 +118,7 @@ struct AuthorizeQuery {
     redirect_uri: String,
 }
 
-const LOGIN_PAGE: &str = r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>domus</title>
-<link rel="stylesheet" href="/style.css">
-</head>
-<body>
-<main class="auth">
-<h2>domus</h2>
-<p class="sub">Sign in to connect this app.</p>
-<form id="login" autocomplete="on">
-<p><input type="text" id="username" placeholder="Username" autocomplete="username" autocapitalize="none" required></p>
-<p><input type="password" id="password" placeholder="Password" autocomplete="current-password" required></p>
-<p class="err" id="error" role="alert"></p>
-<p><button class="primary" type="submit">Sign in</button></p>
-</form>
-</main>
-<script src="/auth/login.js"></script>
-</body>
-</html>
-"#;
+const LOGIN_PAGE: &str = include_str!("oauth/login.html");
 
 async fn authorize(Query(q): Query<AuthorizeQuery>) -> Response {
     if !valid_client(&q.client_id, &q.redirect_uri) {
