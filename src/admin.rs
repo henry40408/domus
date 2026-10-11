@@ -878,6 +878,31 @@ async fn token_create(
     }
 }
 
+/// Companion app devices: all of them for an admin, otherwise only the caller's own.
+async fn apps(State(app): State<AppState>, Extension(me): Extension<User>) -> Json<Value> {
+    Json(json!(
+        app.core.store().list_registrations(token_owner(&me)).await
+    ))
+}
+
+async fn app_revoke(
+    State(app): State<AppState>,
+    Extension(me): Extension<User>,
+    Path(id): Path<i64>,
+) -> Response {
+    if app
+        .core
+        .store()
+        .delete_registration(id, token_owner(&me))
+        .await
+    {
+        tracing::info!(target: "audit", user = %me.username, id, "app device removed");
+        Json(json!({"ok": true})).into_response()
+    } else {
+        message(StatusCode::NOT_FOUND, "No such app device.")
+    }
+}
+
 async fn token_revoke(
     State(app): State<AppState>,
     Extension(me): Extension<User>,
@@ -969,6 +994,8 @@ pub fn router(app: AppState) -> Router {
         .route("/groups", get(groups))
         .route("/tokens", get(tokens).post(token_create))
         .route("/tokens/{id}", delete(token_revoke))
+        .route("/apps", get(apps))
+        .route("/apps/{id}", delete(app_revoke))
         .merge(admin)
         .layer(middleware::from_fn_with_state(app.clone(), require_session));
     Router::new()

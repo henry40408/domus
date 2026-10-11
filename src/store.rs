@@ -74,6 +74,81 @@ fn parse_scope(raw: Option<String>) -> Scope {
 pub struct TokenAuth {
     pub scope: Scope,
     pub read_only: bool,
+    pub user_id: Option<i64>,
+    /// The app login (refresh token) this access token was minted from, if any.
+    pub refresh_id: Option<i64>,
+}
+
+/// Registered devices one user may have; the apps re-register on every fresh login, so stale
+/// rows would otherwise pile up.
+const MAX_REGISTRATIONS_PER_USER: i64 = 20;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum RegistrationError {
+    TooMany,
+    Failed,
+}
+
+/// What a Companion app tells us about itself and its device when registering.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RegistrationFields {
+    pub app_id: String,
+    pub app_name: String,
+    pub app_version: String,
+    pub device_id: Option<String>,
+    pub device_name: String,
+    pub manufacturer: String,
+    pub model: String,
+    pub os_name: String,
+    pub os_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Registration {
+    /// Public id (the row id); the webhook hash never leaves the store.
+    pub id: i64,
+    pub user_id: i64,
+    pub username: Option<String>,
+    #[serde(flatten)]
+    pub fields: RegistrationFields,
+    pub created: i64,
+    /// Unix seconds of the last webhook call (coarse: refreshed at most once a minute).
+    pub last_seen: Option<i64>,
+}
+
+/// `SELECT` of a registration (columns in the order `registration_row` reads) plus `$tail`.
+/// A macro, not a `format!`, because sqlx only takes static SQL.
+macro_rules! registration_select {
+    ($tail:literal) => {
+        concat!(
+            "SELECT r.id, r.user_id, u.username, r.app_id, r.app_name, r.app_version,
+                r.device_id, r.device_name, r.manufacturer, r.model, r.os_name, r.os_version,
+                r.created, r.last_seen
+             FROM registrations r LEFT JOIN users u ON u.id = r.user_id ",
+            $tail
+        )
+    };
+}
+
+fn registration_row(r: &sqlx::sqlite::SqliteRow) -> Registration {
+    Registration {
+        id: r.get(0),
+        user_id: r.get(1),
+        username: r.get(2),
+        fields: RegistrationFields {
+            app_id: r.get(3),
+            app_name: r.get(4),
+            app_version: r.get(5),
+            device_id: r.get(6),
+            device_name: r.get(7),
+            manufacturer: r.get(8),
+            model: r.get(9),
+            os_name: r.get(10),
+            os_version: r.get(11),
+        },
+        created: r.get(12),
+        last_seen: r.get(13),
+    }
 }
 
 /// The groups allowed by both scopes; `None` (unrestricted) yields to the other side.
@@ -254,6 +329,10 @@ impl Store {
             .execute(&self.pool)
             .await;
         let _ = sqlx::query("DELETE FROM refresh_tokens WHERE user_id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM registrations WHERE user_id = ?1")
             .bind(id)
             .execute(&self.pool)
             .await;
@@ -487,7 +566,7 @@ impl Store {
     /// own narrowed by its owner's, so shrinking a user's groups shrinks their tokens too.
     pub async fn token_auth(&self, token_hash: &str) -> Option<TokenAuth> {
         let row = sqlx::query(
-            "SELECT t.scope, t.read_only, u.scope FROM tokens t LEFT JOIN users u ON u.id = t.user_id
+            "SELECT t.scope, t.read_only, u.scope, t.user_id, t.refresh_id FROM tokens t LEFT JOIN users u ON u.id = t.user_id
              WHERE t.token_hash = ?1 AND (t.expires IS NULL OR t.expires > ?2)",
         )
         .bind(token_hash)
@@ -499,6 +578,8 @@ impl Store {
         let auth = row.map(|r| TokenAuth {
             scope: intersect_scope(&parse_scope(r.get(0)), &parse_scope(r.get(2))),
             read_only: r.get(1),
+            user_id: r.get(3),
+            refresh_id: r.get(4),
         });
         if auth.is_some() {
             // Throttled so a polling client does not write on every request.
@@ -615,6 +696,10 @@ impl Store {
             .bind(refresh_id)
             .execute(&self.pool)
             .await;
+        let _ = sqlx::query("DELETE FROM registrations WHERE refresh_id = ?1")
+            .bind(refresh_id)
+            .execute(&self.pool)
+            .await;
         let _ = sqlx::query("DELETE FROM refresh_tokens WHERE id = ?1")
             .bind(refresh_id)
             .execute(&self.pool)
@@ -667,6 +752,12 @@ impl Store {
     /// Ends all of a user's app logins (after a password change).
     pub async fn delete_user_refresh_tokens(&self, user_id: i64) {
         let _ = sqlx::query(
+            "DELETE FROM registrations WHERE refresh_id IN (SELECT id FROM refresh_tokens WHERE user_id = ?1)",
+        )
+        .bind(user_id)
+        .execute(&self.pool)
+        .await;
+        let _ = sqlx::query(
             "DELETE FROM tokens WHERE refresh_id IN (SELECT id FROM refresh_tokens WHERE user_id = ?1)",
         )
         .bind(user_id)
@@ -676,6 +767,159 @@ impl Store {
             .bind(user_id)
             .execute(&self.pool)
             .await;
+    }
+
+    // mobile_app registrations (only the webhook hash is stored)
+
+    /// Registers a device. An app that reports a `device_id` it registered with before replaces
+    /// that registration (its old webhook id stops working) instead of adding another one.
+    pub async fn registration_create(
+        &self,
+        user_id: i64,
+        refresh_id: Option<i64>,
+        webhook_hash: &str,
+        f: &RegistrationFields,
+    ) -> Result<i64, RegistrationError> {
+        if let Some(device_id) = &f.device_id {
+            let existing = sqlx::query_scalar::<_, i64>(
+                "SELECT id FROM registrations WHERE user_id = ?1 AND app_id = ?2 AND device_id = ?3",
+            )
+            .bind(user_id)
+            .bind(&f.app_id)
+            .bind(device_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|_| RegistrationError::Failed)?;
+            if let Some(id) = existing {
+                sqlx::query(
+                    "UPDATE registrations SET webhook_hash = ?2, refresh_id = ?3, app_name = ?4,
+                         app_version = ?5, device_name = ?6, manufacturer = ?7, model = ?8,
+                         os_name = ?9, os_version = ?10, last_seen = NULL WHERE id = ?1",
+                )
+                .bind(id)
+                .bind(webhook_hash)
+                .bind(refresh_id)
+                .bind(&f.app_name)
+                .bind(&f.app_version)
+                .bind(&f.device_name)
+                .bind(&f.manufacturer)
+                .bind(&f.model)
+                .bind(&f.os_name)
+                .bind(&f.os_version)
+                .execute(&self.pool)
+                .await
+                .map_err(|_| RegistrationError::Failed)?;
+                return Ok(id);
+            }
+        }
+        let count =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM registrations WHERE user_id = ?1")
+                .bind(user_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|_| RegistrationError::Failed)?;
+        if count >= MAX_REGISTRATIONS_PER_USER {
+            return Err(RegistrationError::TooMany);
+        }
+        sqlx::query(
+            "INSERT INTO registrations (webhook_hash, user_id, refresh_id, app_id, app_name,
+                 app_version, device_id, device_name, manufacturer, model, os_name, os_version, created)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        )
+        .bind(webhook_hash)
+        .bind(user_id)
+        .bind(refresh_id)
+        .bind(&f.app_id)
+        .bind(&f.app_name)
+        .bind(&f.app_version)
+        .bind(&f.device_id)
+        .bind(&f.device_name)
+        .bind(&f.manufacturer)
+        .bind(&f.model)
+        .bind(&f.os_name)
+        .bind(&f.os_version)
+        .bind(now_secs())
+        .execute(&self.pool)
+        .await
+        .map(|r| r.last_insert_rowid())
+        .map_err(|_| RegistrationError::Failed)
+    }
+
+    /// The registration behind a webhook id hash, marking it seen (at most once a minute).
+    pub async fn registration_by_webhook(&self, webhook_hash: &str) -> Option<Registration> {
+        let reg = sqlx::query(registration_select!("WHERE r.webhook_hash = ?1"))
+            .bind(webhook_hash)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| registration_row(&r))?;
+        let now = now_secs();
+        let _ = sqlx::query(
+            "UPDATE registrations SET last_seen = ?2
+             WHERE id = ?1 AND (last_seen IS NULL OR last_seen < ?3)",
+        )
+        .bind(reg.id)
+        .bind(now)
+        .bind(now - 60)
+        .execute(&self.pool)
+        .await;
+        Some(reg)
+    }
+
+    /// Replaces the descriptive fields the app reports after registering (name, versions, ...).
+    pub async fn registration_update(&self, id: i64, f: &RegistrationFields) {
+        let _ = sqlx::query(
+            "UPDATE registrations SET app_version = ?2, device_name = ?3, manufacturer = ?4,
+                 model = ?5, os_version = ?6 WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(&f.app_version)
+        .bind(&f.device_name)
+        .bind(&f.manufacturer)
+        .bind(&f.model)
+        .bind(&f.os_version)
+        .execute(&self.pool)
+        .await;
+    }
+
+    /// All registrations, or only those of `user_id` when given.
+    pub async fn list_registrations(&self, user_id: Option<i64>) -> Vec<Registration> {
+        sqlx::query(registration_select!(
+            "WHERE ?1 IS NULL OR r.user_id = ?1 ORDER BY r.id"
+        ))
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| rows.iter().map(registration_row).collect())
+        .unwrap_or_default()
+    }
+
+    /// Removes a registration so its webhook stops working; with `user_id` only if it is theirs.
+    /// When the registration came with an app login, that login ends too: otherwise the app
+    /// would just register again with its still-valid token.
+    pub async fn delete_registration(&self, id: i64, user_id: Option<i64>) -> bool {
+        let refresh_id = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT refresh_id FROM registrations WHERE id = ?1 AND (?2 IS NULL OR user_id = ?2)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .flatten();
+        if let Some(refresh_id) = refresh_id {
+            self.refresh_delete(refresh_id).await;
+            return true;
+        }
+        sqlx::query("DELETE FROM registrations WHERE id = ?1 AND (?2 IS NULL OR user_id = ?2)")
+            .bind(id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            .map(|r| r.rows_affected() > 0)
+            .unwrap_or(false)
     }
 
     // Hue bridge
