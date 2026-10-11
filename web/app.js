@@ -239,7 +239,7 @@ function dashboard() {
       el("ol", { class: "steps" },
         el("li", {}, "Server URL: ", el("code", {}, location.origin), " ", copyButton(location.origin)),
         el("li", {}, "Access token: create one in ", el("a", { href: "#tokens" }, "Tokens"), "."),
-        el("li", {}, "Group: ", first ? el("code", {}, first.name) : "create one in ", first ? copyButton(first.name) : el("a", { href: "#groups" }, "Groups"), first ? " (exact name)" : ""),
+        el("li", {}, "Group: ", first ? el("code", {}, first.name) : "create one in ", first ? " " : "", first ? copyButton(first.name) : el("a", { href: "#groups" }, "Groups"), first ? " (exact name)" : ""),
         el("li", {}, "After changing a group, run ", el("b", {}, "Refresh entities"), " on the watch.")),
       location.protocol === "https:" ? "" : el("p", { class: "muted" }, "hasscontrol needs an https:// URL with a trusted certificate; see the README for a reverse proxy.")),
   ];
