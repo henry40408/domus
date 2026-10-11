@@ -7,6 +7,7 @@ pub const GIT_VERSION: &str = env!("GIT_VERSION");
 pub mod admin;
 pub mod api;
 pub mod core;
+pub mod discovery;
 pub mod env;
 pub mod health;
 pub mod hue;

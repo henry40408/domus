@@ -10,6 +10,8 @@ pub struct Env {
     pub log: String,
     /// Fixed first-run setup code; a random one is generated when unset.
     pub setup_code: Option<String>,
+    /// Whether to advertise on the LAN over mDNS (only when bound to a non-loopback address).
+    pub mdns: bool,
 }
 
 impl Env {
@@ -25,6 +27,13 @@ impl Env {
                 .into(),
             log: get("DOMUS_LOG").unwrap_or_else(|| "info".into()),
             setup_code: get("DOMUS_SETUP_CODE").filter(|c| !c.is_empty()),
+            mdns: !matches!(
+                get("DOMUS_MDNS")
+                    .as_deref()
+                    .map(str::to_ascii_lowercase)
+                    .as_deref(),
+                Some("0" | "false" | "off" | "no")
+            ),
         })
     }
 
@@ -51,5 +60,12 @@ mod tests {
             Env::from_lookup(|k| (k == "DOMUS_BIND").then(|| "0.0.0.0:9000".to_string())).unwrap();
         assert_eq!(e.bind.port(), 9000);
         assert!(Env::from_lookup(|k| (k == "DOMUS_BIND").then(|| "nope".to_string())).is_err());
+        assert!(e.mdns);
+        for off in ["0", "false", "OFF", "no"] {
+            let e = Env::from_lookup(|k| (k == "DOMUS_MDNS").then(|| off.to_string())).unwrap();
+            assert!(!e.mdns, "{off}");
+        }
+        let e = Env::from_lookup(|k| (k == "DOMUS_MDNS").then(|| "1".to_string())).unwrap();
+        assert!(e.mdns);
     }
 }
