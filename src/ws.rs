@@ -521,10 +521,7 @@ mod tests {
             .expect("timed out")
             .expect("closed")
             .expect("error");
-        match m {
-            Msg::Text(t) => serde_json::from_str(&t).unwrap(),
-            other => panic!("unexpected {other:?}"),
-        }
+        serde_json::from_str(&m.into_text().unwrap()).unwrap()
     }
 
     async fn tell(c: &mut Client, v: Value) {
@@ -533,13 +530,16 @@ mod tests {
 
     /// Whether the server ends the connection soon.
     async fn closed(c: &mut Client) -> bool {
-        loop {
-            match tokio::time::timeout(Duration::from_secs(5), c.next()).await {
-                Ok(None | Some(Err(_)) | Some(Ok(Msg::Close(_)))) => return true,
-                Ok(Some(Ok(_))) => continue,
-                Err(_) => return false,
+        let drain = async {
+            while let Some(Ok(m)) = c.next().await {
+                if m.is_close() {
+                    break;
+                }
             }
-        }
+        };
+        tokio::time::timeout(Duration::from_secs(5), drain)
+            .await
+            .is_ok()
     }
 
     async fn authed(addr: std::net::SocketAddr, token: &str) -> Client {
@@ -828,6 +828,22 @@ mod tests {
         )
         .await;
         assert_eq!(recv(&mut c).await["success"], true);
+    }
+
+    #[tokio::test]
+    async fn a_lagging_connection_is_brought_up_to_date() {
+        let (app, addr) = serve_app().await;
+        app.core.set_state("light.a", "start", Map::new());
+        let mut c = authed(addr, TOKEN).await;
+        tell(&mut c, json!({"id": 1, "type": "subscribe_entities"})).await;
+        recv(&mut c).await;
+        recv(&mut c).await;
+        // The server task cannot run during this loop (current-thread runtime), so more
+        // changes than the channel holds pile up and the connection lags.
+        for i in 0..1000 {
+            app.core.set_state("light.a", &format!("s{i}"), Map::new());
+        }
+        assert_eq!(recv(&mut c).await["event"]["a"]["light.a"]["s"], "s999");
     }
 
     #[tokio::test]
