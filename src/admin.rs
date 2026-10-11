@@ -407,6 +407,7 @@ async fn password_change(
     }
     store.set_password(me.id, &hash_password(&body.new)).await;
     store.delete_user_sessions(me.id).await;
+    store.delete_user_refresh_tokens(me.id).await;
     tracing::info!(target: "audit", user = %me.username, "password changed");
     start_session(&app, &headers, me.id).await
 }
@@ -513,6 +514,7 @@ async fn user_update(
     if let Some(pw) = &body.password {
         store.set_password(id, &hash_password(pw)).await;
         store.delete_user_sessions(id).await;
+        store.delete_user_refresh_tokens(id).await;
         tracing::info!(target: "audit", by = %me.username, user = %target.username, "password reset");
     }
     Json(json!({"ok": true})).into_response()

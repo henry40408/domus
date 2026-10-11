@@ -10,6 +10,7 @@ pub mod core;
 pub mod env;
 pub mod health;
 pub mod hue;
+pub mod oauth;
 pub mod store;
 pub mod throttle;
 pub mod util;
@@ -33,7 +34,9 @@ async fn security_headers(req: Request, next: Next) -> Response {
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.eq_ignore_ascii_case("https"));
     // Neither the admin API nor a health verdict may be cached.
-    let no_store = req.uri().path().starts_with("/api/domus") || req.uri().path() == "/health";
+    let path = req.uri().path();
+    let no_store =
+        path.starts_with("/api/domus") || path.starts_with("/auth/") || path == "/health";
     let mut resp = next.run(req).await;
     let h = resp.headers_mut();
     let mut set = |name: HeaderName, value: &'static str| {
@@ -63,6 +66,7 @@ pub fn build_app(app: AppState) -> Router {
     Router::new()
         .merge(health)
         .merge(api::router(app.clone()))
+        .merge(oauth::router(app.clone()))
         .nest("/api/domus", admin::router(app))
         .fallback(admin::static_files)
         .layer(middleware::from_fn(security_headers))

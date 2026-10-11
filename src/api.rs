@@ -22,6 +22,8 @@ pub struct AppState {
     pub core: Arc<Core>,
     pub hue: Arc<HueManager>,
     pub guard: Arc<LoginGuard>,
+    /// One-time codes of the OAuth login used by the Home Assistant apps.
+    pub codes: Arc<crate::oauth::AuthCodes>,
     /// Required by `/setup` while set; cleared once the first admin exists.
     pub setup_code: Arc<Mutex<Option<String>>>,
     /// Flips to `true` on shutdown so long-lived responses (SSE) end instead of stalling the drain.
@@ -35,6 +37,7 @@ impl AppState {
             core,
             hue,
             guard: Arc::default(),
+            codes: Arc::default(),
             setup_code: Arc::default(),
             shutdown: Arc::new(tokio::sync::watch::channel(false).0),
         }
