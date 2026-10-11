@@ -15,6 +15,7 @@ pub mod oauth;
 pub mod store;
 pub mod throttle;
 pub mod util;
+pub mod ws;
 
 use axum::Router;
 use axum::extract::Request;
@@ -69,6 +70,7 @@ pub fn build_app(app: AppState) -> Router {
         .merge(api::router(app.clone()))
         .merge(oauth::router(app.clone()))
         .merge(mobile::router(app.clone()))
+        .merge(ws::router(app.clone()))
         .nest("/api/domus", admin::router(app))
         .fallback(admin::static_files)
         .layer(middleware::from_fn(security_headers))
