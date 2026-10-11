@@ -411,6 +411,28 @@ impl Store {
         .is_some()
     }
 
+    /// Whether the token row still exists, expired or not and without counting as use: a
+    /// WebSocket outlives its access token like it does in Home Assistant, but not its revocation.
+    pub async fn token_exists(&self, token_hash: &str) -> bool {
+        sqlx::query_scalar::<_, i64>("SELECT 1 FROM tokens WHERE token_hash = ?1")
+            .bind(token_hash)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    pub async fn user_by_id(&self, id: i64) -> Option<User> {
+        sqlx::query("SELECT id, username, is_admin, created, scope FROM users WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| user_row(&r))
+    }
+
     /// The user's live sessions, newest first; `current_hash` marks the caller's own.
     pub async fn list_sessions(&self, user_id: i64, current_hash: &str) -> Vec<SessionInfo> {
         let now = now_secs();

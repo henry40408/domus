@@ -128,7 +128,7 @@ fn ok(value: Value) -> Response {
 }
 
 /// What `get_config` tells the app. domus has no location of its own, so those are zeros.
-fn config() -> Value {
+pub(crate) fn config() -> Value {
     json!({
         "latitude": 0.0,
         "longitude": 0.0,
