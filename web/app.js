@@ -188,7 +188,7 @@ async function logout() {
 function shell() {
   // The nav is rebuilt on every render; keep its horizontal scroll so tapping
   // a tab on the mobile top bar does not jump it back to the start.
-  const navScroll = document.querySelector("nav")?.scrollLeft ?? 0;
+  const navScroll = root.querySelector(".app > nav")?.scrollLeft ?? 0;
   const main = el("main", {});
   const nav = el("nav", {}, el("h1", {}, icon("home"), " domus"),
     ...visibleTabs().map(([id, ico, name]) => el("a", {
