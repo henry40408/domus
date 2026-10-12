@@ -14,6 +14,12 @@ domus controls Philips Hue lights through a Hue Bridge (CLIP v2). It implements 
 subset needed by [hasscontrol](https://github.com/hatl/hasscontrol) (a Garmin watch widget) and enough
 of the login, `mobile_app` and WebSocket APIs for the official Companion apps to connect.
 
+| Light | Dark |
+|-------|------|
+| ![Dashboard - Light](screenshots/dashboard.png) | ![Dashboard - Dark](screenshots/dashboard-dark.png) |
+| ![Groups - Light](screenshots/groups.png) | ![Groups - Dark](screenshots/groups-dark.png) |
+| ![Dashboard on a phone - Light](screenshots/dashboard-mobile.png) | ![Dashboard on a phone - Dark](screenshots/dashboard-mobile-dark.png) |
+
 ## Features
 
 - **Home Assistant REST subset** - Works with hasscontrol out of the box
@@ -238,6 +244,21 @@ Forks need a `CODECOV_TOKEN` repository secret. To run it locally:
 ```sh
 cargo llvm-cov nextest --html
 ```
+
+### Screenshots
+
+The README images are generated from a fake Hue Bridge, so no real house ends up in them. After a UI
+change, rebuild (the web assets are embedded at compile time) and regenerate; this needs a local
+Chrome or Chromium (`brew install --cask ungoogled-chromium`) and network access on the first run
+(it downloads chromedriver). It runs `target/debug/domus`, so build into the default target dir:
+
+```sh
+cargo build
+cd e2e && cargo run --bin screenshots
+```
+
+Commit the updated images under `screenshots/` with the UI change. Fonts and Chromium differ by
+machine, so an unrelated image changing in the diff means the browser changed, not the UI.
 
 ## License
 
