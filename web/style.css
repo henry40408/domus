@@ -91,6 +91,8 @@ details.wp > summary { cursor: pointer; color: var(--muted); font-size: 12px; te
 .savebar { display: flex; gap: var(--s3); align-items: center; margin-top: var(--s4); }
 .subtabs button.active { background: var(--accent-weak); border-color: var(--accent); color: var(--accent); font-weight: 600; }
 
+.scene-grid { display: flex; flex-wrap: wrap; gap: var(--s2); }
+details.card > summary { cursor: pointer; font-weight: 600; }
 .rows { list-style: none; padding: 0; margin: 0; }
 .rows li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--s1) var(--s3); align-items: center; padding: var(--s3) 0; border-bottom: 1px solid var(--line); }
 .rows li:last-child { border-bottom: 0; }
