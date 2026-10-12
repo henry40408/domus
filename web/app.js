@@ -221,21 +221,32 @@ function dashboard() {
   const first = data.groups[0];
   const stat = (title, value, note) => el("div", { class: "card stat" },
     el("span", { class: "muted" }, title), el("b", {}, value), el("span", { class: "muted" }, note));
+  const sceneList = scenes();
+  const rooms = roomRows();
+  const lightList = lightRows();
   return [
     el("h2", {}, "Dashboard"),
-    el("p", { class: "sub" }, "Overview of what the watch can see."),
-    el("div", { class: "cards" },
-      stat("Lights", String(lights.length), lights.filter((l) => l.state === "on").length + " on"
-        + (lights.some(unreachable) ? ", " + lights.filter(unreachable).length + " unreachable" : "")),
-      stat("Scenes", String(scenes().length), "from the Hue Bridge"),
-      stat("Groups", String(data.groups.length), data.groups.filter((g) => g.expose_light).length + " with an all-lights switch"),
-      data.hue ? stat("Hue Bridge", !data.hue.paired ? "Not paired" : data.hue.running ? "Connected" : "Disconnected",
-        data.hue.paired ? data.hue.ip : "Pair it in Settings") : ""),
     lights.some(unreachable) ? el("div", { class: "warn" }, icon("alert"),
       " Unreachable: " + lights.filter(unreachable).map((l) => l.name || l.entity_id).join(", ")
       + ". The watch shows them as unavailable.") : "",
-    el("div", { class: "card" },
-      el("h3", {}, "Set up hasscontrol on the watch"),
+    sceneList.length ? el("div", { class: "card" }, el("div", { class: "section-title first" }, "Scenes"),
+      el("div", { class: "scene-grid" }, ...sceneList.map((s) => el("button", {
+        class: "scene",
+        title: s.entity_id,
+        onclick: () => activateScene(s),
+      }, s.name || s.entity_id)))) : "",
+    rooms.length ? el("div", { class: "card" }, el("div", { class: "section-title first" }, "Rooms & zones"), el("ul", { class: "rows" }, ...rooms)) : "",
+    el("div", { class: "card" }, el("div", { class: "section-title first" }, "Lights ", el("span", { class: "hint-inline" }, "· tap to expand")),
+      lightList.length ? el("ul", { class: "rows" }, ...lightList) : el("p", { class: "muted" }, "No lights yet. Pair the Hue Bridge in Settings.")),
+    el("div", { class: "cards" },
+      stat("Lights", String(lights.length), lights.filter((l) => l.state === "on").length + " on"
+        + (lights.some(unreachable) ? ", " + lights.filter(unreachable).length + " unreachable" : "")),
+      stat("Scenes", String(sceneList.length), "from the Hue Bridge"),
+      stat("Groups", String(data.groups.length), data.groups.filter((g) => g.expose_light).length + " with an all-lights switch"),
+      data.hue ? stat("Hue Bridge", !data.hue.paired ? "Not paired" : data.hue.running ? "Connected" : "Disconnected",
+        data.hue.paired ? data.hue.ip : "Pair it in Settings") : ""),
+    el("details", { class: "card", open: !!ui.setupOpen, ontoggle: (e) => { ui.setupOpen = e.target.open; } },
+      el("summary", {}, "Set up hasscontrol on the watch"),
       el("ol", { class: "steps" },
         el("li", {}, "Server URL: ", el("code", {}, location.origin), " ", copyButton(location.origin)),
         el("li", {}, "Access token: create one in ", el("a", { href: "#tokens" }, "Tokens"), "."),
@@ -463,8 +474,11 @@ async function control(ids, extra) {
 function slider(title, props, show, send, cls) {
   const input = el("input", { type: "range", class: cls || "", ...props });
   const out = el("output", {}, show(input.value));
-  input.addEventListener("input", () => { out.textContent = show(input.value); });
-  input.addEventListener("change", () => guarded(() => send(+input.value)));
+  // A live refresh would replace the input mid-drag, so syncLights holds off until the drag ends.
+  input.addEventListener("pointerdown", () => { ui.dragging = true; });
+  input.addEventListener("pointercancel", () => { ui.dragging = false; });
+  input.addEventListener("input", () => { ui.dragging = true; out.textContent = show(input.value); });
+  input.addEventListener("change", () => { ui.dragging = false; guarded(() => send(+input.value)); });
   return el("div", { class: "ctl" }, el("span", {}, title), input, out);
 }
 
@@ -535,8 +549,8 @@ function roomRows() {
   });
 }
 
-function devices() {
-  const lightRows = realLights().map((l) => {
+function lightRows() {
+  return realLights().map((l) => {
     const on = l.state === "on";
     const down = unreachable(l);
     const sw = el("button", {
@@ -556,28 +570,37 @@ function devices() {
       el("span", { class: "meta" }, ...[].concat(lightState(l))),
       ui.open === l.entity_id && !down ? lightPanel(l) : "");
   });
-  const rooms = roomRows();
-  const sceneRows = scenes().map((s) => el("li", {},
+}
+
+function activateScene(s) {
+  return guarded(async () => {
+    const r = await api("POST", "/devices/test", { entity_id: s.entity_id });
+    s.state = r.state || s.state;
+    toast("Activated " + (s.name || s.entity_id), false);
+    render();
+  });
+}
+
+function sceneRows() {
+  return scenes().map((s) => el("li", {},
     el("span", { class: "name" }, s.name || s.entity_id),
-    el("button", {
-      class: "act",
-      onclick: () => guarded(async () => {
-        const r = await api("POST", "/devices/test", { entity_id: s.entity_id });
-        s.state = r.state || s.state;
-        toast("Activated " + (s.name || s.entity_id), false);
-        render();
-      }),
-    }, "Activate"),
+    el("button", { class: "act", onclick: () => activateScene(s) }, "Activate"),
     el("span", { class: "meta" }, el("code", {}, s.entity_id)),
     el("span", { class: "meta" }, "Last activated: " + (s.state === "unknown" ? "never" : new Date(s.state).toLocaleString()))));
+}
+
+function devices() {
+  const lights = lightRows();
+  const rooms = roomRows();
+  const sceneList = sceneRows();
   return [
     el("h2", {}, "Devices"),
     el("p", { class: "sub" }, "Test your Hue setup without the watch."),
-    el("div", { class: "card" }, el("div", { class: "section-title" }, "Lights ", el("span", { class: "hint-inline" }, "· click to expand")),
-      lightRows.length ? el("ul", { class: "rows" }, ...lightRows) : el("p", { class: "muted" }, "No lights yet. Pair the Hue Bridge in Settings.")),
+    el("div", { class: "card" }, el("div", { class: "section-title" }, "Lights ", el("span", { class: "hint-inline" }, "· tap to expand")),
+      lights.length ? el("ul", { class: "rows" }, ...lights) : el("p", { class: "muted" }, "No lights yet. Pair the Hue Bridge in Settings.")),
     rooms.length ? el("div", { class: "card" }, el("div", { class: "section-title" }, "Rooms & zones"), el("ul", { class: "rows" }, ...rooms)) : "",
     el("div", { class: "card" }, el("div", { class: "section-title" }, "Scenes"),
-      sceneRows.length ? el("ul", { class: "rows" }, ...sceneRows) : el("p", { class: "muted" }, "No scenes found.")),
+      sceneList.length ? el("ul", { class: "rows" }, ...sceneList) : el("p", { class: "muted" }, "No scenes found.")),
   ];
 }
 
@@ -836,6 +859,7 @@ async function syncLights() {
   } catch {
     return;
   }
+  if (ui.dragging) return;
   if (ui.tab === "dashboard" || ui.tab === "devices") render();
 }
 
