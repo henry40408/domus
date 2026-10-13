@@ -11,6 +11,11 @@ use crate::util::now_secs;
 pub const SESSION_TTL_SECS: i64 = 7 * 24 * 3600;
 /// A session unused for this long is dead, even before its absolute lifetime ends.
 pub const SESSION_IDLE_SECS: i64 = 24 * 3600;
+/// Lifetime of a session started from an app's token; the page just starts another one on the
+/// next visit, so it can be short.
+pub const APP_SESSION_TTL_SECS: i64 = 24 * 3600;
+/// How long a password re-entry unlocks sensitive actions in an app session.
+pub const REAUTH_SECS: i64 = 10 * 60;
 /// `last_seen` is refreshed at most this often, to avoid a write on every request.
 const SESSION_TOUCH_SECS: i64 = 60;
 const USER_AGENT_MAX: usize = 200;
@@ -373,7 +378,8 @@ impl Store {
         let user = sqlx::query(
             "SELECT u.id, u.username, u.is_admin, u.created, u.scope FROM sessions s
              JOIN users u ON u.id = s.user_id
-             WHERE s.token_hash = ?1 AND s.expires > ?2 AND s.last_seen > ?3",
+             WHERE s.token_hash = ?1 AND s.expires > ?2 AND s.last_seen > ?3
+               AND (s.refresh_id IS NULL OR EXISTS (SELECT 1 FROM refresh_tokens r WHERE r.id = s.refresh_id))",
         )
         .bind(token_hash)
         .bind(now)
@@ -399,7 +405,8 @@ impl Store {
     pub async fn session_valid(&self, token_hash: &str) -> bool {
         let now = now_secs();
         sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM sessions WHERE token_hash = ?1 AND expires > ?2 AND last_seen > ?3",
+            "SELECT 1 FROM sessions s WHERE s.token_hash = ?1 AND s.expires > ?2 AND s.last_seen > ?3
+               AND (s.refresh_id IS NULL OR EXISTS (SELECT 1 FROM refresh_tokens r WHERE r.id = s.refresh_id))",
         )
         .bind(token_hash)
         .bind(now)
@@ -425,8 +432,10 @@ impl Store {
     pub async fn list_sessions(&self, user_id: i64, current_hash: &str) -> Vec<SessionInfo> {
         let now = now_secs();
         sqlx::query(
-            "SELECT rowid, created, last_seen, user_agent, token_hash = ?2 FROM sessions
-             WHERE user_id = ?1 AND expires > ?3 AND last_seen > ?4 ORDER BY created DESC, rowid DESC",
+            "SELECT s.rowid, s.created, s.last_seen, s.user_agent, s.token_hash = ?2 FROM sessions s
+             WHERE s.user_id = ?1 AND s.expires > ?3 AND s.last_seen > ?4
+               AND (s.refresh_id IS NULL OR EXISTS (SELECT 1 FROM refresh_tokens r WHERE r.id = s.refresh_id))
+             ORDER BY s.created DESC, s.rowid DESC",
         )
         .bind(user_id)
         .bind(current_hash)
@@ -466,6 +475,61 @@ impl Store {
             .await
             .map(|r| r.rows_affected())
             .unwrap_or(0)
+    }
+
+    /// Starts a session for the app login `refresh_id`, replacing the one it already had. It ends
+    /// with that login and is short-lived; sensitive actions in it need a password re-entry.
+    pub async fn create_app_session(
+        &self,
+        token_hash: &str,
+        user_id: i64,
+        refresh_id: i64,
+        user_agent: &str,
+    ) -> bool {
+        let now = now_secs();
+        let _ = sqlx::query("DELETE FROM sessions WHERE refresh_id = ?1")
+            .bind(refresh_id)
+            .execute(&self.pool)
+            .await;
+        let agent: String = user_agent.chars().take(USER_AGENT_MAX).collect();
+        // One statement, so a failure can never leave a plain password-style session behind.
+        sqlx::query(
+            "INSERT OR REPLACE INTO sessions (token_hash, expires, user_id, created, last_seen, user_agent, refresh_id)
+             VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6)",
+        )
+        .bind(token_hash)
+        .bind(now + APP_SESSION_TTL_SECS)
+        .bind(user_id)
+        .bind(now)
+        .bind(agent)
+        .bind(refresh_id)
+        .execute(&self.pool)
+        .await
+        .is_ok()
+    }
+
+    /// Whether the session came from an app token and has not had its password re-entered lately.
+    pub async fn session_needs_reauth(&self, token_hash: &str) -> bool {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM sessions WHERE token_hash = ?1 AND refresh_id IS NOT NULL
+               AND (elevated_until IS NULL OR elevated_until <= ?2)",
+        )
+        .bind(token_hash)
+        .bind(now_secs())
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+    }
+
+    /// Unlocks sensitive actions in the session for `REAUTH_SECS`.
+    pub async fn session_elevate(&self, token_hash: &str) {
+        let _ = sqlx::query("UPDATE sessions SET elevated_until = ?2 WHERE token_hash = ?1")
+            .bind(token_hash)
+            .bind(now_secs() + REAUTH_SECS)
+            .execute(&self.pool)
+            .await;
     }
 
     pub async fn delete_session(&self, token_hash: &str) {
@@ -719,6 +783,10 @@ impl Store {
 
     /// Ends a refresh token and every access token minted from it.
     async fn refresh_delete(&self, refresh_id: i64) {
+        let _ = sqlx::query("DELETE FROM sessions WHERE refresh_id = ?1")
+            .bind(refresh_id)
+            .execute(&self.pool)
+            .await;
         let _ = sqlx::query("DELETE FROM tokens WHERE refresh_id = ?1")
             .bind(refresh_id)
             .execute(&self.pool)
@@ -778,6 +846,12 @@ impl Store {
 
     /// Ends all of a user's app logins (after a password change).
     pub async fn delete_user_refresh_tokens(&self, user_id: i64) {
+        let _ = sqlx::query(
+            "DELETE FROM sessions WHERE refresh_id IN (SELECT id FROM refresh_tokens WHERE user_id = ?1)",
+        )
+        .bind(user_id)
+        .execute(&self.pool)
+        .await;
         let _ = sqlx::query(
             "DELETE FROM registrations WHERE refresh_id IN (SELECT id FROM refresh_tokens WHERE user_id = ?1)",
         )
@@ -1264,6 +1338,47 @@ mod tests {
         assert_eq!(parse_scope(None), None);
         assert_eq!(parse_scope(Some("[\"a\"]".into())), Some(vec!["a".into()]));
         assert_eq!(parse_scope(Some("not json".into())), Some(Vec::new()));
+    }
+
+    #[tokio::test]
+    async fn app_sessions_follow_their_refresh_token() {
+        let s = Store::open_memory().await.unwrap();
+        let id = s.create_user("u", "h", false).await.unwrap();
+        let refresh = s.refresh_create(id, "client", "r1").await.unwrap();
+        assert!(s.create_app_session("a", id, refresh, "ua").await);
+        assert!(s.session_user("a").await.is_some());
+        assert!(s.session_needs_reauth("a").await);
+        s.session_elevate("a").await;
+        assert!(!s.session_needs_reauth("a").await);
+
+        // a second exchange for the same app login replaces the first session
+        assert!(s.create_app_session("b", id, refresh, "ua").await);
+        assert!(s.session_user("a").await.is_none());
+        assert!(s.session_user("b").await.is_some());
+        assert_eq!(s.list_sessions(id, "b").await.len(), 1);
+
+        // it is short-lived, whatever the plain session lifetime is
+        let expires: i64 =
+            sqlx::query_scalar("SELECT expires FROM sessions WHERE token_hash = 'b'")
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
+        assert!(expires <= now_secs() + APP_SESSION_TTL_SECS);
+
+        // without its refresh token (swept for idleness, say) it is dead everywhere, even
+        // though the session row itself is still there
+        sqlx::query("DELETE FROM refresh_tokens WHERE id = ?1")
+            .bind(refresh)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        assert!(s.session_user("b").await.is_none());
+        assert!(!s.session_valid("b").await);
+        assert!(s.list_sessions(id, "b").await.is_empty());
+
+        // password sessions never need a re-entry
+        s.create_session("p", id, "ua").await;
+        assert!(!s.session_needs_reauth("p").await);
     }
 
     #[tokio::test]

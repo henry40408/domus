@@ -127,7 +127,13 @@ Notes:
 
 - domus reports a faked Home Assistant version (`2025.12.0`) so the apps use their older bridge and do not
   wait for the `frontend/loaded` handshake (2026.8.0+) or use the V2 bridge (2026.4.2+). Do not bump it.
-- The app's main screen is domus's own admin page; it needs its own login (the cookie is not shared).
+- The app's main screen is domus's own admin page. It signs in with the app's own login (the page asks
+  the app for its access token and trades it for a session), so there is no second password prompt.
+  That session lasts a day, ends with the app login (log out, remove the app, change the password), is
+  marked "HA app" in your sessions, and asks for the password again before creating API tokens, managing
+  users or groups, or pairing the Hue Bridge. Logging out of the page inside the app is only until the
+  app comes back to the foreground; to cut the link, remove the app in the settings. Over plain http the token travels in clear on the LAN, as the rest of
+  the app's traffic does; use https if you do not trust the network.
   The app's own settings (servers, sensors, ...) are behind the round gear button at the bottom right.
 - In Docker, multicast does not leave a bridge network, so mDNS only works with `network_mode: host` on
   Linux (not Docker Desktop); otherwise enter the URL by hand. domus keeps a random id in `instance-id` in

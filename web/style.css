@@ -180,3 +180,12 @@ input.kelvin::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; 
   display: grid; place-items: center; color: var(--text); box-shadow: 0 2px 10px rgb(0 0 0 / 0.22);
 }
 .app-settings .ico { width: 24px; height: 24px; }
+
+/* In-page password dialog: a real form, so password managers can fill and offer to save. */
+.overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, .45); display: flex; align-items: center; justify-content: center; padding: var(--s4); z-index: 20; }
+.dialog { width: min(360px, 100%); margin: 0; }
+.dialog h3 { margin: 0 0 var(--s2); }
+.dialog .sub { margin: 0 0 var(--s3); }
+.dialog input[type=password] { width: 100%; box-sizing: border-box; }
+.dialog .row { display: flex; gap: var(--s2); justify-content: flex-end; margin-top: var(--s3); }
+.sr-only { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; pointer-events: none; }

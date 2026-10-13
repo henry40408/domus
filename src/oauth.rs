@@ -643,6 +643,248 @@ mod tests {
         assert_eq!(body["error"], "invalid_grant");
     }
 
+    /// Trades `bearer` for an admin-page session; returns the status and the cookie, if any.
+    async fn from_token(r: &Router, bearer: Option<&str>) -> (StatusCode, Option<String>) {
+        let mut req = Request::post("/api/domus/session/from-token");
+        if let Some(t) = bearer {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        let resp = r
+            .clone()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let cookie = resp
+            .headers()
+            .get("set-cookie")
+            .map(|c| c.to_str().unwrap().split(';').next().unwrap().to_string());
+        (resp.status(), cookie)
+    }
+
+    async fn admin(
+        r: &Router,
+        method: &str,
+        uri: &str,
+        cookie: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        send(
+            r,
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .header("cookie", cookie)
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn app_token_starts_a_session_that_ends_with_the_app_login() {
+        let (r, _) = setup().await;
+        let (access, _) = app_login(&r).await;
+        let (status, cookie) = from_token(&r, Some(&access)).await;
+        assert_eq!(status, StatusCode::OK);
+        let cookie = cookie.unwrap();
+        let (_, body) = admin(&r, "GET", "/api/domus/status", &cookie, Value::Null).await;
+        assert_eq!(body["logged_in"], true);
+        let (_, sessions) = admin(&r, "GET", "/api/domus/sessions", &cookie, Value::Null).await;
+        assert!(
+            sessions[0]["user_agent"]
+                .as_str()
+                .unwrap()
+                .starts_with("HA app")
+        );
+        // Logging the app out (what iOS does) also ends the page session.
+        token_form(&r, &format!("action=revoke&token={access}")).await;
+        let (_, body) = admin(&r, "GET", "/api/domus/status", &cookie, Value::Null).await;
+        assert_eq!(body["logged_in"], false);
+    }
+
+    #[tokio::test]
+    async fn removing_the_app_in_the_admin_list_ends_its_page_session() {
+        let (r, app) = setup().await;
+        let (access, _) = app_login(&r).await;
+        let cookie = from_token(&r, Some(&access)).await.1.unwrap();
+        let id = app.core.store().list_tokens(None).await[0].id;
+        assert!(app.core.store().revoke_token(id, None).await);
+        let (_, body) = admin(&r, "GET", "/api/domus/status", &cookie, Value::Null).await;
+        assert_eq!(body["logged_in"], false);
+    }
+
+    #[tokio::test]
+    async fn only_app_login_tokens_may_start_a_session() {
+        let (r, app) = setup().await;
+        assert_eq!(from_token(&r, None).await.0, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            from_token(&r, Some("nope")).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        // An ordinary API token (here an unrestricted one) is not accepted either.
+        app.core
+            .store()
+            .create_token(1, "plain", &sha256_hex("domus_plain"), None, false, None)
+            .await
+            .unwrap();
+        let (status, cookie) = from_token(&r, Some("domus_plain")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(cookie.is_none());
+    }
+
+    #[tokio::test]
+    async fn app_sessions_need_the_password_for_sensitive_actions() {
+        let (r, _) = setup().await;
+        let (access, _) = app_login(&r).await;
+        let cookie = from_token(&r, Some(&access)).await.1.unwrap();
+        let new_token = json!({"name": "ci"});
+        let (status, body) =
+            admin(&r, "POST", "/api/domus/tokens", &cookie, new_token.clone()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["reauth"], true);
+        let (status, _) = admin(
+            &r,
+            "POST",
+            "/api/domus/session/reauth",
+            &cookie,
+            json!({"password": "nope"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = admin(
+            &r,
+            "POST",
+            "/api/domus/session/reauth",
+            &cookie,
+            json!({"password": PASSWORD}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = admin(&r, "POST", "/api/domus/tokens", &cookie, new_token).await;
+        assert!(status.is_success(), "{status}");
+    }
+
+    #[tokio::test]
+    async fn every_sensitive_admin_action_needs_the_password() {
+        let (r, _) = setup().await;
+        let (access, _) = app_login(&r).await;
+        let cookie = from_token(&r, Some(&access)).await.1.unwrap();
+        let attempts = [
+            ("POST", "/api/domus/tokens", json!({"name": "ci"})),
+            (
+                "POST",
+                "/api/domus/users",
+                json!({"username": "bob", "password": "long-enough-pass"}),
+            ),
+            ("PUT", "/api/domus/users/1", json!({"is_admin": true})),
+            ("DELETE", "/api/domus/users/1", Value::Null),
+            ("POST", "/api/domus/hue/pair", json!({})),
+            ("PUT", "/api/domus/groups/den", json!({"members": []})),
+            ("DELETE", "/api/domus/groups/den", Value::Null),
+        ];
+        for (method, uri, body) in attempts {
+            let (status, body) = admin(&r, method, uri, &cookie, body).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}");
+            assert_eq!(body["reauth"], true, "{method} {uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn password_change_ends_the_app_session() {
+        let (r, _) = setup().await;
+        let (access, _) = app_login(&r).await;
+        let cookie = from_token(&r, Some(&access)).await.1.unwrap();
+        // the app session cannot even reach it without the old password; use a password session
+        let resp = r
+            .clone()
+            .oneshot(
+                Request::post("/api/domus/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"username": "admin", "password": PASSWORD}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let own = resp.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let (status, _) = admin(
+            &r,
+            "POST",
+            "/api/domus/password",
+            &own,
+            json!({"current": PASSWORD, "new": "another-long-passphrase"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, body) = admin(&r, "GET", "/api/domus/status", &cookie, Value::Null).await;
+        assert_eq!(body["logged_in"], false);
+        assert_eq!(state_status(&r, &access).await, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn deleting_the_user_ends_the_app_session() {
+        let (r, app) = setup().await;
+        let (access, _) = app_login(&r).await;
+        let cookie = from_token(&r, Some(&access)).await.1.unwrap();
+        assert!(app.core.store().delete_user(1).await);
+        let (_, body) = admin(&r, "GET", "/api/domus/status", &cookie, Value::Null).await;
+        assert_eq!(body["logged_in"], false);
+    }
+
+    #[tokio::test]
+    async fn a_second_exchange_replaces_the_first_session() {
+        let (r, _) = setup().await;
+        let (access, _) = app_login(&r).await;
+        let first = from_token(&r, Some(&access)).await.1.unwrap();
+        let second = from_token(&r, Some(&access)).await.1.unwrap();
+        assert_ne!(first, second);
+        let (_, body) = admin(&r, "GET", "/api/domus/status", &first, Value::Null).await;
+        assert_eq!(body["logged_in"], false);
+        let (_, body) = admin(&r, "GET", "/api/domus/status", &second, Value::Null).await;
+        assert_eq!(body["logged_in"], true);
+    }
+
+    #[tokio::test]
+    async fn password_sessions_are_not_asked_again() {
+        let (r, _) = setup().await;
+        let resp = r
+            .clone()
+            .oneshot(
+                Request::post("/api/domus/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"username": "admin", "password": PASSWORD}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cookie = resp.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let (status, _) = admin(
+            &r,
+            "POST",
+            "/api/domus/tokens",
+            &cookie,
+            json!({"name": "ci"}),
+        )
+        .await;
+        assert!(status.is_success(), "{status}");
+    }
+
     #[tokio::test]
     async fn unknown_grant_types_are_rejected() {
         let (r, _) = setup().await;
