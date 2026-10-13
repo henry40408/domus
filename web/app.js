@@ -53,6 +53,28 @@ function el(tag, props, ...children) {
   return e;
 }
 
+/**
+ * In-page password dialog. A real form with a username field, unlike prompt(), so password
+ * managers can fill it, and WebViews that drop prompt() still work. Resolves to null on cancel.
+ */
+function askPassword({ title, hint, username, fresh }) {
+  return new Promise((resolve) => {
+    const who = el("input", { type: "text", value: username || "", autocomplete: "username", readOnly: true, tabIndex: -1, class: "sr-only" });
+    const pw = el("input", { type: "password", placeholder: "Password", autocomplete: fresh ? "new-password" : "current-password" });
+    const done = (value) => { overlay.remove(); resolve(value); };
+    const form = el("form", { class: "card dialog", onsubmit: (e) => { e.preventDefault(); done(pw.value || null); } },
+      el("h3", {}, title),
+      hint ? el("p", { class: "sub" }, hint) : "",
+      who, pw,
+      el("div", { class: "row" },
+        el("button", { type: "button", onclick: () => done(null) }, "Cancel"),
+        el("button", { type: "submit", class: "primary" }, "Continue")));
+    const overlay = el("div", { class: "overlay", onkeydown: (e) => { if (e.key === "Escape") done(null); } }, form);
+    document.body.append(overlay);
+    pw.focus();
+  });
+}
+
 async function api(method, path, body, afterReauth) {
   const res = await fetch("/api/domus" + path, {
     method,
@@ -63,7 +85,11 @@ async function api(method, path, body, afterReauth) {
   try { data = await res.json(); } catch (_) { /* empty body */ }
   // A session the Companion app started needs the password again for sensitive actions.
   if (res.status === 403 && data && data.reauth && !afterReauth) {
-    const password = prompt("Enter your password to continue:");
+    const password = await askPassword({
+      title: "Enter your password",
+      hint: "This action needs your password again.",
+      username: me && me.username,
+    });
     if (password) {
       await api("POST", "/session/reauth", { password });
       return api(method, path, body, true);
@@ -705,7 +731,12 @@ function users() {
         el("button", {
           class: "act",
           onclick: () => guarded(async () => {
-            const password = prompt("New password for " + u.username + " (at least 12 characters):");
+            const password = await askPassword({
+              title: "New password for " + u.username,
+              hint: "At least 12 characters.",
+              username: u.username,
+              fresh: true,
+            });
             if (!password) return;
             await api("PUT", "/users/" + u.id, { password });
             toast("Password changed; they must log in again.", false);
