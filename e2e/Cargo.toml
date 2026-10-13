@@ -2,6 +2,7 @@
 name = "domus-e2e"
 version = "0.0.0"
 edition = "2024"
+license = "MIT"
 publish = false
 description = "Regenerates the README screenshots against a fake Hue Bridge"
 
