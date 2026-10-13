@@ -89,6 +89,16 @@ pub struct TokenAuth {
 const MAX_REGISTRATIONS_PER_USER: i64 = 20;
 
 #[derive(Debug, PartialEq, Eq)]
+pub enum DeleteUser {
+    Deleted,
+    NotFound,
+    /// The user is the only admin left.
+    LastAdmin,
+    /// The database refused; nothing was changed.
+    Failed,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum RegistrationError {
     TooMany,
     Failed,
@@ -313,40 +323,74 @@ impl Store {
             .unwrap_or(false)
     }
 
+    /// Sets the user's role. Demoting the last admin is refused (false) in the same statement that
+    /// would do it, so two admins demoting each other at once cannot leave none.
     pub async fn set_admin(&self, id: i64, is_admin: bool) -> bool {
-        sqlx::query("UPDATE users SET is_admin = ?2 WHERE id = ?1")
-            .bind(id)
-            .bind(is_admin)
-            .execute(&self.pool)
-            .await
-            .map(|r| r.rows_affected() > 0)
-            .unwrap_or(false)
+        sqlx::query(
+            "UPDATE users SET is_admin = ?2 WHERE id = ?1
+               AND (?2 = 1 OR is_admin = 0 OR (SELECT COUNT(*) FROM users WHERE is_admin = 1) > 1)",
+        )
+        .bind(id)
+        .bind(is_admin)
+        .execute(&self.pool)
+        .await
+        .map(|r| r.rows_affected() > 0)
+        .unwrap_or(false)
     }
 
-    /// Removes the user together with their sessions and tokens.
+    /// Removes the user together with their sessions and tokens (tests only: the server refuses to
+    /// remove the last admin, see `delete_user_keeping_an_admin`).
+    #[cfg(test)]
     pub async fn delete_user(&self, id: i64) -> bool {
-        let _ = sqlx::query("DELETE FROM sessions WHERE user_id = ?1")
-            .bind(id)
-            .execute(&self.pool)
-            .await;
-        let _ = sqlx::query("DELETE FROM tokens WHERE user_id = ?1")
-            .bind(id)
-            .execute(&self.pool)
-            .await;
-        let _ = sqlx::query("DELETE FROM refresh_tokens WHERE user_id = ?1")
-            .bind(id)
-            .execute(&self.pool)
-            .await;
-        let _ = sqlx::query("DELETE FROM registrations WHERE user_id = ?1")
-            .bind(id)
-            .execute(&self.pool)
-            .await;
-        sqlx::query("DELETE FROM users WHERE id = ?1")
-            .bind(id)
-            .execute(&self.pool)
+        matches!(self.remove_user(id, false).await, Ok(DeleteUser::Deleted))
+    }
+
+    /// Removes the user with their sessions, tokens and registered apps, unless they are the last
+    /// admin. The check and the delete are one statement, so two admins deleting each other at once
+    /// cannot leave none; the clean-up is in the same transaction, so a token never outlives its
+    /// owner (it would lose the owner's group limit).
+    pub async fn delete_user_keeping_an_admin(&self, id: i64) -> DeleteUser {
+        self.remove_user(id, true)
             .await
-            .map(|r| r.rows_affected() > 0)
-            .unwrap_or(false)
+            .unwrap_or(DeleteUser::Failed)
+    }
+
+    async fn remove_user(&self, id: i64, keep_an_admin: bool) -> Result<DeleteUser, sqlx::Error> {
+        let delete = if keep_an_admin {
+            "DELETE FROM users WHERE id = ?1
+               AND (is_admin = 0 OR (SELECT COUNT(*) FROM users WHERE is_admin = 1) > 1)"
+        } else {
+            "DELETE FROM users WHERE id = ?1"
+        };
+        let mut tx = self.pool.begin().await?;
+        let gone = sqlx::query(delete)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            > 0;
+        if !gone {
+            let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM users WHERE id = ?1")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_some();
+            return Ok(if exists {
+                DeleteUser::LastAdmin
+            } else {
+                DeleteUser::NotFound
+            });
+        }
+        for sql in [
+            "DELETE FROM sessions WHERE user_id = ?1",
+            "DELETE FROM tokens WHERE user_id = ?1",
+            "DELETE FROM refresh_tokens WHERE user_id = ?1",
+            "DELETE FROM registrations WHERE user_id = ?1",
+        ] {
+            sqlx::query(sql).bind(id).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(DeleteUser::Deleted)
     }
 
     // sessions
@@ -1338,6 +1382,44 @@ mod tests {
         assert_eq!(parse_scope(None), None);
         assert_eq!(parse_scope(Some("[\"a\"]".into())), Some(vec!["a".into()]));
         assert_eq!(parse_scope(Some("not json".into())), Some(Vec::new()));
+    }
+
+    #[tokio::test]
+    async fn the_last_admin_survives_even_when_admins_act_at_once() {
+        let s = Store::open_memory().await.unwrap();
+        let a = s.create_user("a", "h", true).await.unwrap();
+        let b = s.create_user("b", "h", true).await.unwrap();
+
+        // two admins demoting each other: exactly one demotion goes through
+        let (x, y) = tokio::join!(s.set_admin(a, false), s.set_admin(b, false));
+        assert!(x != y, "exactly one demotion may succeed");
+        assert_eq!(s.admin_count().await, 1);
+        let (last, demoted) = if x { (b, a) } else { (a, b) };
+        assert!(!s.set_admin(last, false).await);
+        assert_eq!(s.admin_count().await, 1);
+        // demoting someone who is not an admin is harmless
+        assert!(s.set_admin(demoted, false).await);
+
+        // the same for two admins deleting each other
+        assert!(s.set_admin(demoted, true).await);
+        let (x, y) = tokio::join!(
+            s.delete_user_keeping_an_admin(a),
+            s.delete_user_keeping_an_admin(b)
+        );
+        let outcomes = [x, y];
+        assert!(outcomes.contains(&DeleteUser::Deleted));
+        assert!(outcomes.contains(&DeleteUser::LastAdmin));
+        assert_eq!(s.admin_count().await, 1);
+        assert_eq!(
+            s.delete_user_keeping_an_admin(999).await,
+            DeleteUser::NotFound
+        );
+
+        // regular users are always deletable, and their data goes with them
+        let c = s.create_user("c", "h", false).await.unwrap();
+        s.create_session("sc", c, "").await;
+        assert_eq!(s.delete_user_keeping_an_admin(c).await, DeleteUser::Deleted);
+        assert!(s.session_user("sc").await.is_none());
     }
 
     #[tokio::test]
