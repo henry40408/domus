@@ -23,4 +23,4 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 [dev-dependencies]
 http-body-util = "0.1.5"
 tower = "0.5.3"
-tokio-tungstenite = "0.29.0"
+tokio-tungstenite = "0.30.0"
