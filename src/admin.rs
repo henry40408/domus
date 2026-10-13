@@ -18,7 +18,7 @@ use std::time::Duration;
 use crate::api::{AppState, light_action};
 use crate::core::{CallError, group_light_id};
 use crate::hue::{PairError, bridge_base, pair};
-use crate::store::{APP_SESSION_TTL_SECS, HueBridge, SESSION_TTL_SECS, User};
+use crate::store::{APP_SESSION_TTL_SECS, DeleteUser, HueBridge, SESSION_TTL_SECS, User};
 use crate::throttle;
 use crate::util::{
     constant_time_eq, hash_password, now_secs, random_hex, sha256_hex, verify_dummy,
@@ -581,9 +581,6 @@ async fn user_update(
     {
         return message(StatusCode::BAD_REQUEST, PASSWORD_HINT);
     }
-    if body.is_admin == Some(false) && target.is_admin && store.admin_count().await <= 1 {
-        return message(StatusCode::BAD_REQUEST, "Keep at least one admin.");
-    }
     let scope = match body.scope {
         None => None,
         Some(None) => Some(None),
@@ -597,17 +594,26 @@ async fn user_update(
             }
         }
     };
-    if let Some(scope) = &scope {
-        store.set_user_scope(id, scope.as_deref()).await;
-        tracing::info!(target: "audit", by = %me.username, user = %target.username, scope = ?scope, "group limit changed");
-    }
+    // The role goes first: demoting the last admin is refused atomically, and nothing else of this
+    // request may have been applied by then.
     if let Some(admin) = body.is_admin {
-        store.set_admin(id, admin).await;
+        if !store.set_admin(id, admin).await {
+            // Deleted by someone else meanwhile, or the last admin.
+            return if store.user_by_id(id).await.is_none() {
+                message(StatusCode::NOT_FOUND, "No such user.")
+            } else {
+                message(StatusCode::BAD_REQUEST, "Keep at least one admin.")
+            };
+        }
         if admin {
             // Admins are never limited.
             store.set_user_scope(id, None).await;
         }
         tracing::info!(target: "audit", by = %me.username, user = %target.username, admin, "role changed");
+    }
+    if let Some(scope) = &scope {
+        store.set_user_scope(id, scope.as_deref()).await;
+        tracing::info!(target: "audit", by = %me.username, user = %target.username, scope = ?scope, "group limit changed");
     }
     if let Some(pw) = &body.password {
         store.set_password(id, &hash_password(pw)).await;
@@ -626,11 +632,17 @@ async fn user_delete(
     if id == me.id {
         return message(StatusCode::BAD_REQUEST, "You cannot delete yourself.");
     }
-    if app.core.store().delete_user(id).await {
-        tracing::info!(target: "audit", by = %me.username, id, "user deleted");
-        Json(json!({"ok": true})).into_response()
-    } else {
-        message(StatusCode::NOT_FOUND, "No such user.")
+    match app.core.store().delete_user_keeping_an_admin(id).await {
+        DeleteUser::Deleted => {
+            tracing::info!(target: "audit", by = %me.username, id, "user deleted");
+            Json(json!({"ok": true})).into_response()
+        }
+        DeleteUser::LastAdmin => message(StatusCode::BAD_REQUEST, "Keep at least one admin."),
+        DeleteUser::NotFound => message(StatusCode::NOT_FOUND, "No such user."),
+        DeleteUser::Failed => message(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not delete the user.",
+        ),
     }
 }
 
@@ -1693,6 +1705,27 @@ mod tests {
                 .await
                 .0,
             StatusCode::BAD_REQUEST
+        );
+        // a refused demotion applies nothing else from the same request
+        assert_eq!(
+            put(
+                &admin,
+                "/api/domus/users/1",
+                r#"{"is_admin":false,"password":"changed changed 12"}"#
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        let old = r#"{"username":"admin","password":"correct horse"}"#;
+        assert_eq!(
+            call(&r, "POST", "/api/domus/login", None, old).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(&r, "GET", "/api/domus/tokens", Some(&admin), "")
+                .await
+                .0,
+            StatusCode::OK
         );
 
         // an admin reset signs the user out and the new password works
