@@ -22,6 +22,18 @@ updates:
         patterns:
           - "*"
 
+  # `e2e/` is a separate workspace; the root cargo entry doesn't reach its lockfile.
+  - package-ecosystem: "cargo"
+    directory: "/e2e"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      cargo:
+        patterns:
+          - "*"
+
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
