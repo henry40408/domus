@@ -53,7 +53,7 @@ function el(tag, props, ...children) {
   return e;
 }
 
-async function api(method, path, body) {
+async function api(method, path, body, afterReauth) {
   const res = await fetch("/api/domus" + path, {
     method,
     headers: { "content-type": "application/json" },
@@ -61,6 +61,14 @@ async function api(method, path, body) {
   });
   let data = null;
   try { data = await res.json(); } catch (_) { /* empty body */ }
+  // A session the Companion app started needs the password again for sensitive actions.
+  if (res.status === 403 && data && data.reauth && !afterReauth) {
+    const password = prompt("Enter your password to continue:");
+    if (password) {
+      await api("POST", "/session/reauth", { password });
+      return api(method, path, body, true);
+    }
+  }
   if (!res.ok) throw new Error((data && data.message) || "Request failed (" + res.status + ")");
   return data;
 }

@@ -18,7 +18,7 @@ use std::time::Duration;
 use crate::api::{AppState, light_action};
 use crate::core::{CallError, group_light_id};
 use crate::hue::{PairError, bridge_base, pair};
-use crate::store::{HueBridge, SESSION_TTL_SECS, User};
+use crate::store::{APP_SESSION_TTL_SECS, HueBridge, SESSION_TTL_SECS, User};
 use crate::throttle;
 use crate::util::{
     constant_time_eq, hash_password, now_secs, random_hex, sha256_hex, verify_dummy,
@@ -79,10 +79,14 @@ async fn start_session(app: &AppState, headers: &HeaderMap, user_id: i64) -> Res
         .store()
         .create_session(&sha256_hex(&token), user_id, user_agent(headers))
         .await;
+    session_response(headers, &token, SESSION_TTL_SECS)
+}
+
+fn session_response(headers: &HeaderMap, token: &str, ttl: i64) -> Response {
     (
         [(
             header::SET_COOKIE,
-            cookie_header(&token, SESSION_TTL_SECS, secure_request(headers)),
+            cookie_header(token, ttl, secure_request(headers)),
         )],
         Json(json!({"ok": true})),
     )
@@ -96,6 +100,25 @@ async fn require_session(State(app): State<AppState>, mut req: Request, next: Ne
             next.run(req).await
         }
         None => message(StatusCode::UNAUTHORIZED, "Login required."),
+    }
+}
+
+/// Guards sensitive actions (new API tokens, users, Hue pairing). A session that was started from
+/// an app's token, not a password, must have had the password re-entered in the last few minutes.
+/// Runs after `require_session`.
+async fn require_recent_auth(State(app): State<AppState>, req: Request, next: Next) -> Response {
+    let needs = match session_token(req.headers()) {
+        Some(t) => app.core.store().session_needs_reauth(&sha256_hex(&t)).await,
+        None => false,
+    };
+    if needs {
+        (
+            StatusCode::FORBIDDEN,
+            Json(json!({"message": "Enter your password to continue.", "reauth": true})),
+        )
+            .into_response()
+    } else {
+        next.run(req).await
     }
 }
 
@@ -266,6 +289,81 @@ async fn login(
             message(StatusCode::UNAUTHORIZED, "Wrong username or password.")
         }
     }
+}
+
+/// Trades the access token of an app login (sent as a Bearer header, never in a body or URL) for
+/// an admin-page session, so the Companion WebView does not ask for the password again. Only
+/// tokens minted from a refresh token qualify: API tokens may be read-only or narrowly scoped, and
+/// a session is neither. The session ends together with the app login.
+async fn session_from_token(State(app): State<AppState>, headers: HeaderMap) -> Response {
+    let store = app.core.store();
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split_once(' '))
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+        .map(|(_, t)| t.trim());
+    let auth = match token {
+        Some(t) => store.token_view(&sha256_hex(t)).await,
+        None => None,
+    };
+    let Some(auth) = auth else {
+        return message(StatusCode::UNAUTHORIZED, "Invalid token.");
+    };
+    let (Some(refresh_id), Some(user_id)) = (auth.refresh_id, auth.user_id) else {
+        tracing::warn!(target: "audit", "app session refused: not an app login token");
+        return message(StatusCode::UNAUTHORIZED, "Invalid token.");
+    };
+    let Some(user) = store.user_by_id(user_id).await else {
+        return message(StatusCode::UNAUTHORIZED, "Invalid token.");
+    };
+    if !store.refresh_exists(refresh_id).await {
+        return message(StatusCode::UNAUTHORIZED, "Invalid token.");
+    }
+    let session = random_hex(32);
+    let agent = format!("HA app · {}", user_agent(&headers));
+    if !store
+        .create_app_session(&sha256_hex(&session), user_id, refresh_id, &agent)
+        .await
+    {
+        return message(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not start a session.",
+        );
+    }
+    tracing::info!(target: "audit", user = %user.username, refresh_id, "app session started");
+    session_response(&headers, &session, APP_SESSION_TTL_SECS)
+}
+
+#[derive(Deserialize)]
+struct Reauth {
+    password: String,
+}
+
+/// Re-enters the password to unlock sensitive actions in the current session for a few minutes.
+async fn reauth(
+    State(app): State<AppState>,
+    Extension(me): Extension<User>,
+    headers: HeaderMap,
+    Json(body): Json<Reauth>,
+) -> Response {
+    let store = app.core.store();
+    let key = throttle::key("password", &me.username);
+    if let Some(wait) = app.guard.check(&key, now_secs()) {
+        return too_many(wait);
+    }
+    match store.user_hash(me.id).await {
+        Some(h) if verify_password(&body.password, &h) => app.guard.succeed(&key),
+        _ => {
+            app.guard.fail(&key, now_secs());
+            tracing::warn!(target: "audit", user = %me.username, "reauth refused: wrong password");
+            return message(StatusCode::UNAUTHORIZED, "Password is wrong.");
+        }
+    }
+    if let Some(t) = session_token(&headers) {
+        store.session_elevate(&sha256_hex(&t)).await;
+    }
+    Json(json!({"ok": true})).into_response()
 }
 
 async fn logout(State(app): State<AppState>, headers: HeaderMap) -> Response {
@@ -975,15 +1073,31 @@ fn mime_for(path: &str) -> &'static str {
 pub fn router(app: AppState) -> Router {
     let admin = Router::new()
         .route("/hue", get(hue_status))
-        .route("/hue/pair", post(hue_pair))
-        .route("/groups/{name}", put(group_put))
-        .route("/groups/{name}", delete(group_delete))
-        .route("/users", get(users).post(user_create))
-        .route("/users/{id}", put(user_update).delete(user_delete))
+        .route("/users", get(users))
         .layer(middleware::from_fn(require_admin));
+    // Sensitive actions an app-started session may only do right after re-entering the password.
+    let sensitive_admin = Router::new()
+        .route("/hue/pair", post(hue_pair))
+        .route("/users", post(user_create))
+        .route("/users/{id}", put(user_update).delete(user_delete))
+        // Group membership decides what scoped users and tokens may control.
+        .route("/groups/{name}", put(group_put).delete(group_delete))
+        .layer(middleware::from_fn_with_state(
+            app.clone(),
+            require_recent_auth,
+        ))
+        .layer(middleware::from_fn(require_admin));
+    let sensitive =
+        Router::new()
+            .route("/tokens", post(token_create))
+            .layer(middleware::from_fn_with_state(
+                app.clone(),
+                require_recent_auth,
+            ));
     let protected = Router::new()
         .route("/logout", post(logout))
         .route("/password", post(password_change))
+        .route("/session/reauth", post(reauth))
         .route("/events", get(events))
         .route("/sessions", get(sessions))
         .route("/sessions/revoke-others", post(sessions_revoke_others))
@@ -992,16 +1106,19 @@ pub fn router(app: AppState) -> Router {
         .route("/rooms", get(rooms))
         .route("/devices/test", post(device_test))
         .route("/groups", get(groups))
-        .route("/tokens", get(tokens).post(token_create))
+        .route("/tokens", get(tokens))
         .route("/tokens/{id}", delete(token_revoke))
         .route("/apps", get(apps))
         .route("/apps/{id}", delete(app_revoke))
         .merge(admin)
+        .merge(sensitive_admin)
+        .merge(sensitive)
         .layer(middleware::from_fn_with_state(app.clone(), require_session));
     Router::new()
         .route("/status", get(status))
         .route("/setup", post(setup))
         .route("/login", post(login))
+        .route("/session/from-token", post(session_from_token))
         .merge(protected)
         .layer(middleware::from_fn(same_origin))
         .with_state(app)
