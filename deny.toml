@@ -10,7 +10,15 @@ version = 2
 # Deny crates with a known security advisory (RUSTSEC) or that have been yanked.
 # `ignore` holds advisory IDs we've reviewed and consciously accept.
 yanked = "deny"
-ignore = []
+ignore = [
+    # Temporary: all four are fixed in rustls 0.23.46, released 2026-10-14 and
+    # still inside the 7-day dependency cooldown until 2026-10-21. Remove these
+    # entries and run `cargo update -p rustls` once the cooldown ends.
+    "RUSTSEC-2026-0346",
+    "RUSTSEC-2026-0347",
+    "RUSTSEC-2026-0348",
+    "RUSTSEC-2026-0349",
+]
 
 [licenses]
 version = 2
