@@ -24,6 +24,13 @@ RUN set -eux; \
     ln -s "/opt/zig-${zarch}-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig
 
 WORKDIR /app
+
+# Install the pinned toolchain in a layer keyed on rust-toolchain.toml alone, so
+# editing source does not re-download the compiler. Any rustup proxy invocation
+# triggers the install.
+COPY rust-toolchain.toml .
+RUN cargo --version
+
 COPY . .
 
 # .git is excluded by .dockerignore, so build.rs reads the version from the GIT_VERSION build
