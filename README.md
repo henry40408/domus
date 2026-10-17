@@ -125,6 +125,9 @@ The official Home Assistant apps (iOS, Android) can connect to domus: OAuth logi
 
 Notes:
 
+- The iOS Entities widget works: its picker lists lights, scenes and groups (`GET /api/states`,
+  `config/entity_registry/list_for_display`), and its tiles toggle lights or activate scenes
+  (`call_service` over the WebSocket; `light.toggle` is supported). Other domains are not available.
 - domus reports a faked Home Assistant version (`2025.12.0`) so the apps use their older bridge and do not
   wait for the `frontend/loaded` handshake (2026.8.0+) or use the V2 bridge (2026.4.2+). Do not bump it.
 - The app's main screen is domus's own admin page. It signs in with the app's own login (the page asks
