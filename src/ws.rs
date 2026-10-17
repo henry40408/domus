@@ -925,6 +925,41 @@ mod tests {
         }
     }
 
+    struct Failing;
+    impl crate::core::Integration for Failing {
+        fn owns(&self, id: &str) -> bool {
+            id.starts_with("light.")
+        }
+        fn call_light<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a crate::core::LightAction,
+        ) -> crate::core::BoxFut<'a, Result<(), String>> {
+            Box::pin(async { Err("boom".into()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn call_service_reports_failures_and_refuses_read_only_tokens() {
+        let (app, addr) = serve_app().await;
+        app.core.set_integration("fake", Arc::new(Failing));
+        app.core.set_state("light.a", "off", Map::new());
+        let user = 1;
+        app.core
+            .store()
+            .create_token(user, "ro", &sha256_hex("ro-token"), None, true, None)
+            .await
+            .unwrap();
+        let call = json!({"id": 1, "type": "call_service", "domain": "light",
+                          "service": "turn_on", "target": {"entity_id": "light.a"}});
+        let mut c = authed(addr, TOKEN).await;
+        tell(&mut c, call.clone()).await;
+        assert_eq!(recv(&mut c).await["error"]["code"], "home_assistant_error");
+        let mut c = authed(addr, "ro-token").await;
+        tell(&mut c, call).await;
+        assert_eq!(recv(&mut c).await["error"]["code"], "unauthorized");
+    }
+
     #[tokio::test]
     async fn a_lagging_connection_is_brought_up_to_date() {
         let (app, addr) = serve_app().await;

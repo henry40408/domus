@@ -476,6 +476,9 @@ mod tests {
             a: &'a LightAction,
         ) -> BoxFut<'a, Result<(), String>> {
             Box::pin(async move {
+                if id.ends_with("bad") {
+                    return Err("boom".into());
+                }
                 self.0.lock().unwrap().push((id.to_string(), a.clone()));
                 Ok(())
             })
@@ -640,6 +643,29 @@ mod tests {
         assert_eq!(s, StatusCode::OK);
         assert_eq!(fake.0.lock().unwrap().len(), 2);
         assert_eq!(v.as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn light_service_errors_map_to_statuses() {
+        let (r, app, _) = setup().await;
+        app.core.set_state("light.hue_bad", "off", Map::new());
+        let uri = "/api/services/light/turn_on";
+        let (s, _) = call(
+            &r,
+            "POST",
+            uri,
+            Some(TOKEN),
+            r#"{"entity_id":"light.hue_bad"}"#,
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_GATEWAY);
+        let (s, _) = call(&r, "POST", uri, Some(TOKEN), "{not json").await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let (s, _) = call(&r, "POST", uri, Some(TOKEN), r#"{"transition":-1}"#).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let toggle = "/api/services/light/toggle";
+        let (s, _) = call(&r, "POST", toggle, Some(TOKEN), r#"{"transition":-1}"#).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
