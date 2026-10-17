@@ -8,6 +8,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::get;
 use serde_json::{Map, Value, json};
@@ -64,6 +65,7 @@ impl Subscription {
 struct Session {
     app: AppState,
     scope: Scope,
+    read_only: bool,
     user: Option<User>,
     subs: Vec<Subscription>,
     /// Ids of `subscribe_events`, acknowledged but never fed.
@@ -166,6 +168,7 @@ async fn run(app: &AppState, ws: &mut WebSocket) {
     let mut session = Session {
         app: app.clone(),
         scope: auth.scope,
+        read_only: auth.read_only,
         user,
         subs: Vec::new(),
         events: HashSet::new(),
@@ -236,23 +239,7 @@ fn compressed(s: &EntityState) -> Value {
 impl Session {
     /// Every state the caller may see, synthesised groups and group lights included.
     async fn visible_states(&self, only: Option<&HashSet<String>>) -> Vec<EntityState> {
-        let core = &self.app.core;
-        let mut all = core.all_states();
-        all.extend(core.group_lights().await);
-        for name in core.store().group_names().await {
-            all.extend(core.group_state(&name).await);
-        }
-        let mut out = Vec::new();
-        for s in all {
-            if only.is_some_and(|o| !o.contains(&s.entity_id)) {
-                continue;
-            }
-            if core.allowed(&self.scope, &s.entity_id).await {
-                out.push(s);
-            }
-        }
-        out.sort_by(|a, b| a.entity_id.cmp(&b.entity_id));
-        out
+        crate::api::visible_states(&self.app, &self.scope, only).await
     }
 
     /// Brings one subscription up to date: states it lacks or has stale are added (replacing
@@ -446,10 +433,63 @@ impl Session {
                     return self.sync(ws, index).await;
                 }
             }
+            "config/entity_registry/list_for_display" => {
+                let entities: Vec<Value> = self
+                    .visible_states(None)
+                    .await
+                    .iter()
+                    .map(|s| {
+                        let mut e = json!({"ei": s.entity_id});
+                        if let Some(name) = s.attributes.get("friendly_name") {
+                            e["en"] = name.clone();
+                        }
+                        e
+                    })
+                    .collect();
+                result(id, json!({"entity_categories": {}, "entities": entities}))
+            }
+            "call_service" => self.call_service(id, &msg).await,
             k if EMPTY_LISTS.contains(&k) => result(id, json!([])),
             _ => failure(Some(id), "unknown_command", "Unknown command."),
         };
         send(ws, reply).await
+    }
+
+    /// `call_service` for the domains domus has: lights and scenes.
+    async fn call_service(&self, id: u64, msg: &Map<String, Value>) -> Value {
+        if self.read_only {
+            return failure(Some(id), "unauthorized", "This token is read-only.");
+        }
+        let mut body = match msg.get("service_data") {
+            Some(Value::Object(o)) => o.clone(),
+            _ => Map::new(),
+        };
+        if let Some(target) = msg.get("target") {
+            body.insert("target".into(), target.clone());
+        }
+        let body = Value::Object(body);
+        let domain = msg
+            .get("domain")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let service = msg
+            .get("service")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let outcome = match domain {
+            "light" => crate::api::run_light(&self.app, &self.scope, service, &body).await,
+            "scene" => crate::api::run_scene(&self.app, &self.scope, service, &body).await,
+            _ => Err((StatusCode::NOT_FOUND, String::new())),
+        };
+        match outcome {
+            Ok(_) => result(
+                id,
+                json!({"context": {"id": "", "parent_id": null, "user_id": null}, "response": null}),
+            ),
+            Err((StatusCode::NOT_FOUND, _)) => failure(Some(id), "not_found", "Service not found."),
+            Err((StatusCode::BAD_REQUEST, m)) => failure(Some(id), "invalid_format", &m),
+            Err((_, m)) => failure(Some(id), "home_assistant_error", &m),
+        }
     }
 
     fn current_user(&self) -> Value {
@@ -828,6 +868,96 @@ mod tests {
         )
         .await;
         assert_eq!(recv(&mut c).await["success"], true);
+    }
+
+    #[tokio::test]
+    async fn entity_registry_for_display_lists_visible_entities() {
+        let (app, addr) = serve_app().await;
+        let mut attrs = Map::new();
+        attrs.insert("friendly_name".into(), json!("Desk"));
+        app.core.set_state("light.hue_a", "on", attrs);
+        let mut c = authed(addr, TOKEN).await;
+        tell(
+            &mut c,
+            json!({"id": 1, "type": "config/entity_registry/list_for_display"}),
+        )
+        .await;
+        let r = recv(&mut c).await;
+        assert_eq!(r["result"]["entity_categories"], json!({}));
+        assert_eq!(
+            r["result"]["entities"],
+            json!([{"ei": "light.hue_a", "en": "Desk"}])
+        );
+    }
+
+    #[tokio::test]
+    async fn call_service_runs_lights_and_rejects_the_rest() {
+        let (app, addr) = serve_app().await;
+        app.core.set_state("light.hue_a", "on", Map::new());
+        let mut c = authed(addr, TOKEN).await;
+        tell(
+            &mut c,
+            json!({"id": 1, "type": "call_service", "domain": "light", "service": "toggle",
+                   "target": {"entity_id": "light.hue_a"}}),
+        )
+        .await;
+        let r = recv(&mut c).await;
+        assert_eq!(
+            (r["id"].clone(), r["success"].clone()),
+            (json!(1), json!(true))
+        );
+        for (domain, service, code) in [
+            ("switch", "toggle", "not_found"),
+            ("light", "nope", "not_found"),
+            ("light", "turn_on", "invalid_format"),
+        ] {
+            let mut msg = json!({"id": 2, "type": "call_service", "domain": domain,
+                                 "service": service, "service_data": {"entity_id": 5}});
+            if code != "invalid_format" {
+                msg["service_data"] = json!({});
+            }
+            tell(&mut c, msg).await;
+            let r = recv(&mut c).await;
+            assert_eq!(r["error"]["code"], code, "{domain}.{service}");
+            tell(&mut c, json!({"id": 3, "type": "ping"})).await;
+            recv(&mut c).await;
+            c = authed(addr, TOKEN).await;
+        }
+    }
+
+    struct Failing;
+    impl crate::core::Integration for Failing {
+        fn owns(&self, id: &str) -> bool {
+            id.starts_with("light.")
+        }
+        fn call_light<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a crate::core::LightAction,
+        ) -> crate::core::BoxFut<'a, Result<(), String>> {
+            Box::pin(async { Err("boom".into()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn call_service_reports_failures_and_refuses_read_only_tokens() {
+        let (app, addr) = serve_app().await;
+        app.core.set_integration("fake", Arc::new(Failing));
+        app.core.set_state("light.a", "off", Map::new());
+        let user = 1;
+        app.core
+            .store()
+            .create_token(user, "ro", &sha256_hex("ro-token"), None, true, None)
+            .await
+            .unwrap();
+        let call = json!({"id": 1, "type": "call_service", "domain": "light",
+                          "service": "turn_on", "target": {"entity_id": "light.a"}});
+        let mut c = authed(addr, TOKEN).await;
+        tell(&mut c, call.clone()).await;
+        assert_eq!(recv(&mut c).await["error"]["code"], "home_assistant_error");
+        let mut c = authed(addr, "ro-token").await;
+        tell(&mut c, call).await;
+        assert_eq!(recv(&mut c).await["error"]["code"], "unauthorized");
     }
 
     #[tokio::test]

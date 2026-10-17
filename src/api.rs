@@ -9,11 +9,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use crate::core::{CallError, Core, LightAction, TurnOn};
+use crate::core::{CallError, Core, LightAction, State as EntityState, TurnOn};
 use crate::hue::HueManager;
-use crate::store::TokenAuth;
+use crate::store::{Scope, TokenAuth};
 use crate::throttle::LoginGuard;
 use crate::util::sha256_hex;
 
@@ -242,6 +243,41 @@ fn parse_body(body: &Bytes) -> Result<Value, &'static str> {
     serde_json::from_slice(body).map_err(|_| "Invalid JSON.")
 }
 
+/// A failed service call: the HTTP status and message the REST API answers with.
+pub(crate) type ServiceError = (StatusCode, String);
+
+fn bad_request(msg: &str) -> ServiceError {
+    (StatusCode::BAD_REQUEST, msg.to_string())
+}
+
+pub(crate) async fn run_scene(
+    app: &AppState,
+    scope: &Scope,
+    service: &str,
+    body: &Value,
+) -> Result<Vec<EntityState>, ServiceError> {
+    if service != "turn_on" {
+        return Err((StatusCode::NOT_FOUND, "Service not found.".into()));
+    }
+    let ids = requested_entities(body).map_err(bad_request)?;
+    let mut changed = Vec::new();
+    for id in ids.iter().filter(|i| i.starts_with("scene.")) {
+        // Out-of-scope entities are ignored, like unknown ones.
+        if !app.core.allowed(scope, id).await {
+            continue;
+        }
+        match app.core.activate_scene(id).await {
+            Ok(()) => changed.extend(app.core.lookup(id).await),
+            Err(CallError::NoIntegration) => {}
+            Err(CallError::Failed(e)) => {
+                tracing::warn!("scene call for {id} failed: {e}");
+                return Err((StatusCode::BAD_GATEWAY, format!("Call to {id} failed.")));
+            }
+        }
+    }
+    Ok(changed)
+}
+
 async fn scene_service(
     State(app): State<AppState>,
     Extension(auth): Extension<TokenAuth>,
@@ -255,29 +291,14 @@ async fn scene_service(
         Ok(b) => b,
         Err(e) => return message(StatusCode::BAD_REQUEST, e),
     };
-    if service != "turn_on" {
-        return message(StatusCode::NOT_FOUND, "Service not found.");
+    service_reply(run_scene(&app, &auth.scope, &service, &body).await)
+}
+
+fn service_reply(result: Result<Vec<EntityState>, ServiceError>) -> Response {
+    match result {
+        Ok(changed) => Json(changed).into_response(),
+        Err((status, msg)) => message(status, &msg),
     }
-    let ids = match requested_entities(&body) {
-        Ok(ids) => ids,
-        Err(e) => return message(StatusCode::BAD_REQUEST, e),
-    };
-    let mut changed = Vec::new();
-    for id in ids.iter().filter(|i| i.starts_with("scene.")) {
-        // Out-of-scope entities are ignored, like unknown ones.
-        if !app.core.allowed(&auth.scope, id).await {
-            continue;
-        }
-        match app.core.activate_scene(id).await {
-            Ok(()) => changed.extend(app.core.lookup(id).await),
-            Err(CallError::NoIntegration) => {}
-            Err(CallError::Failed(e)) => {
-                tracing::warn!("scene call for {id} failed: {e}");
-                return message(StatusCode::BAD_GATEWAY, &format!("Call to {id} failed."));
-            }
-        }
-    }
-    Json(changed).into_response()
 }
 
 /// `Ok(None)` for a service that does not exist.
@@ -301,6 +322,68 @@ pub(crate) fn light_action(
     })
 }
 
+pub(crate) async fn run_light(
+    app: &AppState,
+    scope: &Scope,
+    service: &str,
+    body: &Value,
+) -> Result<Vec<EntityState>, ServiceError> {
+    let requested = requested_entities(body).map_err(bad_request)?;
+    // (lights, action) pairs. `toggle` decides per requested entity from its own state, so a
+    // group light that is on turns all of its members off.
+    let mut jobs: Vec<(Vec<String>, LightAction)> = Vec::new();
+    if service == "toggle" {
+        let transition_ms = requested_transition(body).map_err(bad_request)?;
+        let mut seen = HashSet::new();
+        for id in &requested {
+            let on = app.core.lookup(id).await.is_some_and(|s| s.state == "on");
+            let action = if on {
+                LightAction::TurnOff { transition_ms }
+            } else {
+                LightAction::TurnOn(TurnOn {
+                    transition_ms,
+                    ..TurnOn::default()
+                })
+            };
+            // Overlapping targets toggle once, like Home Assistant's de-duplicated target set.
+            let mut ids = app.core.expand_entities(std::slice::from_ref(id)).await;
+            ids.retain(|i| seen.insert(i.clone()));
+            jobs.push((ids, action));
+        }
+    } else {
+        let action = match light_action(service, body) {
+            Ok(Some(a)) => a,
+            Ok(None) => return Err((StatusCode::NOT_FOUND, "Service not found.".into())),
+            Err(e) => return Err(bad_request(e)),
+        };
+        jobs.push((app.core.expand_entities(&requested).await, action));
+    }
+
+    let mut changed = Vec::new();
+    for (ids, action) in &jobs {
+        // A group may also hold scenes; those are not lights.
+        for id in ids.iter().filter(|i| !i.starts_with("scene.")) {
+            if !app.core.allowed(scope, id).await {
+                continue;
+            }
+            match app.core.call_light(id, action).await {
+                Ok(()) => {
+                    if let Some(s) = app.core.lookup(id).await {
+                        changed.push(s);
+                    }
+                }
+                // HA ignores unknown entities in service calls.
+                Err(CallError::NoIntegration) => {}
+                Err(CallError::Failed(e)) => {
+                    tracing::warn!("service call for {id} failed: {e}");
+                    return Err((StatusCode::BAD_GATEWAY, format!("Call to {id} failed.")));
+                }
+            }
+        }
+    }
+    Ok(changed)
+}
+
 async fn light_service(
     State(app): State<AppState>,
     Extension(auth): Extension<TokenAuth>,
@@ -314,41 +397,46 @@ async fn light_service(
         Ok(b) => b,
         Err(e) => return message(StatusCode::BAD_REQUEST, e),
     };
-    let action = match light_action(&service, &body) {
-        Ok(Some(a)) => a,
-        Ok(None) => return message(StatusCode::NOT_FOUND, "Service not found."),
-        Err(e) => return message(StatusCode::BAD_REQUEST, e),
-    };
-    let ids = match requested_entities(&body) {
-        Ok(ids) => app.core.expand_entities(&ids).await,
-        Err(e) => return message(StatusCode::BAD_REQUEST, e),
-    };
+    service_reply(run_light(&app, &auth.scope, &service, &body).await)
+}
 
-    let mut changed = Vec::new();
-    // A group may also hold scenes; those are not lights.
-    for id in ids.iter().filter(|i| !i.starts_with("scene.")) {
-        if !app.core.allowed(&auth.scope, id).await {
+/// `GET /api/states`: every state the token may see, like Home Assistant's. The apps list it to
+/// offer entities in their widgets.
+async fn list_states(
+    State(app): State<AppState>,
+    Extension(auth): Extension<TokenAuth>,
+) -> Response {
+    Json(visible_states(&app, &auth.scope, None).await).into_response()
+}
+
+/// Every state `scope` may see, synthesised groups and group lights included, sorted by id.
+pub(crate) async fn visible_states(
+    app: &AppState,
+    scope: &Scope,
+    only: Option<&HashSet<String>>,
+) -> Vec<EntityState> {
+    let core = &app.core;
+    let mut all = core.all_states();
+    all.extend(core.group_lights().await);
+    for name in core.store().group_names().await {
+        all.extend(core.group_state(&name).await);
+    }
+    let mut out = Vec::new();
+    for s in all {
+        if only.is_some_and(|o| !o.contains(&s.entity_id)) {
             continue;
         }
-        match app.core.call_light(id, &action).await {
-            Ok(()) => {
-                if let Some(s) = app.core.lookup(id).await {
-                    changed.push(s);
-                }
-            }
-            // HA ignores unknown entities in service calls.
-            Err(CallError::NoIntegration) => {}
-            Err(CallError::Failed(e)) => {
-                tracing::warn!("service call for {id} failed: {e}");
-                return message(StatusCode::BAD_GATEWAY, &format!("Call to {id} failed."));
-            }
+        if core.allowed(scope, &s.entity_id).await {
+            out.push(s);
         }
     }
-    Json(changed).into_response()
+    out.sort_by(|a, b| a.entity_id.cmp(&b.entity_id));
+    out
 }
 
 pub fn router(app: AppState) -> Router {
     Router::new()
+        .route("/api/states", get(list_states))
         .route("/api/states/{entity_id}", get(get_state))
         .route("/api/services/light/{service}", post(light_service))
         .route("/api/services/scene/{service}", post(scene_service))
@@ -388,6 +476,9 @@ mod tests {
             a: &'a LightAction,
         ) -> BoxFut<'a, Result<(), String>> {
             Box::pin(async move {
+                if id.ends_with("bad") {
+                    return Err("boom".into());
+                }
                 self.0.lock().unwrap().push((id.to_string(), a.clone()));
                 Ok(())
             })
@@ -471,6 +562,110 @@ mod tests {
         let (s, v) = call(&r, "GET", "/api/states/light.nope", Some(TOKEN), "").await;
         assert_eq!(s, StatusCode::NOT_FOUND);
         assert_eq!(v["message"], "Entity not found.");
+    }
+
+    #[tokio::test]
+    async fn states_list_is_sorted_and_scoped() {
+        let (r, app, _) = setup().await;
+        app.core.set_state("light.hue_c", "off", Map::new());
+        app.core
+            .store()
+            .group_set("Other", &["light.hue_c".into()])
+            .await
+            .unwrap();
+        let (s, v) = call(&r, "GET", "/api/states", Some(TOKEN), "").await;
+        assert_eq!(s, StatusCode::OK);
+        let ids: Vec<&str> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["entity_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "group.Garmin",
+                "group.Other",
+                "light.hue_a",
+                "light.hue_b",
+                "light.hue_c"
+            ]
+        );
+        let scope = ["Garmin".to_string()];
+        app.core
+            .store()
+            .create_token(
+                1,
+                "scoped",
+                &sha256_hex("scoped"),
+                Some(&scope),
+                false,
+                None,
+            )
+            .await;
+        let (_, v) = call(&r, "GET", "/api/states", Some("scoped"), "").await;
+        let ids: Vec<&str> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["entity_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["group.Garmin", "light.hue_a", "light.hue_b"]);
+        assert_eq!(
+            call(&r, "GET", "/api/states", None, "").await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn light_toggle_follows_the_current_state() {
+        let (r, app, fake) = setup().await;
+        app.core.set_state("light.hue_a", "on", Map::new());
+        let body = r#"{"entity_id":["light.hue_a","light.hue_b"]}"#;
+        let (s, _) = call(&r, "POST", "/api/services/light/toggle", Some(TOKEN), body).await;
+        assert_eq!(s, StatusCode::OK);
+        let calls = fake.0.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            [
+                ("light.hue_a".to_string(), LightAction::off()),
+                ("light.hue_b".to_string(), LightAction::on()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn light_toggle_flips_overlapping_targets_once() {
+        let (r, app, fake) = setup().await;
+        app.core.set_state("light.hue_a", "on", Map::new());
+        let body = r#"{"entity_id":["group.Garmin","light.hue_a","light.hue_a"]}"#;
+        let (s, v) = call(&r, "POST", "/api/services/light/toggle", Some(TOKEN), body).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(fake.0.lock().unwrap().len(), 2);
+        assert_eq!(v.as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn light_service_errors_map_to_statuses() {
+        let (r, app, _) = setup().await;
+        app.core.set_state("light.hue_bad", "off", Map::new());
+        let uri = "/api/services/light/turn_on";
+        let (s, _) = call(
+            &r,
+            "POST",
+            uri,
+            Some(TOKEN),
+            r#"{"entity_id":"light.hue_bad"}"#,
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_GATEWAY);
+        let (s, _) = call(&r, "POST", uri, Some(TOKEN), "{not json").await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let (s, _) = call(&r, "POST", uri, Some(TOKEN), r#"{"transition":-1}"#).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let toggle = "/api/services/light/toggle";
+        let (s, _) = call(&r, "POST", toggle, Some(TOKEN), r#"{"transition":-1}"#).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -720,7 +915,7 @@ mod tests {
         );
         // unknown service
         assert_eq!(
-            call(&r, "POST", "/api/services/light/toggle", Some(TOKEN), "{}")
+            call(&r, "POST", "/api/services/light/blink", Some(TOKEN), "{}")
                 .await
                 .0,
             StatusCode::NOT_FOUND
