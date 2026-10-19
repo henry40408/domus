@@ -44,7 +44,7 @@ docker run -d \
 `main` tracks the default branch; releases also get semver tags (`0.1.0`, `0.1`).
 On first start with no users, domus prints a one-time setup code (`docker logs domus`, look for `Setup code:`).
 Open `http://localhost:8123`, enter the code and create the admin account, then continue with [Usage](#usage).
-The code stops working once the admin exists; set `DOMUS_SETUP_CODE` to choose your own.
+The code stops working once the admin exists.
 
 ### Building from Source
 
@@ -64,7 +64,6 @@ Configuration is environment variables only:
 | `DOMUS_DATA_DIR`  | `./data`         | SQLite location (dir mode `0700`, `domus.db` `0600`). The container image sets `/data`. |
 | `DOMUS_LOG`       | `info`           | Log filter (`tracing` env-filter syntax)            |
 | `DOMUS_MDNS`      | on               | Advertise `_home-assistant._tcp` over mDNS so the Companion apps find domus; only when not bound to loopback. `0`/`false`/`off`/`no` disables. |
-| `DOMUS_SETUP_CODE`| random           | Code required to create the first admin (only while no user exists). When unset, a random one is printed at startup. |
 
 Everything else is configured in the admin page at `/`.
 
