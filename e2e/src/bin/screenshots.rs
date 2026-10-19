@@ -17,7 +17,6 @@ use thirtyfour::prelude::*;
 
 const USER: &str = "demo";
 const PASSWORD: &str = "demo-password-123";
-const SETUP_CODE: &str = "demo-setup";
 const GROUP: &str = "Garmin";
 
 /// File stem, route, heading to wait for, viewport width and height.
@@ -33,8 +32,8 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&out)?;
 
     let (bridge, _bridge_task) = fake_hue::spawn().await?;
-    let server = Server::start(SETUP_CODE).await?;
-    seed(&server.base_url, &bridge).await?;
+    let server = Server::start().await?;
+    seed(&server.base_url, &server.setup_code, &bridge).await?;
 
     for theme in ["light", "dark"] {
         capture(&server.base_url, theme, &out).await?;
@@ -48,12 +47,12 @@ async fn main() -> Result<()> {
 }
 
 /// Sets up the admin, pairs the fake bridge and builds the demo group, all over the API.
-async fn seed(base: &str, bridge: &str) -> Result<()> {
+async fn seed(base: &str, setup_code: &str, bridge: &str) -> Result<()> {
     let client = reqwest::Client::builder().cookie_store(true).build()?;
     let api = |path: &str| format!("{base}/api/domus{path}");
     client
         .post(api("/setup"))
-        .json(&json!({"username": USER, "password": PASSWORD, "setup_code": SETUP_CODE}))
+        .json(&json!({"username": USER, "password": PASSWORD, "setup_code": setup_code}))
         .send()
         .await?
         .error_for_status()

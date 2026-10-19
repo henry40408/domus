@@ -2,9 +2,10 @@
 //! `cargo run`, so killing our PID kills the server rather than leaving it
 //! holding the port.
 
+use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStderr, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -13,13 +14,14 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct Server {
     pub base_url: String,
+    pub setup_code: String,
     child: Child,
     // Held for its Drop: removes the database directory.
     _data: tempfile::TempDir,
 }
 
 impl Server {
-    pub async fn start(setup_code: &str) -> Result<Self> {
+    pub async fn start() -> Result<Self> {
         let binary = ensure_binary()?;
         let data = tempfile::Builder::new().prefix("domus-e2e-").tempdir()?;
         let port = TcpListener::bind("127.0.0.1:0")
@@ -27,22 +29,25 @@ impl Server {
             .local_addr()?
             .port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let child = Command::new(&binary)
+        let mut child = Command::new(&binary)
             .current_dir(repo_root())
             .env("DOMUS_BIND", format!("127.0.0.1:{port}"))
             .env("DOMUS_DATA_DIR", data.path())
-            .env("DOMUS_SETUP_CODE", setup_code)
             .env("DOMUS_MDNS", "0")
             .env("DOMUS_LOG", "warn")
             .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("spawning {}", binary.display()))?;
+        let stderr = child.stderr.take().context("capturing domus stderr")?;
         let mut server = Self {
             base_url,
+            setup_code: String::new(),
             child,
             _data: data,
         };
+        // After `server` exists, an early error drops it and kills the child.
+        server.setup_code = read_setup_code(stderr)?;
         server.wait_until_healthy().await?;
         Ok(server)
     }
@@ -71,6 +76,23 @@ impl Drop for Server {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// The server prints a random setup code on stderr at startup. Reads up to that line, then
+/// keeps forwarding the rest so the server never blocks on a full pipe.
+fn read_setup_code(stderr: ChildStderr) -> Result<String> {
+    let mut lines = BufReader::new(stderr).lines();
+    let code = loop {
+        let line = lines
+            .next()
+            .context("domus exited before printing a setup code")??;
+        eprintln!("{line}");
+        if let Some((_, code)) = line.split_once("Setup code: ") {
+            break code.trim().to_string();
+        }
+    };
+    std::thread::spawn(move || lines.map_while(Result::ok).for_each(|l| eprintln!("{l}")));
+    Ok(code)
 }
 
 /// The dev-profile binary. Never built here: the web assets are embedded at
