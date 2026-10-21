@@ -11,13 +11,17 @@ version = 2
 # `ignore` holds advisory IDs we've reviewed and consciously accept.
 yanked = "deny"
 ignore = [
-    # Temporary: all four are fixed in rustls 0.23.46, released 2026-10-14 and
-    # still inside the 7-day dependency cooldown until 2026-10-21. Remove these
-    # entries and run `cargo update -p rustls` once the cooldown ends.
-    "RUSTSEC-2026-0346",
-    "RUSTSEC-2026-0347",
-    "RUSTSEC-2026-0348",
-    "RUSTSEC-2026-0349",
+    # rustls-webpki 0.103.15 and webpki-root-certs 1.0.9 (transitive via
+    # reqwest -> rustls / rustls-platform-verifier) trust distrusted emSign
+    # intermediates. Not exploitable here: the Hue bridge client sets
+    # `danger_accept_invalid_certs(true)` and the health check uses plain HTTP
+    # to localhost. Fixes 0.103.16 (2026-10-20 08:58 UTC) and 1.0.10
+    # (2026-10-19 20:11 UTC) are inside the 168h cooldown until 2026-10-27
+    # 08:58 UTC. Drop both entries and `cargo update -p rustls-webpki
+    # -p webpki-root-certs` once it ends.
+    # Tracked in https://github.com/henry40408/domus/issues/61
+    "RUSTSEC-2026-0382",
+    "RUSTSEC-2026-0383",
 ]
 
 [licenses]
