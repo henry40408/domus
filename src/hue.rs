@@ -756,7 +756,7 @@ impl HueIntegration {
         }
     }
 
-    /// Applies one SSE payload. Returns true when a full resync is needed (light added/removed).
+    /// Applies one SSE payload. Returns true when a full resync is needed (resource added/removed).
     pub fn apply_event_payload(&self, payload: &str) -> bool {
         let Ok(Value::Array(events)) = serde_json::from_str::<Value>(payload) else {
             return false;
@@ -765,56 +765,53 @@ impl HueIntegration {
         let mut inner = self.inner();
         for ev in &events {
             let kind = ev.get("type").and_then(Value::as_str).unwrap_or("");
-            for item in ev
+            let items = ev
                 .get("data")
                 .and_then(Value::as_array)
                 .into_iter()
-                .flatten()
-            {
-                let item_type = item.get("type").and_then(Value::as_str);
-                if matches!(item_type, Some("scene" | SMART_SCENE_TYPE)) {
-                    match kind {
-                        "update" => self.apply_scene_update(&mut inner, item),
-                        "add" | "delete" => resync = true,
-                        _ => {}
-                    }
-                    continue;
-                }
-                if item_type == Some("zigbee_connectivity") {
-                    match kind {
-                        "update" => self.apply_connectivity_update(&mut inner, item),
-                        "add" | "delete" => resync = true,
-                        _ => {}
-                    }
-                    continue;
-                }
-                if matches!(item_type, Some("room" | "zone")) && matches!(kind, "add" | "delete") {
-                    resync = true;
-                    continue;
-                }
-                if item_type != Some("light") {
-                    continue;
-                }
-                match kind {
-                    "update" => {
-                        let Some(id) = item.get("id").and_then(Value::as_str) else {
-                            continue;
-                        };
-                        if let Some(light) = inner.lights.get_mut(id) {
-                            light.apply_update(item);
-                            self.core.set_state(
-                                &light.entity_id(),
-                                light.ha_state(),
-                                light.attributes(),
-                            );
-                        }
-                    }
-                    "add" | "delete" => resync = true,
-                    _ => {}
-                }
+                .flatten();
+            for item in items {
+                resync |= self.apply_item_event(&mut inner, kind, item);
             }
         }
         resync
+    }
+
+    /// Applies one resource of an event. Returns true when it was added or removed.
+    fn apply_item_event(&self, inner: &mut Inner, kind: &str, item: &Value) -> bool {
+        let item_type = item.get("type").and_then(Value::as_str);
+        let tracked = matches!(
+            item_type,
+            Some("scene" | SMART_SCENE_TYPE | "zigbee_connectivity" | "room" | "zone" | "light")
+        );
+        if !tracked {
+            return false;
+        }
+        match kind {
+            "add" | "delete" => true,
+            "update" => {
+                match item_type {
+                    Some("scene" | SMART_SCENE_TYPE) => self.apply_scene_update(inner, item),
+                    Some("zigbee_connectivity") => self.apply_connectivity_update(inner, item),
+                    Some("light") => self.apply_light_update(inner, item),
+                    _ => {}
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn apply_light_update(&self, inner: &mut Inner, item: &Value) {
+        let Some(id) = item.get("id").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(light) = inner.lights.get_mut(id) else {
+            return;
+        };
+        light.apply_update(item);
+        self.core
+            .set_state(&light.entity_id(), light.ha_state(), light.attributes());
     }
 
     /// Streams events until the connection ends or goes idle.
