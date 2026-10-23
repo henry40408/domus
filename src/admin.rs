@@ -1155,13 +1155,7 @@ mod tests {
         (Router::new().nest("/api/domus", router(app.clone())), app)
     }
 
-    async fn call(
-        r: &Router,
-        method: &str,
-        uri: &str,
-        cookie: Option<&str>,
-        body: &str,
-    ) -> (StatusCode, HeaderMap, Value) {
+    fn request(method: &str, uri: &str, cookie: Option<&str>, body: &str) -> HttpRequest<Body> {
         let mut b = HttpRequest::builder()
             .method(method)
             .uri(uri)
@@ -1169,11 +1163,45 @@ mod tests {
         if let Some(c) = cookie {
             b = b.header("cookie", c);
         }
-        let resp = r
-            .clone()
-            .oneshot(b.body(Body::from(body.to_string())).unwrap())
-            .await
-            .unwrap();
+        b.body(Body::from(body.to_string())).unwrap()
+    }
+
+    async fn call_get(
+        r: &Router,
+        uri: &str,
+        cookie: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        send(r, request("GET", uri, cookie, "")).await
+    }
+
+    async fn call_delete(
+        r: &Router,
+        uri: &str,
+        cookie: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        send(r, request("DELETE", uri, cookie, "")).await
+    }
+
+    async fn call_post(
+        r: &Router,
+        uri: &str,
+        cookie: Option<&str>,
+        body: &str,
+    ) -> (StatusCode, HeaderMap, Value) {
+        send(r, request("POST", uri, cookie, body)).await
+    }
+
+    async fn call_put(
+        r: &Router,
+        uri: &str,
+        cookie: Option<&str>,
+        body: &str,
+    ) -> (StatusCode, HeaderMap, Value) {
+        send(r, request("PUT", uri, cookie, body)).await
+    }
+
+    async fn send(r: &Router, req: HttpRequest<Body>) -> (StatusCode, HeaderMap, Value) {
+        let resp = r.clone().oneshot(req).await.unwrap();
         let (parts, body) = resp.into_parts();
         let bytes = body.collect().await.unwrap().to_bytes();
         (
@@ -1197,7 +1225,7 @@ mod tests {
     #[tokio::test]
     async fn setup_login_logout_flow() {
         let (r, _) = setup_app().await;
-        let (_, _, v) = call(&r, "GET", "/api/domus/status", None, "").await;
+        let (_, _, v) = call_get(&r, "/api/domus/status", None).await;
         assert_eq!(
             v,
             json!({"setup_done": false, "setup_code_required": false, "logged_in": false, "user": null, "hue_paired": false, "version": crate::GIT_VERSION})
@@ -1205,9 +1233,8 @@ mod tests {
 
         // bad username
         assert_eq!(
-            call(
+            call_post(
                 &r,
-                "POST",
                 "/api/domus/setup",
                 None,
                 r#"{"username":"a b","password":"correct horse"}"#
@@ -1219,9 +1246,8 @@ mod tests {
 
         // too short
         assert_eq!(
-            call(
+            call_post(
                 &r,
-                "POST",
                 "/api/domus/setup",
                 None,
                 r#"{"username":"admin","password":"short"}"#
@@ -1231,9 +1257,8 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
 
-        let (s, h, _) = call(
+        let (s, h, _) = call_post(
             &r,
-            "POST",
             "/api/domus/setup",
             None,
             r#"{"username":"admin","password":"correct horse"}"#,
@@ -1247,9 +1272,8 @@ mod tests {
 
         // second setup refused
         assert_eq!(
-            call(
+            call_post(
                 &r,
-                "POST",
                 "/api/domus/setup",
                 None,
                 r#"{"username":"second","password":"another one pw12"}"#
@@ -1259,16 +1283,15 @@ mod tests {
             StatusCode::CONFLICT
         );
 
-        let (_, _, v) = call(&r, "GET", "/api/domus/status", Some(&cookie), "").await;
+        let (_, _, v) = call_get(&r, "/api/domus/status", Some(&cookie)).await;
         assert_eq!(v["logged_in"], true);
         assert_eq!(v["user"]["username"], "admin");
         assert_eq!(v["user"]["is_admin"], true);
 
         // wrong / right password
         assert_eq!(
-            call(
+            call_post(
                 &r,
-                "POST",
                 "/api/domus/login",
                 None,
                 r#"{"username":"admin","password":"nope nope"}"#
@@ -1278,9 +1301,8 @@ mod tests {
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(
-            call(
+            call_post(
                 &r,
-                "POST",
                 "/api/domus/login",
                 None,
                 r#"{"username":"admin","password":"correct horse"}"#
@@ -1292,42 +1314,37 @@ mod tests {
 
         // logout invalidates the session
         assert_eq!(
-            call(&r, "POST", "/api/domus/logout", Some(&cookie), "")
+            call_post(&r, "/api/domus/logout", Some(&cookie), "")
                 .await
                 .0,
             StatusCode::OK
         );
         assert_eq!(
-            call(&r, "GET", "/api/domus/tokens", Some(&cookie), "")
-                .await
-                .0,
+            call_get(&r, "/api/domus/tokens", Some(&cookie)).await.0,
             StatusCode::UNAUTHORIZED
         );
     }
 
     /// Sets up the admin, adds a regular user and logs both in; returns their cookies.
     async fn admin_and_member(r: &Router) -> (String, String) {
-        let (_, h, _) = call(
+        let (_, h, _) = call_post(
             r,
-            "POST",
             "/api/domus/setup",
             None,
             r#"{"username":"admin","password":"correct horse"}"#,
         )
         .await;
         let admin = cookie_of(&h);
-        let (s, ..) = call(
+        let (s, ..) = call_post(
             r,
-            "POST",
             "/api/domus/users",
             Some(&admin),
             r#"{"username":"bob","password":"bob's password"}"#,
         )
         .await;
         assert_eq!(s, StatusCode::OK);
-        let (_, h, _) = call(
+        let (_, h, _) = call_post(
             r,
-            "POST",
             "/api/domus/login",
             None,
             r#"{"username":"BOB","password":"bob's password"}"#,
@@ -1363,9 +1380,9 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, _, all) = call(&r, "GET", "/api/domus/apps", Some(&admin), "").await;
+        let (_, _, all) = call_get(&r, "/api/domus/apps", Some(&admin)).await;
         assert_eq!(all.as_array().unwrap().len(), 2);
-        let (_, _, mine) = call(&r, "GET", "/api/domus/apps", Some(&bob), "").await;
+        let (_, _, mine) = call_get(&r, "/api/domus/apps", Some(&bob)).await;
         assert_eq!(mine.as_array().unwrap().len(), 1);
         assert_eq!(mine[0]["device_name"], "bob phone");
 
@@ -1380,15 +1397,15 @@ mod tests {
             .unwrap();
         let uri = |id: i64| format!("/api/domus/apps/{id}");
         assert_eq!(
-            call(&r, "DELETE", &uri(admin_reg), Some(&bob), "").await.0,
+            call_delete(&r, &uri(admin_reg), Some(&bob)).await.0,
             StatusCode::NOT_FOUND
         );
         assert_eq!(
-            call(&r, "DELETE", &uri(9999), Some(&bob), "").await.0,
+            call_delete(&r, &uri(9999), Some(&bob)).await.0,
             StatusCode::NOT_FOUND
         );
         assert_eq!(
-            call(&r, "DELETE", &uri(bob_reg), Some(&bob), "").await.0,
+            call_delete(&r, &uri(bob_reg), Some(&bob)).await.0,
             StatusCode::OK
         );
         assert_eq!(store.list_registrations(None).await.len(), 1);
@@ -1409,7 +1426,7 @@ mod tests {
             ("DELETE", "/api/domus/users/1"),
         ] {
             assert_eq!(
-                call(&r, m, u, Some(&bob), "{}").await.0,
+                send(&r, request(m, u, Some(&bob), "{}")).await.0,
                 StatusCode::FORBIDDEN,
                 "{m} {u}"
             );
@@ -1420,19 +1437,13 @@ mod tests {
             "/api/domus/groups",
             "/api/domus/tokens",
         ] {
-            assert_eq!(
-                call(&r, "GET", u, Some(&bob), "").await.0,
-                StatusCode::OK,
-                "{u}"
-            );
+            assert_eq!(call_get(&r, u, Some(&bob)).await.0, StatusCode::OK, "{u}");
         }
         assert_eq!(
-            call(&r, "GET", "/api/domus/users", Some(&admin), "")
-                .await
-                .0,
+            call_get(&r, "/api/domus/users", Some(&admin)).await.0,
             StatusCode::OK
         );
-        let (_, _, v) = call(&r, "GET", "/api/domus/status", Some(&bob), "").await;
+        let (_, _, v) = call_get(&r, "/api/domus/status", Some(&bob)).await;
         assert_eq!(
             (
                 v["user"]["username"].as_str(),
@@ -1448,7 +1459,7 @@ mod tests {
         let (admin, bob) = admin_and_member(&r).await;
         let post = |c: &str, name: &str| {
             let (r, c, body) = (r.clone(), c.to_string(), format!(r#"{{"name":"{name}"}}"#));
-            async move { call(&r, "POST", "/api/domus/tokens", Some(&c), &body).await }
+            async move { call_post(&r, "/api/domus/tokens", Some(&c), &body).await }
         };
         let (_, _, a) = post(&admin, "admin-watch").await;
         let (_, _, b) = post(&bob, "bob-watch").await;
@@ -1460,9 +1471,9 @@ mod tests {
                 .map(|t| t["name"].as_str().unwrap().into())
                 .collect()
         };
-        let (_, _, mine) = call(&r, "GET", "/api/domus/tokens", Some(&bob), "").await;
+        let (_, _, mine) = call_get(&r, "/api/domus/tokens", Some(&bob)).await;
         assert_eq!(names(&mine), ["bob-watch"]);
-        let (_, _, all) = call(&r, "GET", "/api/domus/tokens", Some(&admin), "").await;
+        let (_, _, all) = call_get(&r, "/api/domus/tokens", Some(&admin)).await;
         assert_eq!(names(&all), ["admin-watch", "bob-watch"]);
         assert_eq!(all[1]["username"], "bob");
 
@@ -1473,7 +1484,7 @@ mod tests {
                 c.to_string(),
                 format!("/api/domus/tokens/{}", v["id"]),
             );
-            async move { call(&r, "DELETE", &uri, Some(&c), "").await.0 }
+            async move { call_delete(&r, &uri, Some(&c)).await.0 }
         };
         assert_eq!(revoke(&bob, &a).await, StatusCode::NOT_FOUND);
         assert_eq!(revoke(&admin, &b).await, StatusCode::OK);
@@ -1566,13 +1577,10 @@ mod tests {
         // the stream outlives rechecks while the session is alive, and ends once it is revoked
         let mut stream = open_events(&r, Some(&bob)).await.into_body();
         tokio::time::sleep(EVENTS_RECHECK * 3).await;
-        let (_, _, list) = call(&r, "GET", "/api/domus/sessions", Some(&bob), "").await;
+        let (_, _, list) = call_get(&r, "/api/domus/sessions", Some(&bob)).await;
         let id = list[0]["id"].as_i64().unwrap();
         let uri = format!("/api/domus/sessions/{id}");
-        assert_eq!(
-            call(&r, "DELETE", &uri, Some(&bob), "").await.0,
-            StatusCode::OK
-        );
+        assert_eq!(call_delete(&r, &uri, Some(&bob)).await.0, StatusCode::OK);
         let end = tokio::time::timeout(Duration::from_secs(2), async {
             while let Some(frame) = stream.frame().await {
                 frame.unwrap();
@@ -1603,30 +1611,28 @@ mod tests {
         let (r, _) = setup_app().await;
         let (admin, bob) = admin_and_member(&r).await;
         let login = r#"{"username":"bob","password":"bob's password"}"#;
-        let (_, h, _) = call(&r, "POST", "/api/domus/login", None, login).await;
+        let (_, h, _) = call_post(&r, "/api/domus/login", None, login).await;
         let bob2 = cookie_of(&h);
 
-        let (st, _, list) = call(&r, "GET", "/api/domus/sessions", Some(&bob), "").await;
+        let (st, _, list) = call_get(&r, "/api/domus/sessions", Some(&bob)).await;
         assert_eq!(st, StatusCode::OK);
         let list = list.as_array().unwrap();
         assert_eq!(list.len(), 2);
         assert_eq!(list.iter().filter(|s| s["current"] == true).count(), 1);
         assert!(list.iter().all(|s| s.get("token_hash").is_none()));
         // the admin's own list holds only the admin's session
-        let (_, _, theirs) = call(&r, "GET", "/api/domus/sessions", Some(&admin), "").await;
+        let (_, _, theirs) = call_get(&r, "/api/domus/sessions", Some(&admin)).await;
         assert_eq!(theirs.as_array().unwrap().len(), 1);
         let admin_sid = theirs[0]["id"].as_i64().unwrap();
 
         // someone else's session cannot be ended, and a bogus id is just as unknown
         for id in [admin_sid, 9999] {
             let uri = format!("/api/domus/sessions/{id}");
-            let (st, ..) = call(&r, "DELETE", &uri, Some(&bob), "").await;
+            let (st, ..) = call_delete(&r, &uri, Some(&bob)).await;
             assert_eq!(st, StatusCode::NOT_FOUND);
         }
         assert_eq!(
-            call(&r, "GET", "/api/domus/tokens", Some(&admin), "")
-                .await
-                .0,
+            call_get(&r, "/api/domus/tokens", Some(&admin)).await.0,
             StatusCode::OK
         );
 
@@ -1635,13 +1641,10 @@ mod tests {
             .as_i64()
             .unwrap();
         let uri = format!("/api/domus/sessions/{other}");
-        assert_eq!(
-            call(&r, "DELETE", &uri, Some(&bob), "").await.0,
-            StatusCode::OK
-        );
+        assert_eq!(call_delete(&r, &uri, Some(&bob)).await.0, StatusCode::OK);
         let alive = |c: &str| {
             let (r, c) = (r.clone(), c.to_string());
-            async move { call(&r, "GET", "/api/domus/tokens", Some(&c), "").await.0 }
+            async move { call_get(&r, "/api/domus/tokens", Some(&c)).await.0 }
         };
         let (a, b) = (alive(&bob).await, alive(&bob2).await);
         assert!(
@@ -1650,21 +1653,14 @@ mod tests {
         );
 
         // revoke-others keeps the caller's session
-        let (_, h, _) = call(&r, "POST", "/api/domus/login", None, login).await;
+        let (_, h, _) = call_post(&r, "/api/domus/login", None, login).await;
         let bob3 = cookie_of(&h);
-        let (st, _, v) = call(
-            &r,
-            "POST",
-            "/api/domus/sessions/revoke-others",
-            Some(&bob3),
-            "",
-        )
-        .await;
+        let (st, _, v) = call_post(&r, "/api/domus/sessions/revoke-others", Some(&bob3), "").await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(v["ended"], 1);
         assert_eq!(alive(&bob3).await, StatusCode::OK);
         assert_eq!(alive(&admin).await, StatusCode::OK);
-        let (_, _, list) = call(&r, "GET", "/api/domus/sessions", Some(&bob3), "").await;
+        let (_, _, list) = call_get(&r, "/api/domus/sessions", Some(&bob3)).await;
         assert_eq!(list.as_array().unwrap().len(), 1);
     }
 
@@ -1674,7 +1670,7 @@ mod tests {
         let (admin, bob) = admin_and_member(&r).await;
         let put = |c: &str, uri: &str, body: &str| {
             let (r, c, uri, body) = (r.clone(), c.to_string(), uri.to_string(), body.to_string());
-            async move { call(&r, "PUT", &uri, Some(&c), &body).await.0 }
+            async move { call_put(&r, &uri, Some(&c), &body).await.0 }
         };
         let bob_id = app.core.store().user_login("bob").await.unwrap().0.id;
         let bob_uri = format!("/api/domus/users/{bob_id}");
@@ -1682,14 +1678,12 @@ mod tests {
         // duplicates (case-insensitive) and weak passwords are refused
         let dup = r#"{"username":"Bob","password":"long enough pw12"}"#;
         assert_eq!(
-            call(&r, "POST", "/api/domus/users", Some(&admin), dup)
-                .await
-                .0,
+            call_post(&r, "/api/domus/users", Some(&admin), dup).await.0,
             StatusCode::CONFLICT
         );
         let weak = r#"{"username":"eve","password":"short"}"#;
         assert_eq!(
-            call(&r, "POST", "/api/domus/users", Some(&admin), weak)
+            call_post(&r, "/api/domus/users", Some(&admin), weak)
                 .await
                 .0,
             StatusCode::BAD_REQUEST
@@ -1701,9 +1695,7 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
-            call(&r, "DELETE", "/api/domus/users/1", Some(&admin), "")
-                .await
-                .0,
+            call_delete(&r, "/api/domus/users/1", Some(&admin)).await.0,
             StatusCode::BAD_REQUEST
         );
         // a refused demotion applies nothing else from the same request
@@ -1718,13 +1710,11 @@ mod tests {
         );
         let old = r#"{"username":"admin","password":"correct horse"}"#;
         assert_eq!(
-            call(&r, "POST", "/api/domus/login", None, old).await.0,
+            call_post(&r, "/api/domus/login", None, old).await.0,
             StatusCode::OK
         );
         assert_eq!(
-            call(&r, "GET", "/api/domus/tokens", Some(&admin), "")
-                .await
-                .0,
+            call_get(&r, "/api/domus/tokens", Some(&admin)).await.0,
             StatusCode::OK
         );
 
@@ -1734,12 +1724,12 @@ mod tests {
             StatusCode::OK
         );
         assert_eq!(
-            call(&r, "GET", "/api/domus/tokens", Some(&bob), "").await.0,
+            call_get(&r, "/api/domus/tokens", Some(&bob)).await.0,
             StatusCode::UNAUTHORIZED
         );
         let login = r#"{"username":"bob","password":"reset reset reset"}"#;
         assert_eq!(
-            call(&r, "POST", "/api/domus/login", None, login).await.0,
+            call_post(&r, "/api/domus/login", None, login).await.0,
             StatusCode::OK
         );
 
@@ -1758,18 +1748,14 @@ mod tests {
         );
 
         // deleting a user ends their session
-        let (_, h, _) = call(&r, "POST", "/api/domus/login", None, login).await;
+        let (_, h, _) = call_post(&r, "/api/domus/login", None, login).await;
         let bob = cookie_of(&h);
         assert_eq!(
-            call(&r, "DELETE", "/api/domus/users/1", Some(&bob), "")
-                .await
-                .0,
+            call_delete(&r, "/api/domus/users/1", Some(&bob)).await.0,
             StatusCode::OK
         );
         assert_eq!(
-            call(&r, "GET", "/api/domus/tokens", Some(&admin), "")
-                .await
-                .0,
+            call_get(&r, "/api/domus/tokens", Some(&admin)).await.0,
             StatusCode::UNAUTHORIZED
         );
     }
@@ -1780,7 +1766,7 @@ mod tests {
         let (_, bob) = admin_and_member(&r).await;
         let change = |body: &str| {
             let (r, bob, body) = (r.clone(), bob.clone(), body.to_string());
-            async move { call(&r, "POST", "/api/domus/password", Some(&bob), &body).await }
+            async move { call_post(&r, "/api/domus/password", Some(&bob), &body).await }
         };
         assert_eq!(
             change(r#"{"current":"wrong","new":"brand new pw"}"#)
@@ -1798,19 +1784,17 @@ mod tests {
         assert_eq!(s, StatusCode::OK);
         // the old session is gone, the fresh one works
         assert_eq!(
-            call(&r, "GET", "/api/domus/tokens", Some(&bob), "").await.0,
+            call_get(&r, "/api/domus/tokens", Some(&bob)).await.0,
             StatusCode::UNAUTHORIZED
         );
         let fresh = cookie_of(&h);
         assert_eq!(
-            call(&r, "GET", "/api/domus/tokens", Some(&fresh), "")
-                .await
-                .0,
+            call_get(&r, "/api/domus/tokens", Some(&fresh)).await.0,
             StatusCode::OK
         );
         let login = r#"{"username":"bob","password":"brand new pw"}"#;
         assert_eq!(
-            call(&r, "POST", "/api/domus/login", None, login).await.0,
+            call_post(&r, "/api/domus/login", None, login).await.0,
             StatusCode::OK
         );
     }
@@ -1846,21 +1830,15 @@ mod tests {
             ("POST", "/api/domus/hue/pair"),
         ] {
             assert_eq!(
-                call(&r, m, u, None, "{}").await.0,
+                send(&r, request(m, u, None, "{}")).await.0,
                 StatusCode::UNAUTHORIZED,
                 "{u}"
             );
         }
         assert_eq!(
-            call(
-                &r,
-                "GET",
-                "/api/domus/tokens",
-                Some("domus_session=forged"),
-                ""
-            )
-            .await
-            .0,
+            call_get(&r, "/api/domus/tokens", Some("domus_session=forged"))
+                .await
+                .0,
             StatusCode::UNAUTHORIZED
         );
     }
@@ -1868,9 +1846,8 @@ mod tests {
     #[tokio::test]
     async fn token_scope_is_validated_and_listed() {
         let (r, app) = setup_app().await;
-        let (_, h, _) = call(
+        let (_, h, _) = call_post(
             &r,
-            "POST",
             "/api/domus/setup",
             None,
             r#"{"username":"admin","password":"correct horse"}"#,
@@ -1885,7 +1862,7 @@ mod tests {
 
         let post = |body: &'static str| {
             let (r, c) = (r.clone(), c.clone());
-            async move { call(&r, "POST", "/api/domus/tokens", Some(&c), body).await }
+            async move { call_post(&r, "/api/domus/tokens", Some(&c), body).await }
         };
         assert_eq!(
             post(r#"{"name":"a","scope":[]}"#).await.0,
@@ -1904,7 +1881,7 @@ mod tests {
         );
         assert_eq!(post(r#"{"name":"open"}"#).await.0, StatusCode::OK);
 
-        let (_, _, list) = call(&r, "GET", "/api/domus/tokens", Some(&c), "").await;
+        let (_, _, list) = call_get(&r, "/api/domus/tokens", Some(&c)).await;
         assert_eq!(list[0]["scope"], json!(["Garmin"]));
         assert!(list[1]["scope"].is_null());
     }
@@ -1912,9 +1889,8 @@ mod tests {
     #[tokio::test]
     async fn tokens_groups_and_lights() {
         let (r, app) = setup_app().await;
-        let (_, h, _) = call(
+        let (_, h, _) = call_post(
             &r,
-            "POST",
             "/api/domus/setup",
             None,
             r#"{"username":"admin","password":"correct horse"}"#,
@@ -1923,14 +1899,7 @@ mod tests {
         let c = cookie_of(&h);
 
         // token: plaintext once, hash stored, usable, revocable
-        let (s, _, v) = call(
-            &r,
-            "POST",
-            "/api/domus/tokens",
-            Some(&c),
-            r#"{"name":"watch"}"#,
-        )
-        .await;
+        let (s, _, v) = call_post(&r, "/api/domus/tokens", Some(&c), r#"{"name":"watch"}"#).await;
         assert_eq!(s, StatusCode::OK);
         let token = v["token"].as_str().unwrap().to_string();
         assert!(
@@ -1944,26 +1913,20 @@ mod tests {
                 .await
                 .is_some()
         );
-        let (_, _, list) = call(&r, "GET", "/api/domus/tokens", Some(&c), "").await;
+        let (_, _, list) = call_get(&r, "/api/domus/tokens", Some(&c)).await;
         assert_eq!(list[0]["name"], "watch");
         assert!(list[0].get("token").is_none());
         assert_eq!(
-            call(&r, "POST", "/api/domus/tokens", Some(&c), r#"{"name":" "}"#)
+            call_post(&r, "/api/domus/tokens", Some(&c), r#"{"name":" "}"#)
                 .await
                 .0,
             StatusCode::BAD_REQUEST
         );
         let id = v["id"].as_i64().unwrap();
         assert_eq!(
-            call(
-                &r,
-                "DELETE",
-                &format!("/api/domus/tokens/{id}"),
-                Some(&c),
-                ""
-            )
-            .await
-            .0,
+            call_delete(&r, &format!("/api/domus/tokens/{id}"), Some(&c))
+                .await
+                .0,
             StatusCode::OK
         );
         assert!(
@@ -1974,15 +1937,9 @@ mod tests {
                 .is_some()
         );
         assert_eq!(
-            call(
-                &r,
-                "DELETE",
-                &format!("/api/domus/tokens/{id}"),
-                Some(&c),
-                ""
-            )
-            .await
-            .0,
+            call_delete(&r, &format!("/api/domus/tokens/{id}"), Some(&c))
+                .await
+                .0,
             StatusCode::NOT_FOUND
         );
 
@@ -1992,16 +1949,15 @@ mod tests {
             "on",
             serde_json::from_value(json!({"friendly_name": "Desk"})).unwrap(),
         );
-        let (_, _, l) = call(&r, "GET", "/api/domus/lights", Some(&c), "").await;
+        let (_, _, l) = call_get(&r, "/api/domus/lights", Some(&c)).await;
         assert_eq!(
             l,
             json!([{"entity_id": "light.hue_a", "name": "Desk", "state": "on", "brightness": null}])
         );
 
         // groups
-        let put_ok = call(
+        let put_ok = call_put(
             &r,
-            "PUT",
             "/api/domus/groups/Garmin",
             Some(&c),
             r#"{"members":["light.hue_a"]}"#,
@@ -2009,9 +1965,8 @@ mod tests {
         .await;
         assert_eq!(put_ok.0, StatusCode::OK);
         assert_eq!(
-            call(
+            call_put(
                 &r,
-                "PUT",
                 "/api/domus/groups/bad%20name",
                 Some(&c),
                 r#"{"members":[]}"#
@@ -2021,9 +1976,8 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
-            call(
+            call_put(
                 &r,
-                "PUT",
                 "/api/domus/groups/G",
                 Some(&c),
                 r#"{"members":["switch.x"]}"#
@@ -2032,7 +1986,7 @@ mod tests {
             .0,
             StatusCode::BAD_REQUEST
         );
-        let (_, _, g) = call(&r, "GET", "/api/domus/groups", Some(&c), "").await;
+        let (_, _, g) = call_get(&r, "/api/domus/groups", Some(&c)).await;
         assert_eq!(
             g,
             json!([{"name": "Garmin", "members": ["light.hue_a"], "expose_light": false, "light_entity_id": "light.domus_group_Garmin"}])
@@ -2041,14 +1995,14 @@ mod tests {
         // exposing: flag shown, light listed, self-membership rejected, omitted flag keeps it
         let body = r#"{"members":["light.hue_a"],"expose_light":true}"#;
         assert_eq!(
-            call(&r, "PUT", "/api/domus/groups/Garmin", Some(&c), body)
+            call_put(&r, "/api/domus/groups/Garmin", Some(&c), body)
                 .await
                 .0,
             StatusCode::OK
         );
-        let (_, _, g) = call(&r, "GET", "/api/domus/groups", Some(&c), "").await;
+        let (_, _, g) = call_get(&r, "/api/domus/groups", Some(&c)).await;
         assert_eq!(g[0]["expose_light"], true);
-        let (_, _, l) = call(&r, "GET", "/api/domus/lights", Some(&c), "").await;
+        let (_, _, l) = call_get(&r, "/api/domus/lights", Some(&c)).await;
         assert!(
             l.as_array()
                 .unwrap()
@@ -2059,12 +2013,12 @@ mod tests {
         app.core.set_state("scene.hue_s", "unknown", Map::new());
         let sc = r#"{"members":["light.hue_a","scene.hue_s"]}"#;
         assert_eq!(
-            call(&r, "PUT", "/api/domus/groups/Garmin", Some(&c), sc)
+            call_put(&r, "/api/domus/groups/Garmin", Some(&c), sc)
                 .await
                 .0,
             StatusCode::OK
         );
-        let (_, _, l) = call(&r, "GET", "/api/domus/lights", Some(&c), "").await;
+        let (_, _, l) = call_get(&r, "/api/domus/lights", Some(&c)).await;
         assert!(
             l.as_array()
                 .unwrap()
@@ -2073,29 +2027,29 @@ mod tests {
         );
         let sw = r#"{"members":["switch.x"]}"#;
         assert_eq!(
-            call(&r, "PUT", "/api/domus/groups/Garmin", Some(&c), sw)
+            call_put(&r, "/api/domus/groups/Garmin", Some(&c), sw)
                 .await
                 .0,
             StatusCode::BAD_REQUEST
         );
         let own = r#"{"members":["light.domus_group_Garmin"]}"#;
         assert_eq!(
-            call(&r, "PUT", "/api/domus/groups/Garmin", Some(&c), own)
+            call_put(&r, "/api/domus/groups/Garmin", Some(&c), own)
                 .await
                 .0,
             StatusCode::BAD_REQUEST
         );
         let keep = r#"{"members":["light.hue_a"]}"#;
-        call(&r, "PUT", "/api/domus/groups/Garmin", Some(&c), keep).await;
+        call_put(&r, "/api/domus/groups/Garmin", Some(&c), keep).await;
         assert!(app.core.store().group_exposed("Garmin").await);
         assert_eq!(
-            call(&r, "DELETE", "/api/domus/groups/Garmin", Some(&c), "")
+            call_delete(&r, "/api/domus/groups/Garmin", Some(&c))
                 .await
                 .0,
             StatusCode::OK
         );
         assert_eq!(
-            call(&r, "DELETE", "/api/domus/groups/Garmin", Some(&c), "")
+            call_delete(&r, "/api/domus/groups/Garmin", Some(&c))
                 .await
                 .0,
             StatusCode::NOT_FOUND
@@ -2105,18 +2059,16 @@ mod tests {
     #[tokio::test]
     async fn pairing_failure_reports_bad_gateway() {
         let (r, app) = setup_app().await;
-        let (_, h, _) = call(
+        let (_, h, _) = call_post(
             &r,
-            "POST",
             "/api/domus/setup",
             None,
             r#"{"username":"admin","password":"correct horse"}"#,
         )
         .await;
         let c = cookie_of(&h);
-        let (s, _, _) = call(
+        let (s, _, _) = call_post(
             &r,
-            "POST",
             "/api/domus/hue/pair",
             Some(&c),
             r#"{"ip":"http://127.0.0.1:1"}"#,
@@ -2128,7 +2080,7 @@ mod tests {
             "nothing stored on failure"
         );
         assert_eq!(
-            call(&r, "POST", "/api/domus/hue/pair", Some(&c), r#"{"ip":""}"#)
+            call_post(&r, "/api/domus/hue/pair", Some(&c), r#"{"ip":""}"#)
                 .await
                 .0,
             StatusCode::BAD_REQUEST
@@ -2144,7 +2096,7 @@ mod tests {
                 r.clone(),
                 format!(r#"{{"username":"{user}","password":"{pw}"}}"#),
             );
-            async move { call(&r, "POST", "/api/domus/login", None, &body).await }
+            async move { call_post(&r, "/api/domus/login", None, &body).await }
         };
         // unknown names are throttled the same way, so a 429 reveals nothing
         for name in ["admin", "ghost"] {
@@ -2173,7 +2125,7 @@ mod tests {
                 r.clone(),
                 format!(r#"{{"username":"bob","password":"{pw}"}}"#),
             );
-            async move { call(&r, "POST", "/api/domus/login", None, &body).await.0 }
+            async move { call_post(&r, "/api/domus/login", None, &body).await.0 }
         };
         for _ in 0..4 {
             assert_eq!(login("wrong").await, StatusCode::UNAUTHORIZED);
@@ -2196,7 +2148,7 @@ mod tests {
                 format!(r#"{{"current":"{current}","new":"brand new pw 12"}}"#),
             );
             async move {
-                call(&r, "POST", "/api/domus/password", Some(&bob), &body)
+                call_post(&r, "/api/domus/password", Some(&bob), &body)
                     .await
                     .0
             }
@@ -2218,7 +2170,7 @@ mod tests {
                 r.clone(),
                 format!(r#"{{"username":"{user}","password":"{pw}"}}"#),
             );
-            async move { call(&r, "POST", "/api/domus/setup", None, &body).await.0 }
+            async move { call_post(&r, "/api/domus/setup", None, &body).await.0 }
         };
         assert_eq!(setup("admin", "elevenchars").await, StatusCode::BAD_REQUEST);
         assert_eq!(
@@ -2237,7 +2189,7 @@ mod tests {
         let (r, _) = setup_app().await;
         let body = r#"{"username":"admin","password":"密碼密碼密碼密碼密碼密碼"}"#;
         assert_eq!(
-            call(&r, "POST", "/api/domus/setup", None, body).await.0,
+            call_post(&r, "/api/domus/setup", None, body).await.0,
             StatusCode::OK
         );
     }
@@ -2328,16 +2280,16 @@ mod tests {
                     r#"{{"username":"admin","password":"correct horse","setup_code":"{code}"}}"#
                 ),
             );
-            async move { call(&r, "POST", "/api/domus/setup", None, &body).await }
+            async move { call_post(&r, "/api/domus/setup", None, &body).await }
         };
-        let (_, _, v) = call(&r, "GET", "/api/domus/status", None, "").await;
+        let (_, _, v) = call_get(&r, "/api/domus/status", None).await;
         assert_eq!(v["setup_code_required"], true);
 
         assert_eq!(setup("").await.0, StatusCode::FORBIDDEN);
         assert_eq!(setup("nope").await.0, StatusCode::FORBIDDEN);
         let missing = r#"{"username":"admin","password":"correct horse"}"#;
         assert_eq!(
-            call(&r, "POST", "/api/domus/setup", None, missing).await.0,
+            call_post(&r, "/api/domus/setup", None, missing).await.0,
             StatusCode::FORBIDDEN
         );
         let (s, h, _) = setup(" abc-123 ").await;
@@ -2346,7 +2298,7 @@ mod tests {
 
         // the code is spent: it cannot be reused, and the page stops asking for it
         assert_eq!(setup("abc123").await.0, StatusCode::CONFLICT);
-        let (_, _, v) = call(&r, "GET", "/api/domus/status", None, "").await;
+        let (_, _, v) = call_get(&r, "/api/domus/status", None).await;
         assert_eq!(v["setup_code_required"], false);
     }
 
@@ -2360,13 +2312,13 @@ mod tests {
             format!(r#"{{"username":"admin","password":"correct horse","setup_code":"{code}"}}"#)
         };
         for _ in 0..5 {
-            let s = call(&r, "POST", "/api/domus/setup", None, &body("bad"))
+            let s = call_post(&r, "/api/domus/setup", None, &body("bad"))
                 .await
                 .0;
             assert_eq!(s, StatusCode::FORBIDDEN);
         }
         // even the right code waits out the lock
-        let (s, h, _) = call(&r, "POST", "/api/domus/setup", None, &body("abc123")).await;
+        let (s, h, _) = call_post(&r, "/api/domus/setup", None, &body("abc123")).await;
         assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
         assert!(h.contains_key("retry-after"));
     }
@@ -2392,7 +2344,7 @@ mod tests {
         let uri = format!("/api/domus/users/{bob_id}");
         let put = |c: &str, uri: &str, body: &str| {
             let (r, c, uri, body) = (r.clone(), c.to_string(), uri.to_string(), body.to_string());
-            async move { call(&r, "PUT", &uri, Some(&c), &body).await.0 }
+            async move { call_put(&r, &uri, Some(&c), &body).await.0 }
         };
 
         // validation: unknown group, empty list, and admins cannot be limited
@@ -2412,15 +2364,15 @@ mod tests {
             put(&admin, &uri, r#"{"scope":["G1"]}"#).await,
             StatusCode::OK
         );
-        let (_, _, users) = call(&r, "GET", "/api/domus/users", Some(&admin), "").await;
+        let (_, _, users) = call_get(&r, "/api/domus/users", Some(&admin)).await;
         assert_eq!(users[1]["scope"], json!(["G1"]));
         assert!(users[0]["scope"].is_null());
 
         // what bob can see and test is limited to G1
-        let (_, _, g) = call(&r, "GET", "/api/domus/groups", Some(&bob), "").await;
+        let (_, _, g) = call_get(&r, "/api/domus/groups", Some(&bob)).await;
         assert_eq!(g.as_array().unwrap().len(), 1);
         assert_eq!(g[0]["name"], "G1");
-        let (_, _, l) = call(&r, "GET", "/api/domus/lights", Some(&bob), "").await;
+        let (_, _, l) = call_get(&r, "/api/domus/lights", Some(&bob)).await;
         let ids: Vec<_> = l
             .as_array()
             .unwrap()
@@ -2435,7 +2387,7 @@ mod tests {
                 format!(r#"{{"entity_id":"{id}"}}"#),
             );
             async move {
-                call(&r, "POST", "/api/domus/devices/test", Some(&c), &body)
+                call_post(&r, "/api/domus/devices/test", Some(&c), &body)
                     .await
                     .0
             }
@@ -2447,7 +2399,7 @@ mod tests {
         // tokens: default to bob's own groups, never beyond them
         let mint = |body: &str| {
             let (r, bob, body) = (r.clone(), bob.clone(), body.to_string());
-            async move { call(&r, "POST", "/api/domus/tokens", Some(&bob), &body).await }
+            async move { call_post(&r, "/api/domus/tokens", Some(&bob), &body).await }
         };
         let (s, _, _) = mint(r#"{"name":"x","scope":["G2"]}"#).await;
         assert_eq!(s, StatusCode::FORBIDDEN);
@@ -2465,14 +2417,7 @@ mod tests {
             StatusCode::OK
         );
         // the admin is not limited
-        let (_, _, v) = call(
-            &r,
-            "POST",
-            "/api/domus/tokens",
-            Some(&admin),
-            r#"{"name":"a"}"#,
-        )
-        .await;
+        let (_, _, v) = call_post(&r, "/api/domus/tokens", Some(&admin), r#"{"name":"a"}"#).await;
         assert_eq!(
             store
                 .token_auth(&sha256_hex(v["token"].as_str().unwrap()))
@@ -2503,7 +2448,7 @@ mod tests {
         let (admin, _) = admin_and_member(&r).await;
         let mint = |body: &str| {
             let (r, c, body) = (r.clone(), admin.clone(), body.to_string());
-            async move { call(&r, "POST", "/api/domus/tokens", Some(&c), &body).await }
+            async move { call_post(&r, "/api/domus/tokens", Some(&c), &body).await }
         };
         for bad in ["0", "-5", "3651"] {
             let body = format!(r#"{{"name":"x","expires_days":{bad}}}"#);
@@ -2517,7 +2462,7 @@ mod tests {
             .token_auth(&sha256_hex(v["token"].as_str().unwrap()))
             .await;
         assert!(auth.unwrap().read_only);
-        let (_, _, list) = call(&r, "GET", "/api/domus/tokens", Some(&admin), "").await;
+        let (_, _, list) = call_get(&r, "/api/domus/tokens", Some(&admin)).await;
         assert_eq!(list[0]["read_only"], true);
         let left = list[0]["expires"].as_i64().unwrap() - now_secs();
         assert!((30 * 86_400 - 5..=30 * 86_400).contains(&left));
@@ -2622,11 +2567,11 @@ mod tests {
         app.core.set_state("light.hue_bad", "off", Map::new());
         app.core.set_state("scene.hue_s", "unknown", Map::new());
         let body = r#"{"username":"admin","password":"correct horse"}"#;
-        let (_, h, _) = call(&r, "POST", "/api/domus/setup", None, body).await;
+        let (_, h, _) = call_post(&r, "/api/domus/setup", None, body).await;
         let c = cookie_of(&h);
         let post = |b: &'static str| {
             let (r, c) = (r.clone(), c.clone());
-            async move { call(&r, "POST", "/api/domus/devices/test", Some(&c), b).await }
+            async move { call_post(&r, "/api/domus/devices/test", Some(&c), b).await }
         };
 
         let (s, _, v) = post(r#"{"entity_id":"light.hue_a","on":true}"#).await;
@@ -2663,7 +2608,7 @@ mod tests {
         let (s, _, v) = post(r#"{"entity_ids":["light.hue_a","light.hue_bad"],"on":true}"#).await;
         assert_eq!((s, v["state"].as_str()), (StatusCode::OK, Some("on")));
         assert_eq!(post(r#"{}"#).await.0, StatusCode::BAD_REQUEST);
-        let (s, _, v) = call(&r, "GET", "/api/domus/rooms", Some(&c), "").await;
+        let (s, _, v) = call_get(&r, "/api/domus/rooms", Some(&c)).await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(v[0]["name"], "Study");
         assert_eq!(v[0]["entity_ids"], json!(["light.hue_a", "light.hue_b"]));
@@ -2677,7 +2622,7 @@ mod tests {
             json!(["brightness", "color_temp"]),
         );
         app.core.set_state("light.hue_a", "on", attrs);
-        let (_, _, v) = call(&r, "GET", "/api/domus/lights", Some(&c), "").await;
+        let (_, _, v) = call_get(&r, "/api/domus/lights", Some(&c)).await;
         let a = v
             .as_array()
             .unwrap()
@@ -2692,9 +2637,8 @@ mod tests {
         assert!(a.get("xy_color").is_none());
 
         // requires a session
-        let (s, ..) = call(
+        let (s, ..) = call_post(
             &r,
-            "POST",
             "/api/domus/devices/test",
             None,
             r#"{"entity_id":"light.hue_a"}"#,

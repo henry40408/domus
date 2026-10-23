@@ -662,24 +662,22 @@ mod tests {
         (resp.status(), cookie)
     }
 
-    async fn admin(
-        r: &Router,
-        method: &str,
-        uri: &str,
-        cookie: &str,
-        body: Value,
-    ) -> (StatusCode, Value) {
-        send(
-            r,
-            Request::builder()
-                .method(method)
-                .uri(uri)
-                .header("content-type", "application/json")
-                .header("cookie", cookie)
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
-        .await
+    fn admin_request(method: &str, uri: &str, cookie: &str, body: Value) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("cookie", cookie)
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    async fn admin_get(r: &Router, uri: &str, cookie: &str) -> (StatusCode, Value) {
+        send(r, admin_request("GET", uri, cookie, Value::Null)).await
+    }
+
+    async fn admin_post(r: &Router, uri: &str, cookie: &str, body: Value) -> (StatusCode, Value) {
+        send(r, admin_request("POST", uri, cookie, body)).await
     }
 
     #[tokio::test]
@@ -689,9 +687,9 @@ mod tests {
         let (status, cookie) = from_token(&r, Some(&access)).await;
         assert_eq!(status, StatusCode::OK);
         let cookie = cookie.unwrap();
-        let (_, body) = admin(&r, "GET", "/api/domus/status", &cookie, Value::Null).await;
+        let (_, body) = admin_get(&r, "/api/domus/status", &cookie).await;
         assert_eq!(body["logged_in"], true);
-        let (_, sessions) = admin(&r, "GET", "/api/domus/sessions", &cookie, Value::Null).await;
+        let (_, sessions) = admin_get(&r, "/api/domus/sessions", &cookie).await;
         assert!(
             sessions[0]["user_agent"]
                 .as_str()
@@ -700,7 +698,7 @@ mod tests {
         );
         // Logging the app out (what iOS does) also ends the page session.
         token_form(&r, &format!("action=revoke&token={access}")).await;
-        let (_, body) = admin(&r, "GET", "/api/domus/status", &cookie, Value::Null).await;
+        let (_, body) = admin_get(&r, "/api/domus/status", &cookie).await;
         assert_eq!(body["logged_in"], false);
     }
 
@@ -711,7 +709,7 @@ mod tests {
         let cookie = from_token(&r, Some(&access)).await.1.unwrap();
         let id = app.core.store().list_tokens(None).await[0].id;
         assert!(app.core.store().revoke_token(id, None).await);
-        let (_, body) = admin(&r, "GET", "/api/domus/status", &cookie, Value::Null).await;
+        let (_, body) = admin_get(&r, "/api/domus/status", &cookie).await;
         assert_eq!(body["logged_in"], false);
     }
 
@@ -747,29 +745,26 @@ mod tests {
         let (access, _) = app_login(&r).await;
         let cookie = from_token(&r, Some(&access)).await.1.unwrap();
         let new_token = json!({"name": "ci"});
-        let (status, body) =
-            admin(&r, "POST", "/api/domus/tokens", &cookie, new_token.clone()).await;
+        let (status, body) = admin_post(&r, "/api/domus/tokens", &cookie, new_token.clone()).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["reauth"], true);
-        let (status, _) = admin(
+        let (status, _) = admin_post(
             &r,
-            "POST",
             "/api/domus/session/reauth",
             &cookie,
             json!({"password": "nope"}),
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        let (status, _) = admin(
+        let (status, _) = admin_post(
             &r,
-            "POST",
             "/api/domus/session/reauth",
             &cookie,
             json!({"password": PASSWORD}),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        let (status, _) = admin(&r, "POST", "/api/domus/tokens", &cookie, new_token).await;
+        let (status, _) = admin_post(&r, "/api/domus/tokens", &cookie, new_token).await;
         assert!(status.is_success(), "{status}");
     }
 
@@ -792,7 +787,7 @@ mod tests {
             ("DELETE", "/api/domus/groups/den", Value::Null),
         ];
         for (method, uri, body) in attempts {
-            let (status, body) = admin(&r, method, uri, &cookie, body).await;
+            let (status, body) = send(&r, admin_request(method, uri, &cookie, body)).await;
             assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}");
             assert_eq!(body["reauth"], true, "{method} {uri}");
         }
@@ -823,16 +818,15 @@ mod tests {
             .next()
             .unwrap()
             .to_string();
-        let (status, _) = admin(
+        let (status, _) = admin_post(
             &r,
-            "POST",
             "/api/domus/password",
             &own,
             json!({"current": PASSWORD, "new": "another-long-passphrase"}),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        let (_, body) = admin(&r, "GET", "/api/domus/status", &cookie, Value::Null).await;
+        let (_, body) = admin_get(&r, "/api/domus/status", &cookie).await;
         assert_eq!(body["logged_in"], false);
         assert_eq!(state_status(&r, &access).await, StatusCode::UNAUTHORIZED);
     }
@@ -843,7 +837,7 @@ mod tests {
         let (access, _) = app_login(&r).await;
         let cookie = from_token(&r, Some(&access)).await.1.unwrap();
         assert!(app.core.store().delete_user(1).await);
-        let (_, body) = admin(&r, "GET", "/api/domus/status", &cookie, Value::Null).await;
+        let (_, body) = admin_get(&r, "/api/domus/status", &cookie).await;
         assert_eq!(body["logged_in"], false);
     }
 
@@ -854,9 +848,9 @@ mod tests {
         let first = from_token(&r, Some(&access)).await.1.unwrap();
         let second = from_token(&r, Some(&access)).await.1.unwrap();
         assert_ne!(first, second);
-        let (_, body) = admin(&r, "GET", "/api/domus/status", &first, Value::Null).await;
+        let (_, body) = admin_get(&r, "/api/domus/status", &first).await;
         assert_eq!(body["logged_in"], false);
-        let (_, body) = admin(&r, "GET", "/api/domus/status", &second, Value::Null).await;
+        let (_, body) = admin_get(&r, "/api/domus/status", &second).await;
         assert_eq!(body["logged_in"], true);
     }
 
@@ -882,14 +876,7 @@ mod tests {
             .next()
             .unwrap()
             .to_string();
-        let (status, _) = admin(
-            &r,
-            "POST",
-            "/api/domus/tokens",
-            &cookie,
-            json!({"name": "ci"}),
-        )
-        .await;
+        let (status, _) = admin_post(&r, "/api/domus/tokens", &cookie, json!({"name": "ci"})).await;
         assert!(status.is_success(), "{status}");
     }
 
