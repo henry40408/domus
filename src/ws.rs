@@ -358,96 +358,116 @@ impl Session {
         Some(changed)
     }
 
-    async fn command(&mut self, ws: &mut WebSocket, text: &str) -> Result<(), ()> {
+    /// Parses a client message and records its id; the error is the failure to send back.
+    fn accept_message(&mut self, text: &str) -> Result<(u64, Map<String, Value>), Value> {
         let Ok(Value::Object(msg)) = serde_json::from_str::<Value>(text) else {
-            return send(
-                ws,
-                failure(None, "invalid_format", "Message incorrectly formatted."),
-            )
-            .await;
+            return Err(failure(
+                None,
+                "invalid_format",
+                "Message incorrectly formatted.",
+            ));
         };
         let Some(id) = msg.get("id").and_then(Value::as_u64) else {
-            return send(
-                ws,
-                failure(None, "invalid_format", "Message needs an integer id."),
-            )
-            .await;
+            return Err(failure(
+                None,
+                "invalid_format",
+                "Message needs an integer id.",
+            ));
         };
         if id <= self.last_id {
-            return send(
-                ws,
-                failure(Some(id), "id_reuse", "Identifier values have to increase."),
-            )
-            .await;
+            return Err(failure(
+                Some(id),
+                "id_reuse",
+                "Identifier values have to increase.",
+            ));
         }
         self.last_id = id;
+        Ok((id, msg))
+    }
+
+    fn subscription_count(&self) -> usize {
+        self.subs.len() + self.events.len()
+    }
+
+    fn subscribe_events(&mut self, id: u64) -> Value {
+        if self.subscription_count() >= MAX_SUBSCRIPTIONS {
+            return failure(Some(id), "too_many", "Too many subscriptions.");
+        }
+        self.events.insert(id);
+        result(id, Value::Null)
+    }
+
+    fn unsubscribe_events(&mut self, id: u64, msg: &Map<String, Value>) -> Value {
+        let target = msg.get("subscription").and_then(Value::as_u64);
+        let before = self.subscription_count();
+        self.subs.retain(|s| Some(s.id) != target);
+        if let Some(t) = target {
+            self.events.remove(&t);
+        }
+        if self.subscription_count() == before {
+            return failure(Some(id), "not_found", "Subscription not found.");
+        }
+        result(id, Value::Null)
+    }
+
+    async fn subscribe_entities(
+        &mut self,
+        ws: &mut WebSocket,
+        id: u64,
+        msg: &Map<String, Value>,
+    ) -> Result<(), ()> {
+        if self.subscription_count() >= MAX_SUBSCRIPTIONS {
+            return send(ws, failure(Some(id), "too_many", "Too many subscriptions.")).await;
+        }
+        let only = msg.get("entity_ids").and_then(Value::as_array).map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        });
+        self.subs.push(Subscription {
+            id,
+            only,
+            known: HashSet::new(),
+        });
+        // The result comes first, then the snapshot as the first event.
+        send(ws, result(id, Value::Null)).await?;
+        let index = self.subs.len() - 1;
+        self.sync(ws, index).await
+    }
+
+    async fn entity_registry_for_display(&self, id: u64) -> Value {
+        let entities: Vec<Value> = self
+            .visible_states(None)
+            .await
+            .iter()
+            .map(|s| {
+                let mut e = json!({"ei": s.entity_id});
+                if let Some(name) = s.attributes.get("friendly_name") {
+                    e["en"] = name.clone();
+                }
+                e
+            })
+            .collect();
+        result(id, json!({"entity_categories": {}, "entities": entities}))
+    }
+
+    async fn command(&mut self, ws: &mut WebSocket, text: &str) -> Result<(), ()> {
+        let (id, msg) = match self.accept_message(text) {
+            Ok(accepted) => accepted,
+            Err(rejection) => return send(ws, rejection).await,
+        };
         let kind = msg.get("type").and_then(Value::as_str).unwrap_or_default();
         let reply = match kind {
             "ping" => json!({"id": id, "type": "pong"}),
             "supported_features" => result(id, Value::Null),
-            "subscribe_events" => {
-                if self.subs.len() + self.events.len() >= MAX_SUBSCRIPTIONS {
-                    failure(Some(id), "too_many", "Too many subscriptions.")
-                } else {
-                    self.events.insert(id);
-                    result(id, Value::Null)
-                }
-            }
-            "unsubscribe_events" => {
-                let target = msg.get("subscription").and_then(Value::as_u64);
-                let before = self.subs.len() + self.events.len();
-                self.subs.retain(|s| Some(s.id) != target);
-                if let Some(t) = target {
-                    self.events.remove(&t);
-                }
-                if self.subs.len() + self.events.len() == before {
-                    failure(Some(id), "not_found", "Subscription not found.")
-                } else {
-                    result(id, Value::Null)
-                }
-            }
+            "subscribe_events" => self.subscribe_events(id),
+            "unsubscribe_events" => self.unsubscribe_events(id, &msg),
             "auth/current_user" => result(id, self.current_user()),
             "get_config" => result(id, config()),
             "get_services" | "get_panels" => result(id, json!({})),
-            "get_states" => {
-                let states = self.visible_states(None).await;
-                result(id, json!(states))
-            }
-            "subscribe_entities" => {
-                if self.subs.len() + self.events.len() >= MAX_SUBSCRIPTIONS {
-                    failure(Some(id), "too_many", "Too many subscriptions.")
-                } else {
-                    let only = msg.get("entity_ids").and_then(Value::as_array).map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect()
-                    });
-                    self.subs.push(Subscription {
-                        id,
-                        only,
-                        known: HashSet::new(),
-                    });
-                    // The result comes first, then the snapshot as the first event.
-                    send(ws, result(id, Value::Null)).await?;
-                    let index = self.subs.len() - 1;
-                    return self.sync(ws, index).await;
-                }
-            }
-            "config/entity_registry/list_for_display" => {
-                let entities: Vec<Value> = self
-                    .visible_states(None)
-                    .await
-                    .iter()
-                    .map(|s| {
-                        let mut e = json!({"ei": s.entity_id});
-                        if let Some(name) = s.attributes.get("friendly_name") {
-                            e["en"] = name.clone();
-                        }
-                        e
-                    })
-                    .collect();
-                result(id, json!({"entity_categories": {}, "entities": entities}))
-            }
+            "get_states" => result(id, json!(self.visible_states(None).await)),
+            "subscribe_entities" => return self.subscribe_entities(ws, id, &msg).await,
+            "config/entity_registry/list_for_display" => self.entity_registry_for_display(id).await,
             "call_service" => self.call_service(id, &msg).await,
             k if EMPTY_LISTS.contains(&k) => result(id, json!([])),
             _ => failure(Some(id), "unknown_command", "Unknown command."),
