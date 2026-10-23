@@ -921,6 +921,50 @@ struct TokenBody {
     expires_days: Option<i64>,
 }
 
+/// The groups a new token is limited to; `None` means everything its owner may use.
+async fn token_scope(
+    app: &AppState,
+    owner: &User,
+    requested: Option<Vec<String>>,
+) -> Result<Option<Vec<String>>, (StatusCode, String)> {
+    let requested = match requested {
+        None => None,
+        Some(groups) => Some(
+            validate_scope(app, groups)
+                .await
+                .map_err(|e| (StatusCode::BAD_REQUEST, e))?,
+        ),
+    };
+    // A limited user can only hand out what they have: no scope means "all of mine".
+    let Some(own) = &owner.scope else {
+        return Ok(requested);
+    };
+    let Some(groups) = requested else {
+        return Ok(Some(own.clone()));
+    };
+    if let Some(bad) = groups.iter().find(|g| !own.contains(g)) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!("Your account may not use the group {bad}."),
+        ));
+    }
+    Ok(Some(groups))
+}
+
+/// Unix time a new token stops working, or `None` for never.
+fn token_expiry(expires_days: Option<i64>) -> Result<Option<i64>, (StatusCode, String)> {
+    let Some(days) = expires_days else {
+        return Ok(None);
+    };
+    if !(1..=3650).contains(&days) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Expiry must be 1 to 3650 days.".into(),
+        ));
+    }
+    Ok(Some(now_secs() + days * 86_400))
+}
+
 async fn token_create(
     State(app): State<AppState>,
     Extension(me): Extension<User>,
@@ -933,33 +977,13 @@ async fn token_create(
             "Give the token a name (max 64 characters).",
         );
     }
-    let requested = match body.scope {
-        None => None,
-        Some(groups) => match validate_scope(&app, groups).await {
-            Ok(groups) => Some(groups),
-            Err(e) => return message(StatusCode::BAD_REQUEST, &e),
-        },
+    let scope = match token_scope(&app, &me, body.scope).await {
+        Ok(scope) => scope,
+        Err((status, msg)) => return message(status, &msg),
     };
-    // A limited user can only hand out what they have: no scope means "all of mine".
-    let scope = match (&me.scope, requested) {
-        (None, requested) => requested,
-        (Some(own), None) => Some(own.clone()),
-        (Some(own), Some(groups)) => {
-            if let Some(bad) = groups.iter().find(|g| !own.contains(g)) {
-                return message(
-                    StatusCode::FORBIDDEN,
-                    &format!("Your account may not use the group {bad}."),
-                );
-            }
-            Some(groups)
-        }
-    };
-    let expires = match body.expires_days {
-        None => None,
-        Some(days) if (1..=3650).contains(&days) => Some(now_secs() + days * 86_400),
-        Some(_) => {
-            return message(StatusCode::BAD_REQUEST, "Expiry must be 1 to 3650 days.");
-        }
+    let expires = match token_expiry(body.expires_days) {
+        Ok(expires) => expires,
+        Err((status, msg)) => return message(status, &msg),
     };
     // 128 bits of entropy; the prefix makes the token recognisable to people and secret scanners.
     let token = format!("{TOKEN_PREFIX}{}", random_hex(16));
