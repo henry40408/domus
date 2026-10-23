@@ -90,14 +90,17 @@ async fn serve(app: AppState, mut ws: WebSocket) {
     let _ = send_message(&mut ws, Message::Close(None)).await;
 }
 
-async fn send_message(ws: &mut WebSocket, message: Message) -> Result<(), ()> {
+/// The client stopped receiving (send failed or timed out), so the session should end.
+struct Disconnected;
+
+async fn send_message(ws: &mut WebSocket, message: Message) -> Result<(), Disconnected> {
     match tokio::time::timeout(SEND_TIMEOUT, ws.send(message)).await {
         Ok(Ok(())) => Ok(()),
-        _ => Err(()),
+        _ => Err(Disconnected),
     }
 }
 
-async fn send(ws: &mut WebSocket, value: Value) -> Result<(), ()> {
+async fn send(ws: &mut WebSocket, value: Value) -> Result<(), Disconnected> {
     send_message(ws, Message::text(value.to_string())).await
 }
 
@@ -244,7 +247,7 @@ impl Session {
 
     /// Brings one subscription up to date: states it lacks or has stale are added (replacing
     /// whatever the client had), those it has but may no longer see are removed.
-    async fn sync(&mut self, ws: &mut WebSocket, index: usize) -> Result<(), ()> {
+    async fn sync(&mut self, ws: &mut WebSocket, index: usize) -> Result<(), Disconnected> {
         let sub = &self.subs[index];
         let states = self.visible_states(sub.only.as_ref()).await;
         let now: HashSet<String> = states.iter().map(|s| s.entity_id.clone()).collect();
@@ -262,7 +265,7 @@ impl Session {
         Ok(())
     }
 
-    async fn resync(&mut self, ws: &mut WebSocket) -> Result<(), ()> {
+    async fn resync(&mut self, ws: &mut WebSocket) -> Result<(), Disconnected> {
         for index in 0..self.subs.len() {
             self.sync(ws, index).await?;
         }
@@ -271,7 +274,7 @@ impl Session {
 
     /// Pushes what a change of one entity does to the states the client can see: the entity
     /// itself and every group (and group light) it is a member of.
-    async fn changed(&mut self, ws: &mut WebSocket, entity_id: &str) -> Result<(), ()> {
+    async fn changed(&mut self, ws: &mut WebSocket, entity_id: &str) -> Result<(), Disconnected> {
         if self.subs.is_empty() {
             return Ok(());
         }
@@ -415,7 +418,7 @@ impl Session {
         ws: &mut WebSocket,
         id: u64,
         msg: &Map<String, Value>,
-    ) -> Result<(), ()> {
+    ) -> Result<(), Disconnected> {
         if self.subscription_count() >= MAX_SUBSCRIPTIONS {
             return send(ws, failure(Some(id), "too_many", "Too many subscriptions.")).await;
         }
@@ -451,7 +454,7 @@ impl Session {
         result(id, json!({"entity_categories": {}, "entities": entities}))
     }
 
-    async fn command(&mut self, ws: &mut WebSocket, text: &str) -> Result<(), ()> {
+    async fn command(&mut self, ws: &mut WebSocket, text: &str) -> Result<(), Disconnected> {
         let (id, msg) = match self.accept_message(text) {
             Ok(accepted) => accepted,
             Err(rejection) => return send(ws, rejection).await,
