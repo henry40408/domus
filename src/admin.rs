@@ -1246,64 +1246,58 @@ mod tests {
             .to_string()
     }
 
+    const ADMIN_BODY: &str = r#"{"username":"admin","password":"correct horse"}"#;
+
+    /// Creates the first admin through the setup route; returns their session cookie.
+    async fn setup_admin(r: &Router) -> String {
+        let (s, h, _) = call_post(r, "/api/domus/setup", None, ADMIN_BODY).await;
+        assert_eq!(s, StatusCode::OK);
+        cookie_of(&h)
+    }
+
+    /// PUT as `cookie`; returns only the status.
+    async fn put_status(r: &Router, cookie: &str, uri: &str, body: &str) -> StatusCode {
+        call_put(r, uri, Some(cookie), body).await.0
+    }
+
     #[tokio::test]
-    async fn setup_login_logout_flow() {
+    async fn status_before_setup_reports_nothing_done() {
         let (r, _) = setup_app().await;
         let (_, _, v) = call_get(&r, "/api/domus/status", None).await;
         assert_eq!(
             v,
             json!({"setup_done": false, "setup_code_required": false, "logged_in": false, "user": null, "hue_paired": false, "version": crate::GIT_VERSION})
         );
+    }
 
-        // bad username
-        assert_eq!(
-            call_post(
-                &r,
-                "/api/domus/setup",
-                None,
-                r#"{"username":"a b","password":"correct horse"}"#
-            )
-            .await
-            .0,
-            StatusCode::BAD_REQUEST
-        );
+    #[tokio::test]
+    async fn setup_refuses_a_bad_username_and_a_short_password() {
+        let (r, _) = setup_app().await;
+        for body in [
+            r#"{"username":"a b","password":"correct horse"}"#,
+            r#"{"username":"admin","password":"short"}"#,
+        ] {
+            assert_eq!(
+                call_post(&r, "/api/domus/setup", None, body).await.0,
+                StatusCode::BAD_REQUEST,
+                "{body}"
+            );
+        }
+    }
 
-        // too short
-        assert_eq!(
-            call_post(
-                &r,
-                "/api/domus/setup",
-                None,
-                r#"{"username":"admin","password":"short"}"#
-            )
-            .await
-            .0,
-            StatusCode::BAD_REQUEST
-        );
-
-        let (s, h, _) = call_post(
-            &r,
-            "/api/domus/setup",
-            None,
-            r#"{"username":"admin","password":"correct horse"}"#,
-        )
-        .await;
+    #[tokio::test]
+    async fn setup_starts_a_session_and_cannot_run_twice() {
+        let (r, _) = setup_app().await;
+        let (s, h, _) = call_post(&r, "/api/domus/setup", None, ADMIN_BODY).await;
         assert_eq!(s, StatusCode::OK);
         let set_cookie = h.get("set-cookie").unwrap().to_str().unwrap();
         assert!(set_cookie.contains("HttpOnly") && set_cookie.contains("SameSite=Strict"));
         assert!(!set_cookie.contains("Secure"), "no Secure over plain http");
         let cookie = cookie_of(&h);
 
-        // second setup refused
+        let second = r#"{"username":"second","password":"another one pw12"}"#;
         assert_eq!(
-            call_post(
-                &r,
-                "/api/domus/setup",
-                None,
-                r#"{"username":"second","password":"another one pw12"}"#
-            )
-            .await
-            .0,
+            call_post(&r, "/api/domus/setup", None, second).await.0,
             StatusCode::CONFLICT
         );
 
@@ -1311,32 +1305,27 @@ mod tests {
         assert_eq!(v["logged_in"], true);
         assert_eq!(v["user"]["username"], "admin");
         assert_eq!(v["user"]["is_admin"], true);
+    }
 
-        // wrong / right password
+    #[tokio::test]
+    async fn login_needs_the_right_password() {
+        let (r, _) = setup_app().await;
+        setup_admin(&r).await;
+        let wrong = r#"{"username":"admin","password":"nope nope"}"#;
         assert_eq!(
-            call_post(
-                &r,
-                "/api/domus/login",
-                None,
-                r#"{"username":"admin","password":"nope nope"}"#
-            )
-            .await
-            .0,
+            call_post(&r, "/api/domus/login", None, wrong).await.0,
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(
-            call_post(
-                &r,
-                "/api/domus/login",
-                None,
-                r#"{"username":"admin","password":"correct horse"}"#
-            )
-            .await
-            .0,
+            call_post(&r, "/api/domus/login", None, ADMIN_BODY).await.0,
             StatusCode::OK
         );
+    }
 
-        // logout invalidates the session
+    #[tokio::test]
+    async fn logout_invalidates_the_session() {
+        let (r, _) = setup_app().await;
+        let cookie = setup_admin(&r).await;
         assert_eq!(
             call_post(&r, "/api/domus/logout", Some(&cookie), "")
                 .await
@@ -1688,18 +1677,16 @@ mod tests {
         assert_eq!(list.as_array().unwrap().len(), 1);
     }
 
-    #[tokio::test]
-    async fn user_management_rules() {
-        let (r, app) = setup_app().await;
-        let (admin, bob) = admin_and_member(&r).await;
-        let put = |c: &str, uri: &str, body: &str| {
-            let (r, c, uri, body) = (r.clone(), c.to_string(), uri.to_string(), body.to_string());
-            async move { call_put(&r, &uri, Some(&c), &body).await.0 }
-        };
+    async fn bob_uri(app: &AppState) -> String {
         let bob_id = app.core.store().user_login("bob").await.unwrap().0.id;
-        let bob_uri = format!("/api/domus/users/{bob_id}");
+        format!("/api/domus/users/{bob_id}")
+    }
 
-        // duplicates (case-insensitive) and weak passwords are refused
+    #[tokio::test]
+    async fn user_create_refuses_duplicates_and_weak_passwords() {
+        let (r, _) = setup_app().await;
+        let (admin, _) = admin_and_member(&r).await;
+        // duplicates are refused case-insensitively
         let dup = r#"{"username":"Bob","password":"long enough pw12"}"#;
         assert_eq!(
             call_post(&r, "/api/domus/users", Some(&admin), dup).await.0,
@@ -1712,10 +1699,14 @@ mod tests {
                 .0,
             StatusCode::BAD_REQUEST
         );
+    }
 
-        // the last admin can be neither demoted nor deleted; nobody deletes themselves
+    #[tokio::test]
+    async fn the_last_admin_cannot_be_demoted_or_deleted() {
+        let (r, _) = setup_app().await;
+        let (admin, _) = admin_and_member(&r).await;
         assert_eq!(
-            put(&admin, "/api/domus/users/1", r#"{"is_admin":false}"#).await,
+            put_status(&r, &admin, "/api/domus/users/1", r#"{"is_admin":false}"#).await,
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
@@ -1724,7 +1715,8 @@ mod tests {
         );
         // a refused demotion applies nothing else from the same request
         assert_eq!(
-            put(
+            put_status(
+                &r,
                 &admin,
                 "/api/domus/users/1",
                 r#"{"is_admin":false,"password":"changed changed 12"}"#
@@ -1732,19 +1724,28 @@ mod tests {
             .await,
             StatusCode::BAD_REQUEST
         );
-        let old = r#"{"username":"admin","password":"correct horse"}"#;
         assert_eq!(
-            call_post(&r, "/api/domus/login", None, old).await.0,
+            call_post(&r, "/api/domus/login", None, ADMIN_BODY).await.0,
             StatusCode::OK
         );
         assert_eq!(
             call_get(&r, "/api/domus/tokens", Some(&admin)).await.0,
             StatusCode::OK
         );
+    }
 
-        // an admin reset signs the user out and the new password works
+    #[tokio::test]
+    async fn admin_password_reset_signs_the_user_out() {
+        let (r, app) = setup_app().await;
+        let (admin, bob) = admin_and_member(&r).await;
         assert_eq!(
-            put(&admin, &bob_uri, r#"{"password":"reset reset reset"}"#).await,
+            put_status(
+                &r,
+                &admin,
+                &bob_uri(&app).await,
+                r#"{"password":"reset reset reset"}"#
+            )
+            .await,
             StatusCode::OK
         );
         assert_eq!(
@@ -1756,24 +1757,25 @@ mod tests {
             call_post(&r, "/api/domus/login", None, login).await.0,
             StatusCode::OK
         );
+    }
 
+    #[tokio::test]
+    async fn deleting_a_demoted_admin_ends_their_session() {
+        let (r, app) = setup_app().await;
+        let (admin, bob) = admin_and_member(&r).await;
         // promote bob, then the original admin may be demoted
         assert_eq!(
-            put(&admin, &bob_uri, r#"{"is_admin":true}"#).await,
+            put_status(&r, &admin, &bob_uri(&app).await, r#"{"is_admin":true}"#).await,
             StatusCode::OK
         );
         assert_eq!(
-            put(&admin, "/api/domus/users/1", r#"{"is_admin":false}"#).await,
+            put_status(&r, &admin, "/api/domus/users/1", r#"{"is_admin":false}"#).await,
             StatusCode::OK
         );
         assert_eq!(
-            put(&admin, "/api/domus/users/99", "{}").await,
+            put_status(&r, &admin, "/api/domus/users/99", "{}").await,
             StatusCode::FORBIDDEN
         );
-
-        // deleting a user ends their session
-        let (_, h, _) = call_post(&r, "/api/domus/login", None, login).await;
-        let bob = cookie_of(&h);
         assert_eq!(
             call_delete(&r, "/api/domus/users/1", Some(&bob)).await.0,
             StatusCode::OK
@@ -1911,18 +1913,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tokens_groups_and_lights() {
+    async fn tokens_are_shown_once_stored_hashed_and_revocable() {
         let (r, app) = setup_app().await;
-        let (_, h, _) = call_post(
-            &r,
-            "/api/domus/setup",
-            None,
-            r#"{"username":"admin","password":"correct horse"}"#,
-        )
-        .await;
-        let c = cookie_of(&h);
+        let c = setup_admin(&r).await;
 
-        // token: plaintext once, hash stored, usable, revocable
         let (s, _, v) = call_post(&r, "/api/domus/tokens", Some(&c), r#"{"name":"watch"}"#).await;
         assert_eq!(s, StatusCode::OK);
         let token = v["token"].as_str().unwrap().to_string();
@@ -1930,13 +1924,8 @@ mod tests {
             token.starts_with("domus_") && token.len() == 6 + 32,
             "{token}"
         );
-        assert!(
-            app.core
-                .store()
-                .token_auth(&sha256_hex(&token))
-                .await
-                .is_some()
-        );
+        let store = app.core.store();
+        assert!(store.token_auth(&sha256_hex(&token)).await.is_some());
         let (_, _, list) = call_get(&r, "/api/domus/tokens", Some(&c)).await;
         assert_eq!(list[0]["name"], "watch");
         assert!(list[0].get("token").is_none());
@@ -1946,28 +1935,21 @@ mod tests {
                 .0,
             StatusCode::BAD_REQUEST
         );
+
         let id = v["id"].as_i64().unwrap();
+        let uri = format!("/api/domus/tokens/{id}");
+        assert_eq!(call_delete(&r, &uri, Some(&c)).await.0, StatusCode::OK);
+        assert!(store.token_auth(&sha256_hex(&token)).await.is_none());
         assert_eq!(
-            call_delete(&r, &format!("/api/domus/tokens/{id}"), Some(&c))
-                .await
-                .0,
-            StatusCode::OK
-        );
-        assert!(
-            !app.core
-                .store()
-                .token_auth(&sha256_hex(&token))
-                .await
-                .is_some()
-        );
-        assert_eq!(
-            call_delete(&r, &format!("/api/domus/tokens/{id}"), Some(&c))
-                .await
-                .0,
+            call_delete(&r, &uri, Some(&c)).await.0,
             StatusCode::NOT_FOUND
         );
+    }
 
-        // lights
+    #[tokio::test]
+    async fn lights_listing_shows_hue_states() {
+        let (r, app) = setup_app().await;
+        let c = setup_admin(&r).await;
         app.core.set_state(
             "light.hue_a",
             "on",
@@ -1978,36 +1960,30 @@ mod tests {
             l,
             json!([{"entity_id": "light.hue_a", "name": "Desk", "state": "on", "brightness": null}])
         );
+    }
 
-        // groups
-        let put_ok = call_put(
-            &r,
-            "/api/domus/groups/Garmin",
-            Some(&c),
-            r#"{"members":["light.hue_a"]}"#,
-        )
-        .await;
-        assert_eq!(put_ok.0, StatusCode::OK);
+    /// An admin session plus a `Garmin` group holding `light.hue_a`.
+    async fn admin_with_garmin_group() -> (Router, AppState, String) {
+        let (r, app) = setup_app().await;
+        let c = setup_admin(&r).await;
+        app.core.set_state("light.hue_a", "on", Map::new());
+        let members = r#"{"members":["light.hue_a"]}"#;
         assert_eq!(
-            call_put(
-                &r,
-                "/api/domus/groups/bad%20name",
-                Some(&c),
-                r#"{"members":[]}"#
-            )
-            .await
-            .0,
+            put_status(&r, &c, "/api/domus/groups/Garmin", members).await,
+            StatusCode::OK
+        );
+        (r, app, c)
+    }
+
+    #[tokio::test]
+    async fn groups_validate_their_name_and_members() {
+        let (r, _, c) = admin_with_garmin_group().await;
+        assert_eq!(
+            put_status(&r, &c, "/api/domus/groups/bad%20name", r#"{"members":[]}"#).await,
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
-            call_put(
-                &r,
-                "/api/domus/groups/G",
-                Some(&c),
-                r#"{"members":["switch.x"]}"#
-            )
-            .await
-            .0,
+            put_status(&r, &c, "/api/domus/groups/G", r#"{"members":["switch.x"]}"#).await,
             StatusCode::BAD_REQUEST
         );
         let (_, _, g) = call_get(&r, "/api/domus/groups", Some(&c)).await;
@@ -2015,13 +1991,14 @@ mod tests {
             g,
             json!([{"name": "Garmin", "members": ["light.hue_a"], "expose_light": false, "light_entity_id": "light.domus_group_Garmin"}])
         );
+    }
 
-        // exposing: flag shown, light listed, self-membership rejected, omitted flag keeps it
+    #[tokio::test]
+    async fn exposing_a_group_shows_the_flag_and_lists_its_light() {
+        let (r, _, c) = admin_with_garmin_group().await;
         let body = r#"{"members":["light.hue_a"],"expose_light":true}"#;
         assert_eq!(
-            call_put(&r, "/api/domus/groups/Garmin", Some(&c), body)
-                .await
-                .0,
+            put_status(&r, &c, "/api/domus/groups/Garmin", body).await,
             StatusCode::OK
         );
         let (_, _, g) = call_get(&r, "/api/domus/groups", Some(&c)).await;
@@ -2033,13 +2010,19 @@ mod tests {
                 .iter()
                 .any(|x| x["entity_id"] == "light.domus_group_Garmin" && x["state"] == "on")
         );
-        // scenes are accepted as members and offered in the picker; other domains are not
+    }
+
+    #[tokio::test]
+    async fn groups_take_scenes_but_not_other_domains_or_their_own_light() {
+        let (r, app, c) = admin_with_garmin_group().await;
+        let expose = r#"{"members":["light.hue_a"],"expose_light":true}"#;
+        put_status(&r, &c, "/api/domus/groups/Garmin", expose).await;
+
+        // scenes are accepted as members and offered in the picker
         app.core.set_state("scene.hue_s", "unknown", Map::new());
-        let sc = r#"{"members":["light.hue_a","scene.hue_s"]}"#;
+        let scenes = r#"{"members":["light.hue_a","scene.hue_s"]}"#;
         assert_eq!(
-            call_put(&r, "/api/domus/groups/Garmin", Some(&c), sc)
-                .await
-                .0,
+            put_status(&r, &c, "/api/domus/groups/Garmin", scenes).await,
             StatusCode::OK
         );
         let (_, _, l) = call_get(&r, "/api/domus/lights", Some(&c)).await;
@@ -2049,23 +2032,28 @@ mod tests {
                 .iter()
                 .any(|x| x["entity_id"] == "scene.hue_s")
         );
-        let sw = r#"{"members":["switch.x"]}"#;
+
+        let switch = r#"{"members":["switch.x"]}"#;
         assert_eq!(
-            call_put(&r, "/api/domus/groups/Garmin", Some(&c), sw)
-                .await
-                .0,
+            put_status(&r, &c, "/api/domus/groups/Garmin", switch).await,
             StatusCode::BAD_REQUEST
         );
         let own = r#"{"members":["light.domus_group_Garmin"]}"#;
         assert_eq!(
-            call_put(&r, "/api/domus/groups/Garmin", Some(&c), own)
-                .await
-                .0,
+            put_status(&r, &c, "/api/domus/groups/Garmin", own).await,
             StatusCode::BAD_REQUEST
         );
+    }
+
+    #[tokio::test]
+    async fn an_omitted_expose_flag_keeps_it_and_groups_can_be_deleted() {
+        let (r, app, c) = admin_with_garmin_group().await;
+        let expose = r#"{"members":["light.hue_a"],"expose_light":true}"#;
+        put_status(&r, &c, "/api/domus/groups/Garmin", expose).await;
         let keep = r#"{"members":["light.hue_a"]}"#;
-        call_put(&r, "/api/domus/groups/Garmin", Some(&c), keep).await;
+        put_status(&r, &c, "/api/domus/groups/Garmin", keep).await;
         assert!(app.core.store().group_exposed("Garmin").await);
+
         assert_eq!(
             call_delete(&r, "/api/domus/groups/Garmin", Some(&c))
                 .await
@@ -2347,56 +2335,88 @@ mod tests {
         assert!(h.contains_key("retry-after"));
     }
 
-    #[tokio::test]
-    async fn limited_users_only_see_and_hand_out_their_groups() {
-        let (r, app) = setup_app().await;
-        let (admin, bob) = admin_and_member(&r).await;
-        app.core.set_integration("bridge", Arc::new(Bridge));
-        for id in ["light.hue_a", "light.hue_b"] {
-            app.core.set_state(id, "off", Map::new());
-        }
-        let store = app.core.store();
-        store
-            .group_set("G1", &["light.hue_a".into()])
-            .await
-            .unwrap();
-        store
-            .group_set("G2", &["light.hue_b".into()])
-            .await
-            .unwrap();
-        let bob_id = store.user_login("bob").await.unwrap().0.id;
-        let uri = format!("/api/domus/users/{bob_id}");
-        let put = |c: &str, uri: &str, body: &str| {
-            let (r, c, uri, body) = (r.clone(), c.to_string(), uri.to_string(), body.to_string());
-            async move { call_put(&r, &uri, Some(&c), &body).await.0 }
-        };
+    /// Admin `admin`, member `bob` and two groups, G1 and G2, each with one light.
+    struct LimitedFixture {
+        r: Router,
+        app: AppState,
+        admin: String,
+        bob: String,
+        bob_uri: String,
+    }
 
-        // validation: unknown group, empty list, and admins cannot be limited
+    impl LimitedFixture {
+        async fn new() -> Self {
+            let (r, app) = setup_app().await;
+            let (admin, bob) = admin_and_member(&r).await;
+            app.core.set_integration("bridge", Arc::new(Bridge));
+            for id in ["light.hue_a", "light.hue_b"] {
+                app.core.set_state(id, "off", Map::new());
+            }
+            let store = app.core.store();
+            store
+                .group_set("G1", &["light.hue_a".into()])
+                .await
+                .unwrap();
+            store
+                .group_set("G2", &["light.hue_b".into()])
+                .await
+                .unwrap();
+            let bob_uri = bob_uri(&app).await;
+            Self {
+                r,
+                app,
+                admin,
+                bob,
+                bob_uri,
+            }
+        }
+
+        /// Limits bob to G1 as the admin.
+        async fn limit_bob_to_g1(&self) {
+            let scope = r#"{"scope":["G1"]}"#;
+            let status = put_status(&self.r, &self.admin, &self.bob_uri, scope).await;
+            assert_eq!(status, StatusCode::OK);
+        }
+
+        async fn test_device(&self, cookie: &str, id: &str) -> StatusCode {
+            let body = format!(r#"{{"entity_id":"{id}"}}"#);
+            call_post(&self.r, "/api/domus/devices/test", Some(cookie), &body)
+                .await
+                .0
+        }
+    }
+
+    #[tokio::test]
+    async fn limiting_a_user_validates_the_groups() {
+        let f = LimitedFixture::new().await;
+        let (r, admin, uri) = (&f.r, &f.admin, &f.bob_uri);
+        // unknown group, empty list, and admins cannot be limited
         assert_eq!(
-            put(&admin, &uri, r#"{"scope":["Nope"]}"#).await,
+            put_status(r, admin, uri, r#"{"scope":["Nope"]}"#).await,
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
-            put(&admin, &uri, r#"{"scope":[]}"#).await,
+            put_status(r, admin, uri, r#"{"scope":[]}"#).await,
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
-            put(&admin, "/api/domus/users/1", r#"{"scope":["G1"]}"#).await,
+            put_status(r, admin, "/api/domus/users/1", r#"{"scope":["G1"]}"#).await,
             StatusCode::BAD_REQUEST
         );
-        assert_eq!(
-            put(&admin, &uri, r#"{"scope":["G1"]}"#).await,
-            StatusCode::OK
-        );
-        let (_, _, users) = call_get(&r, "/api/domus/users", Some(&admin)).await;
+        f.limit_bob_to_g1().await;
+        let (_, _, users) = call_get(r, "/api/domus/users", Some(admin)).await;
         assert_eq!(users[1]["scope"], json!(["G1"]));
         assert!(users[0]["scope"].is_null());
+    }
 
-        // what bob can see and test is limited to G1
-        let (_, _, g) = call_get(&r, "/api/domus/groups", Some(&bob)).await;
+    #[tokio::test]
+    async fn a_limited_user_sees_and_tests_only_their_groups() {
+        let f = LimitedFixture::new().await;
+        f.limit_bob_to_g1().await;
+        let (_, _, g) = call_get(&f.r, "/api/domus/groups", Some(&f.bob)).await;
         assert_eq!(g.as_array().unwrap().len(), 1);
         assert_eq!(g[0]["name"], "G1");
-        let (_, _, l) = call_get(&r, "/api/domus/lights", Some(&bob)).await;
+        let (_, _, l) = call_get(&f.r, "/api/domus/lights", Some(&f.bob)).await;
         let ids: Vec<_> = l
             .as_array()
             .unwrap()
@@ -2404,32 +2424,29 @@ mod tests {
             .map(|x| x["entity_id"].as_str().unwrap())
             .collect();
         assert_eq!(ids, ["light.hue_a"]);
-        let test = |c: &str, id: &str| {
-            let (r, c, body) = (
-                r.clone(),
-                c.to_string(),
-                format!(r#"{{"entity_id":"{id}"}}"#),
-            );
-            async move {
-                call_post(&r, "/api/domus/devices/test", Some(&c), &body)
-                    .await
-                    .0
-            }
-        };
-        assert_eq!(test(&bob, "light.hue_a").await, StatusCode::OK);
-        assert_eq!(test(&bob, "light.hue_b").await, StatusCode::NOT_FOUND);
-        assert_eq!(test(&admin, "light.hue_b").await, StatusCode::OK);
+        assert_eq!(f.test_device(&f.bob, "light.hue_a").await, StatusCode::OK);
+        assert_eq!(
+            f.test_device(&f.bob, "light.hue_b").await,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(f.test_device(&f.admin, "light.hue_b").await, StatusCode::OK);
+    }
 
-        // tokens: default to bob's own groups, never beyond them
-        let mint = |body: &str| {
-            let (r, bob, body) = (r.clone(), bob.clone(), body.to_string());
-            async move { call_post(&r, "/api/domus/tokens", Some(&bob), &body).await }
+    #[tokio::test]
+    async fn a_limited_user_hands_out_tokens_within_their_groups() {
+        let f = LimitedFixture::new().await;
+        f.limit_bob_to_g1().await;
+        let store = f.app.core.store();
+        let mint = |cookie: &str, body: &str| {
+            let (r, cookie, body) = (f.r.clone(), cookie.to_string(), body.to_string());
+            async move { call_post(&r, "/api/domus/tokens", Some(&cookie), &body).await }
         };
-        let (s, _, _) = mint(r#"{"name":"x","scope":["G2"]}"#).await;
+        // tokens default to bob's own groups, never beyond them
+        let (s, _, _) = mint(&f.bob, r#"{"name":"x","scope":["G2"]}"#).await;
         assert_eq!(s, StatusCode::FORBIDDEN);
-        let (s, _, _) = mint(r#"{"name":"x","scope":["G1","G2"]}"#).await;
+        let (s, _, _) = mint(&f.bob, r#"{"name":"x","scope":["G1","G2"]}"#).await;
         assert_eq!(s, StatusCode::FORBIDDEN);
-        let (s, _, v) = mint(r#"{"name":"open"}"#).await;
+        let (s, _, v) = mint(&f.bob, r#"{"name":"open"}"#).await;
         assert_eq!(s, StatusCode::OK);
         let auth = store
             .token_auth(&sha256_hex(v["token"].as_str().unwrap()))
@@ -2437,11 +2454,11 @@ mod tests {
             .unwrap();
         assert_eq!(auth.scope, Some(vec!["G1".to_string()]));
         assert_eq!(
-            mint(r#"{"name":"ok","scope":["G1"]}"#).await.0,
+            mint(&f.bob, r#"{"name":"ok","scope":["G1"]}"#).await.0,
             StatusCode::OK
         );
         // the admin is not limited
-        let (_, _, v) = call_post(&r, "/api/domus/tokens", Some(&admin), r#"{"name":"a"}"#).await;
+        let (_, _, v) = mint(&f.admin, r#"{"name":"a"}"#).await;
         assert_eq!(
             store
                 .token_auth(&sha256_hex(v["token"].as_str().unwrap()))
@@ -2450,17 +2467,25 @@ mod tests {
                 .scope,
             None
         );
+    }
 
-        // null lifts the limit; making someone admin clears it
-        assert_eq!(put(&admin, &uri, r#"{"scope":null}"#).await, StatusCode::OK);
-        assert_eq!(store.list_users().await[1].scope, None);
-        assert_eq!(test(&bob, "light.hue_b").await, StatusCode::OK);
+    #[tokio::test]
+    async fn lifting_the_limit_or_making_an_admin_clears_it() {
+        let f = LimitedFixture::new().await;
+        f.limit_bob_to_g1().await;
+        let store = f.app.core.store();
+        let (r, admin, uri) = (&f.r, &f.admin, &f.bob_uri);
+        // null lifts the limit
         assert_eq!(
-            put(&admin, &uri, r#"{"scope":["G1"]}"#).await,
+            put_status(r, admin, uri, r#"{"scope":null}"#).await,
             StatusCode::OK
         );
+        assert_eq!(store.list_users().await[1].scope, None);
+        assert_eq!(f.test_device(&f.bob, "light.hue_b").await, StatusCode::OK);
+        // making someone admin clears a limit too
+        f.limit_bob_to_g1().await;
         assert_eq!(
-            put(&admin, &uri, r#"{"is_admin":true}"#).await,
+            put_status(r, admin, uri, r#"{"is_admin":true}"#).await,
             StatusCode::OK
         );
         assert_eq!(store.list_users().await[1].scope, None);
