@@ -4,11 +4,14 @@ use domus::hue::HueManager;
 use domus::store::Store;
 use domus::util::random_hex;
 use domus::{AppState, build_app, resume_hue};
+use std::net::SocketAddr;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::watch;
 use tracing::info;
 
-fn prepare_data_dir(dir: &std::path::Path) -> std::io::Result<()> {
+fn prepare_data_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -16,16 +19,20 @@ fn prepare_data_dir(dir: &std::path::Path) -> std::io::Result<()> {
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
 }
 
-/// `domus healthcheck`: asks the server on this host whether it is healthy and exits 0 or 1.
-/// The container's `HEALTHCHECK` uses it because the image has no shell or curl.
-async fn healthcheck() -> ! {
-    let env = match Env::from_env() {
+fn load_env() -> Env {
+    match Env::from_env() {
         Ok(e) => e,
         Err(e) => {
             eprintln!("domus: {e}");
             std::process::exit(2);
         }
-    };
+    }
+}
+
+/// `domus healthcheck`: asks the server on this host whether it is healthy and exits 0 or 1.
+/// The container's `HEALTHCHECK` uses it because the image has no shell or curl.
+async fn healthcheck() -> ! {
+    let env = load_env();
     match domus::health::check(&domus::health::health_url(env.bind)).await {
         Ok(()) => std::process::exit(0),
         Err(e) => {
@@ -35,30 +42,12 @@ async fn healthcheck() -> ! {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
-        healthcheck().await;
-    }
-    let env = match Env::from_env() {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("domus: {e}");
-            std::process::exit(2);
-        }
-    };
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::new(&env.log))
-        .init();
-
-    if let Err(e) = prepare_data_dir(&env.data_dir) {
-        eprintln!(
-            "domus: cannot prepare data dir {}: {e}",
-            env.data_dir.display()
-        );
+async fn open_store(data_dir: &Path) -> Arc<Store> {
+    if let Err(e) = prepare_data_dir(data_dir) {
+        eprintln!("domus: cannot prepare data dir {}: {e}", data_dir.display());
         std::process::exit(1);
     }
-    let db_path = env.data_dir.join("domus.db");
+    let db_path = data_dir.join("domus.db");
     let store = match Store::open(&db_path).await {
         Ok(s) => Arc::new(s),
         Err(e) => {
@@ -67,18 +56,56 @@ async fn main() {
         }
     };
     let _ = std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o600));
+    store
+}
 
-    // Until the first admin exists, creating it requires a code only the operator can read.
-    let setup_code = if store.user_count().await == 0 {
-        // 32 bits is plenty: wrong guesses are throttled (about 4 an hour) and the code dies with setup.
-        let hex = random_hex(4);
-        let code = format!("{}-{}", &hex[..4], &hex[4..]);
-        eprintln!("domus: no users yet. Setup code: {code}");
-        tracing::warn!("no users yet; the setup code is required to create the first admin");
-        Some(code)
-    } else {
-        None
-    };
+/// Until the first admin exists, creating it requires a code only the operator can read.
+async fn setup_code_if_no_users(store: &Store) -> Option<String> {
+    if store.user_count().await != 0 {
+        return None;
+    }
+    // 32 bits is plenty: wrong guesses are throttled (about 4 an hour) and the code dies with setup.
+    let hex = random_hex(4);
+    let code = format!("{}-{}", &hex[..4], &hex[4..]);
+    eprintln!("domus: no users yet. Setup code: {code}");
+    tracing::warn!("no users yet; the setup code is required to create the first admin");
+    Some(code)
+}
+
+async fn bind_listener(addr: SocketAddr) -> tokio::net::TcpListener {
+    match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("domus: cannot bind {addr}: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Waits for Ctrl-C or SIGTERM, then tells the open streams to end.
+async fn shutdown_signal(stopping: Arc<watch::Sender<bool>>) {
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("install SIGTERM handler");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+    }
+    info!("shutting down");
+    stopping.send_replace(true);
+}
+
+#[tokio::main]
+async fn main() {
+    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+        healthcheck().await;
+    }
+    let env = load_env();
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(&env.log))
+        .init();
+
+    let store = open_store(&env.data_dir).await;
+    let setup_code = setup_code_if_no_users(&store).await;
 
     let core = Core::new(store);
     let hue = HueManager::new(core.clone());
@@ -87,13 +114,7 @@ async fn main() {
     let stopping = state.shutdown.clone();
     let app = build_app(state);
 
-    let listener = match tokio::net::TcpListener::bind(env.bind).await {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("domus: cannot bind {}: {e}", env.bind);
-            std::process::exit(1);
-        }
-    };
+    let listener = bind_listener(env.bind).await;
     info!(
         "domus {} listening on http://{}",
         domus::GIT_VERSION,
@@ -104,18 +125,8 @@ async fn main() {
     } else {
         None
     };
-    let shutdown = async move {
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("install SIGTERM handler");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
-        }
-        info!("shutting down");
-        stopping.send_replace(true);
-    };
     let served = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
+        .with_graceful_shutdown(shutdown_signal(stopping))
         .await;
     if let Some(daemon) = advertiser {
         domus::discovery::stop(&daemon);
