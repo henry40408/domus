@@ -1417,6 +1417,17 @@ mod tests {
             assert!(!hue.apply_event_payload(&ev("update", item)));
         }
         assert_eq!(core.get_state("light.hue_aaaa1111").unwrap().state, "on");
+        // light updates without an id or for an unknown light change nothing either
+        for item in [
+            json!({"type": "light", "on": {"on": false}}),
+            json!({"id": "unknown", "type": "light", "on": {"on": false}}),
+        ] {
+            assert!(!hue.apply_event_payload(&ev("update", item)));
+        }
+        assert_eq!(core.get_state("light.hue_aaaa1111").unwrap().state, "on");
+        // unknown event kinds and resource types are skipped, even when added
+        assert!(!hue.apply_event_payload(&ev("other", json!({"type": "light"}))));
+        assert!(!hue.apply_event_payload(&ev("add", json!({"type": "bridge"}))));
         // a link going down and a link or room appearing
         assert!(!hue.apply_event_payload(&ev(
             "update",
