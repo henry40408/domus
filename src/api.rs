@@ -448,7 +448,7 @@ pub fn router(app: AppState) -> Router {
 mod tests {
     use super::*;
     use crate::core::{BoxFut, Integration};
-    use crate::store::Store;
+    use crate::store::{NewToken, Store};
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
     use http_body_util::BodyExt;
@@ -490,7 +490,14 @@ mod tests {
     async fn setup() -> (Router, AppState, Arc<Fake>) {
         let core = Core::new(Arc::new(Store::open_memory().await.unwrap()));
         core.store()
-            .create_token(1, "t", &sha256_hex(TOKEN), None, false, None)
+            .create_token(NewToken {
+                user_id: 1,
+                name: "t",
+                token_hash: &sha256_hex(TOKEN),
+                scope: None,
+                read_only: false,
+                expires: None,
+            })
             .await;
         let fake = Arc::new(Fake(Mutex::new(Vec::new())));
         core.set_integration("fake", fake.clone());
@@ -594,14 +601,14 @@ mod tests {
         let scope = ["Garmin".to_string()];
         app.core
             .store()
-            .create_token(
-                1,
-                "scoped",
-                &sha256_hex("scoped"),
-                Some(&scope),
-                false,
-                None,
-            )
+            .create_token(NewToken {
+                user_id: 1,
+                name: "scoped",
+                token_hash: &sha256_hex("scoped"),
+                scope: Some(&scope),
+                read_only: false,
+                expires: None,
+            })
             .await;
         let (_, v) = call(&r, "GET", "/api/states", Some("scoped"), "").await;
         let ids: Vec<&str> = v
@@ -691,7 +698,14 @@ mod tests {
         let (r, app, fake) = setup().await;
         let store = app.core.store();
         store
-            .create_token(1, "ro", &sha256_hex("ro"), None, true, None)
+            .create_token(NewToken {
+                user_id: 1,
+                name: "ro",
+                token_hash: &sha256_hex("ro"),
+                scope: None,
+                read_only: true,
+                expires: None,
+            })
             .await;
         let t = Some("ro");
         assert_eq!(
@@ -720,7 +734,14 @@ mod tests {
         let owner = store.create_user("owner", "h", false).await.unwrap();
         let token = "owned-token";
         store
-            .create_token(owner, "o", &sha256_hex(token), None, false, None)
+            .create_token(NewToken {
+                user_id: owner,
+                name: "o",
+                token_hash: &sha256_hex(token),
+                scope: None,
+                read_only: false,
+                expires: None,
+            })
             .await;
         store
             .group_set("Other", &["light.hue_c".into()])
@@ -1022,14 +1043,14 @@ mod tests {
         store.group_set_exposed("Garmin", true).await;
         let scope = ["Garmin".to_string()];
         store
-            .create_token(
-                1,
-                "scoped",
-                &sha256_hex("scoped"),
-                Some(&scope),
-                false,
-                None,
-            )
+            .create_token(NewToken {
+                user_id: 1,
+                name: "scoped",
+                token_hash: &sha256_hex("scoped"),
+                scope: Some(&scope),
+                read_only: false,
+                expires: None,
+            })
             .await;
         let t = Some("scoped");
 

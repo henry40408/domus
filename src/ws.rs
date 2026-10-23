@@ -521,7 +521,7 @@ mod tests {
     use super::*;
     use crate::core::Core;
     use crate::hue::HueManager;
-    use crate::store::Store;
+    use crate::store::{NewAppToken, NewToken, Store};
     use futures_util::{SinkExt, StreamExt};
     use std::sync::Arc;
     use tokio::net::TcpStream;
@@ -537,7 +537,14 @@ mod tests {
         let store = core.store().clone();
         let user = store.create_first_admin("admin", "x").await.unwrap();
         store
-            .create_token(user, "t", &sha256_hex(TOKEN), None, false, None)
+            .create_token(NewToken {
+                user_id: user,
+                name: "t",
+                token_hash: &sha256_hex(TOKEN),
+                scope: None,
+                read_only: false,
+                expires: None,
+            })
             .await
             .unwrap();
         let app = AppState::new(core.clone(), HueManager::new(core));
@@ -742,14 +749,14 @@ mod tests {
         let store = app.core.store().clone();
         let scope = ["Garmin".to_string()];
         store
-            .create_token(
-                1,
-                "scoped",
-                &sha256_hex("scoped"),
-                Some(&scope),
-                false,
-                None,
-            )
+            .create_token(NewToken {
+                user_id: 1,
+                name: "scoped",
+                token_hash: &sha256_hex("scoped"),
+                scope: Some(&scope),
+                read_only: false,
+                expires: None,
+            })
             .await
             .unwrap();
         app.core.set_state("light.a", "on", Map::new());
@@ -793,7 +800,14 @@ mod tests {
         let store = app.core.store().clone();
         let bob = store.create_user("bob", "x", false).await.unwrap();
         store
-            .create_token(bob, "bob", &sha256_hex("bob"), None, false, None)
+            .create_token(NewToken {
+                user_id: bob,
+                name: "bob",
+                token_hash: &sha256_hex("bob"),
+                scope: None,
+                read_only: false,
+                expires: None,
+            })
             .await
             .unwrap();
         app.core.set_state("light.a", "on", Map::new());
@@ -828,14 +842,26 @@ mod tests {
             .unwrap();
         assert!(
             store
-                .create_app_token(1, "app", &sha256_hex("first"), i64::MAX, refresh)
+                .create_app_token(NewAppToken {
+                    user_id: 1,
+                    name: "app",
+                    token_hash: &sha256_hex("first"),
+                    expires: i64::MAX,
+                    refresh_id: refresh
+                })
                 .await
         );
         let mut c = authed(addr, "first").await;
         // the app refreshed: the old access token is replaced by a new one
         assert!(
             store
-                .create_app_token(1, "app", &sha256_hex("second"), i64::MAX, refresh)
+                .create_app_token(NewAppToken {
+                    user_id: 1,
+                    name: "app",
+                    token_hash: &sha256_hex("second"),
+                    expires: i64::MAX,
+                    refresh_id: refresh
+                })
                 .await
         );
         tokio::time::sleep(RECHECK * 3).await;
@@ -947,7 +973,14 @@ mod tests {
         let user = 1;
         app.core
             .store()
-            .create_token(user, "ro", &sha256_hex("ro-token"), None, true, None)
+            .create_token(NewToken {
+                user_id: user,
+                name: "ro",
+                token_hash: &sha256_hex("ro-token"),
+                scope: None,
+                read_only: true,
+                expires: None,
+            })
             .await
             .unwrap();
         let call = json!({"id": 1, "type": "call_service", "domain": "light",
@@ -993,7 +1026,14 @@ mod tests {
         let store = app.core.store().clone();
         let bob = store.create_user("bob", "x", false).await.unwrap();
         store
-            .create_token(bob, "bob", &sha256_hex("bob"), None, false, None)
+            .create_token(NewToken {
+                user_id: bob,
+                name: "bob",
+                token_hash: &sha256_hex("bob"),
+                scope: None,
+                read_only: false,
+                expires: None,
+            })
             .await
             .unwrap();
         let mut c = authed(addr, "bob").await;
@@ -1017,7 +1057,14 @@ mod tests {
         let (app, addr) = serve_app().await;
         app.core
             .store()
-            .create_token(1, "temp", &sha256_hex("temp"), None, false, None)
+            .create_token(NewToken {
+                user_id: 1,
+                name: "temp",
+                token_hash: &sha256_hex("temp"),
+                scope: None,
+                read_only: false,
+                expires: None,
+            })
             .await
             .unwrap();
         let mut revoked = authed(addr, "temp").await;

@@ -18,7 +18,7 @@ use std::time::Duration;
 use crate::api::{AppState, light_action};
 use crate::core::{CallError, group_light_id};
 use crate::hue::{PairError, bridge_base, pair};
-use crate::store::{APP_SESSION_TTL_SECS, DeleteUser, HueBridge, SESSION_TTL_SECS, User};
+use crate::store::{APP_SESSION_TTL_SECS, DeleteUser, HueBridge, NewToken, SESSION_TTL_SECS, User};
 use crate::throttle;
 use crate::util::{
     constant_time_eq, hash_password, now_secs, random_hex, sha256_hex, verify_dummy,
@@ -966,14 +966,14 @@ async fn token_create(
     match app
         .core
         .store()
-        .create_token(
-            me.id,
+        .create_token(NewToken {
+            user_id: me.id,
             name,
-            &sha256_hex(&token),
-            scope.as_deref(),
-            body.read_only,
+            token_hash: &sha256_hex(&token),
+            scope: scope.as_deref(),
+            read_only: body.read_only,
             expires,
-        )
+        })
         .await
     {
         // The plaintext is returned exactly once; only its hash is stored.
