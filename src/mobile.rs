@@ -240,7 +240,7 @@ mod tests {
     use super::*;
     use crate::core::Core;
     use crate::hue::HueManager;
-    use crate::store::Store;
+    use crate::store::{NewAppToken, NewToken, Store};
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
@@ -254,11 +254,25 @@ mod tests {
         let store = core.store();
         let user = store.create_first_admin("admin", "x").await.unwrap();
         store
-            .create_token(user, "t", &sha256_hex(TOKEN), None, false, None)
+            .create_token(NewToken {
+                user_id: user,
+                name: "t",
+                token_hash: &sha256_hex(TOKEN),
+                scope: None,
+                read_only: false,
+                expires: None,
+            })
             .await
             .unwrap();
         store
-            .create_token(user, "ro", &sha256_hex("ro-token"), None, true, None)
+            .create_token(NewToken {
+                user_id: user,
+                name: "ro",
+                token_hash: &sha256_hex("ro-token"),
+                scope: None,
+                read_only: true,
+                expires: None,
+            })
             .await
             .unwrap();
         let app = AppState::new(core.clone(), HueManager::new(core));
@@ -496,7 +510,13 @@ mod tests {
             .unwrap();
         assert!(
             store
-                .create_app_token(1, "app", &sha256_hex(access), i64::MAX, refresh)
+                .create_app_token(NewAppToken {
+                    user_id: 1,
+                    name: "app",
+                    token_hash: &sha256_hex(access),
+                    expires: i64::MAX,
+                    refresh_id: refresh
+                })
                 .await
         );
         refresh
@@ -555,14 +575,14 @@ mod tests {
         let scope = ["Garmin".to_string()];
         app.core
             .store()
-            .create_token(
-                1,
-                "scoped",
-                &sha256_hex("scoped"),
-                Some(&scope),
-                false,
-                None,
-            )
+            .create_token(NewToken {
+                user_id: 1,
+                name: "scoped",
+                token_hash: &sha256_hex("scoped"),
+                scope: Some(&scope),
+                read_only: false,
+                expires: None,
+            })
             .await
             .unwrap();
         let (status, _) = post_json(

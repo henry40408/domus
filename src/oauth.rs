@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::api::AppState;
+use crate::store::NewAppToken;
 use crate::throttle;
 use crate::util::{now_secs, random_hex, sha256_hex, verify_dummy, verify_password};
 
@@ -204,13 +205,13 @@ async fn mint_access(
     };
     app.core
         .store()
-        .create_app_token(
+        .create_app_token(NewAppToken {
             user_id,
             name,
-            &sha256_hex(&token),
-            now_secs() + ACCESS_TTL_SECS,
+            token_hash: &sha256_hex(&token),
+            expires: now_secs() + ACCESS_TTL_SECS,
             refresh_id,
-        )
+        })
         .await
         .then_some(token)
 }
@@ -309,7 +310,7 @@ mod tests {
     use super::*;
     use crate::core::Core;
     use crate::hue::HueManager;
-    use crate::store::Store;
+    use crate::store::{NewToken, Store};
     use crate::util::hash_password;
     use axum::body::Body;
     use axum::http::Request;
@@ -725,7 +726,14 @@ mod tests {
         // An ordinary API token (here an unrestricted one) is not accepted either.
         app.core
             .store()
-            .create_token(1, "plain", &sha256_hex("domus_plain"), None, false, None)
+            .create_token(NewToken {
+                user_id: 1,
+                name: "plain",
+                token_hash: &sha256_hex("domus_plain"),
+                scope: None,
+                read_only: false,
+                expires: None,
+            })
             .await
             .unwrap();
         let (status, cookie) = from_token(&r, Some("domus_plain")).await;

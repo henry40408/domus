@@ -104,6 +104,25 @@ pub enum RegistrationError {
     Failed,
 }
 
+/// A long-lived token to store; `token_hash` is the hash, the secret itself is never kept.
+pub struct NewToken<'a> {
+    pub user_id: i64,
+    pub name: &'a str,
+    pub token_hash: &'a str,
+    pub scope: Option<&'a [String]>,
+    pub read_only: bool,
+    pub expires: Option<i64>,
+}
+
+/// A short-lived access token tied to the refresh token it was minted from.
+pub struct NewAppToken<'a> {
+    pub user_id: i64,
+    pub name: &'a str,
+    pub token_hash: &'a str,
+    pub expires: i64,
+    pub refresh_id: i64,
+}
+
 /// What a Companion app tells us about itself and its device when registering.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RegistrationFields {
@@ -593,15 +612,15 @@ impl Store {
 
     // long-lived tokens (only the hash is stored)
 
-    pub async fn create_token(
-        &self,
-        user_id: i64,
-        name: &str,
-        token_hash: &str,
-        scope: Option<&[String]>,
-        read_only: bool,
-        expires: Option<i64>,
-    ) -> Option<i64> {
+    pub async fn create_token(&self, token: NewToken<'_>) -> Option<i64> {
+        let NewToken {
+            user_id,
+            name,
+            token_hash,
+            scope,
+            read_only,
+            expires,
+        } = token;
         let scope = scope.map(|s| serde_json::to_string(s).unwrap_or_else(|_| "[]".into()));
         let now = now_secs();
         // Expired tokens never authenticate; this just keeps the table tidy.
@@ -788,14 +807,14 @@ impl Store {
 
     /// Mints a short-lived access token tied to a refresh token; any older one stops working, so
     /// at most one stays live (of two racing refreshes the later one wins).
-    pub async fn create_app_token(
-        &self,
-        user_id: i64,
-        name: &str,
-        token_hash: &str,
-        expires: i64,
-        refresh_id: i64,
-    ) -> bool {
+    pub async fn create_app_token(&self, token: NewAppToken<'_>) -> bool {
+        let NewAppToken {
+            user_id,
+            name,
+            token_hash,
+            expires,
+            refresh_id,
+        } = token;
         let now = now_secs();
         let Ok(inserted) = sqlx::query(
             "INSERT INTO tokens (name, token_hash, created, user_id, read_only, expires, refresh_id)
@@ -1260,9 +1279,16 @@ mod tests {
         assert_eq!(s.list_users().await.len(), 2);
 
         s.create_session("sb", bob, "").await;
-        s.create_token(bob, "watch", "hb", None, false, None)
-            .await
-            .unwrap();
+        s.create_token(NewToken {
+            user_id: bob,
+            name: "watch",
+            token_hash: "hb",
+            scope: None,
+            read_only: false,
+            expires: None,
+        })
+        .await
+        .unwrap();
         assert!(s.delete_user(bob).await);
         assert!(!s.delete_user(bob).await);
         assert!(s.session_user("sb").await.is_none());
@@ -1281,12 +1307,26 @@ mod tests {
             s.create_user("b", "x", false).await.unwrap(),
         );
         let id = s
-            .create_token(a, "watch", "h1", None, false, None)
+            .create_token(NewToken {
+                user_id: a,
+                name: "watch",
+                token_hash: "h1",
+                scope: None,
+                read_only: false,
+                expires: None,
+            })
             .await
             .unwrap();
-        s.create_token(b, "other", "h3", None, false, None)
-            .await
-            .unwrap();
+        s.create_token(NewToken {
+            user_id: b,
+            name: "other",
+            token_hash: "h3",
+            scope: None,
+            read_only: false,
+            expires: None,
+        })
+        .await
+        .unwrap();
         assert!(s.list_tokens(Some(a)).await[0].last_used.is_none());
         assert!(s.token_auth("h1").await.is_some());
         assert!(s.list_tokens(Some(a)).await[0].last_used.is_some());
@@ -1304,13 +1344,27 @@ mod tests {
     #[tokio::test]
     async fn token_scope_roundtrip() {
         let s = Store::open_memory().await.unwrap();
-        s.create_token(1, "open", "h-open", None, false, None)
-            .await
-            .unwrap();
+        s.create_token(NewToken {
+            user_id: 1,
+            name: "open",
+            token_hash: "h-open",
+            scope: None,
+            read_only: false,
+            expires: None,
+        })
+        .await
+        .unwrap();
         let scope = ["a".to_string(), "b".to_string()];
-        s.create_token(1, "scoped", "h-scoped", Some(&scope), false, None)
-            .await
-            .unwrap();
+        s.create_token(NewToken {
+            user_id: 1,
+            name: "scoped",
+            token_hash: "h-scoped",
+            scope: Some(&scope),
+            read_only: false,
+            expires: None,
+        })
+        .await
+        .unwrap();
         let scope_of = async |h: &str| s.token_auth(h).await.map(|a| a.scope);
         assert_eq!(scope_of("h-open").await, Some(None));
         assert_eq!(scope_of("h-scoped").await, Some(Some(scope.to_vec())));
@@ -1343,15 +1397,36 @@ mod tests {
         let now = now_secs();
         let u = s.create_user("u", "h", false).await.unwrap();
         let ga = ["a".to_string(), "b".to_string()];
-        s.create_token(u, "ro", "h-ro", None, true, None)
-            .await
-            .unwrap();
-        s.create_token(u, "live", "h-live", Some(&ga), false, Some(now + 100))
-            .await
-            .unwrap();
-        s.create_token(u, "dead", "h-dead", None, false, Some(now - 1))
-            .await
-            .unwrap();
+        s.create_token(NewToken {
+            user_id: u,
+            name: "ro",
+            token_hash: "h-ro",
+            scope: None,
+            read_only: true,
+            expires: None,
+        })
+        .await
+        .unwrap();
+        s.create_token(NewToken {
+            user_id: u,
+            name: "live",
+            token_hash: "h-live",
+            scope: Some(&ga),
+            read_only: false,
+            expires: Some(now + 100),
+        })
+        .await
+        .unwrap();
+        s.create_token(NewToken {
+            user_id: u,
+            name: "dead",
+            token_hash: "h-dead",
+            scope: None,
+            read_only: false,
+            expires: Some(now - 1),
+        })
+        .await
+        .unwrap();
         assert!(s.token_auth("h-ro").await.unwrap().read_only);
         assert!(!s.token_auth("h-live").await.unwrap().read_only);
         assert!(s.token_auth("h-dead").await.is_none(), "expired");
@@ -1371,9 +1446,16 @@ mod tests {
         assert_eq!(s.list_users().await[0].scope, None);
 
         // creating a token tidies expired ones away
-        s.create_token(u, "new", "h-new", None, false, None)
-            .await
-            .unwrap();
+        s.create_token(NewToken {
+            user_id: u,
+            name: "new",
+            token_hash: "h-new",
+            scope: None,
+            read_only: false,
+            expires: None,
+        })
+        .await
+        .unwrap();
         assert_eq!(s.list_tokens(None).await.len(), 3);
     }
 
