@@ -511,13 +511,7 @@ mod tests {
         (router(app.clone()), app, fake)
     }
 
-    async fn call(
-        r: &Router,
-        method: &str,
-        uri: &str,
-        token: Option<&str>,
-        body: &str,
-    ) -> (StatusCode, Value) {
+    fn request(method: &str, uri: &str, token: Option<&str>, body: &str) -> HttpRequest<Body> {
         let mut b = HttpRequest::builder()
             .method(method)
             .uri(uri)
@@ -525,11 +519,24 @@ mod tests {
         if let Some(t) = token {
             b = b.header("authorization", format!("Bearer {t}"));
         }
-        let resp = r
-            .clone()
-            .oneshot(b.body(Body::from(body.to_string())).unwrap())
-            .await
-            .unwrap();
+        b.body(Body::from(body.to_string())).unwrap()
+    }
+
+    async fn call_get(r: &Router, uri: &str, token: Option<&str>) -> (StatusCode, Value) {
+        send(r, request("GET", uri, token, "")).await
+    }
+
+    async fn call_post(
+        r: &Router,
+        uri: &str,
+        token: Option<&str>,
+        body: &str,
+    ) -> (StatusCode, Value) {
+        send(r, request("POST", uri, token, body)).await
+    }
+
+    async fn send(r: &Router, req: HttpRequest<Body>) -> (StatusCode, Value) {
+        let resp = r.clone().oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         (
@@ -542,19 +549,17 @@ mod tests {
     async fn auth_required() {
         let (r, ..) = setup().await;
         assert_eq!(
-            call(&r, "GET", "/api/states/light.hue_a", None, "").await.0,
+            call_get(&r, "/api/states/light.hue_a", None).await.0,
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(
-            call(&r, "GET", "/api/states/light.hue_a", Some("wrong"), "")
+            call_get(&r, "/api/states/light.hue_a", Some("wrong"))
                 .await
                 .0,
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(
-            call(&r, "GET", "/api/states/light.hue_a", Some(TOKEN), "")
-                .await
-                .0,
+            call_get(&r, "/api/states/light.hue_a", Some(TOKEN)).await.0,
             StatusCode::OK
         );
     }
@@ -562,11 +567,11 @@ mod tests {
     #[tokio::test]
     async fn state_shape_and_404() {
         let (r, ..) = setup().await;
-        let (_, v) = call(&r, "GET", "/api/states/light.hue_a", Some(TOKEN), "").await;
+        let (_, v) = call_get(&r, "/api/states/light.hue_a", Some(TOKEN)).await;
         assert_eq!(v["entity_id"], "light.hue_a");
         assert_eq!(v["state"], "off");
         assert!(v["context"]["id"].is_string());
-        let (s, v) = call(&r, "GET", "/api/states/light.nope", Some(TOKEN), "").await;
+        let (s, v) = call_get(&r, "/api/states/light.nope", Some(TOKEN)).await;
         assert_eq!(s, StatusCode::NOT_FOUND);
         assert_eq!(v["message"], "Entity not found.");
     }
@@ -580,7 +585,7 @@ mod tests {
             .group_set("Other", &["light.hue_c".into()])
             .await
             .unwrap();
-        let (s, v) = call(&r, "GET", "/api/states", Some(TOKEN), "").await;
+        let (s, v) = call_get(&r, "/api/states", Some(TOKEN)).await;
         assert_eq!(s, StatusCode::OK);
         let ids: Vec<&str> = v
             .as_array()
@@ -610,7 +615,7 @@ mod tests {
                 expires: None,
             })
             .await;
-        let (_, v) = call(&r, "GET", "/api/states", Some("scoped"), "").await;
+        let (_, v) = call_get(&r, "/api/states", Some("scoped")).await;
         let ids: Vec<&str> = v
             .as_array()
             .unwrap()
@@ -619,7 +624,7 @@ mod tests {
             .collect();
         assert_eq!(ids, ["group.Garmin", "light.hue_a", "light.hue_b"]);
         assert_eq!(
-            call(&r, "GET", "/api/states", None, "").await.0,
+            call_get(&r, "/api/states", None).await.0,
             StatusCode::UNAUTHORIZED
         );
     }
@@ -629,7 +634,7 @@ mod tests {
         let (r, app, fake) = setup().await;
         app.core.set_state("light.hue_a", "on", Map::new());
         let body = r#"{"entity_id":["light.hue_a","light.hue_b"]}"#;
-        let (s, _) = call(&r, "POST", "/api/services/light/toggle", Some(TOKEN), body).await;
+        let (s, _) = call_post(&r, "/api/services/light/toggle", Some(TOKEN), body).await;
         assert_eq!(s, StatusCode::OK);
         let calls = fake.0.lock().unwrap().clone();
         assert_eq!(
@@ -646,7 +651,7 @@ mod tests {
         let (r, app, fake) = setup().await;
         app.core.set_state("light.hue_a", "on", Map::new());
         let body = r#"{"entity_id":["group.Garmin","light.hue_a","light.hue_a"]}"#;
-        let (s, v) = call(&r, "POST", "/api/services/light/toggle", Some(TOKEN), body).await;
+        let (s, v) = call_post(&r, "/api/services/light/toggle", Some(TOKEN), body).await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(fake.0.lock().unwrap().len(), 2);
         assert_eq!(v.as_array().unwrap().len(), 2);
@@ -657,28 +662,21 @@ mod tests {
         let (r, app, _) = setup().await;
         app.core.set_state("light.hue_bad", "off", Map::new());
         let uri = "/api/services/light/turn_on";
-        let (s, _) = call(
-            &r,
-            "POST",
-            uri,
-            Some(TOKEN),
-            r#"{"entity_id":"light.hue_bad"}"#,
-        )
-        .await;
+        let (s, _) = call_post(&r, uri, Some(TOKEN), r#"{"entity_id":"light.hue_bad"}"#).await;
         assert_eq!(s, StatusCode::BAD_GATEWAY);
-        let (s, _) = call(&r, "POST", uri, Some(TOKEN), "{not json").await;
+        let (s, _) = call_post(&r, uri, Some(TOKEN), "{not json").await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
-        let (s, _) = call(&r, "POST", uri, Some(TOKEN), r#"{"transition":-1}"#).await;
+        let (s, _) = call_post(&r, uri, Some(TOKEN), r#"{"transition":-1}"#).await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
         let toggle = "/api/services/light/toggle";
-        let (s, _) = call(&r, "POST", toggle, Some(TOKEN), r#"{"transition":-1}"#).await;
+        let (s, _) = call_post(&r, toggle, Some(TOKEN), r#"{"transition":-1}"#).await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
     async fn group_lists_members() {
         let (r, ..) = setup().await;
-        let (s, v) = call(&r, "GET", "/api/states/group.Garmin", Some(TOKEN), "").await;
+        let (s, v) = call_get(&r, "/api/states/group.Garmin", Some(TOKEN)).await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(v["entity_id"], "group.Garmin");
         assert_eq!(
@@ -686,9 +684,7 @@ mod tests {
             json!(["light.hue_a", "light.hue_b"])
         );
         assert_eq!(
-            call(&r, "GET", "/api/states/group.None", Some(TOKEN), "")
-                .await
-                .0,
+            call_get(&r, "/api/states/group.None", Some(TOKEN)).await.0,
             StatusCode::NOT_FOUND
         );
     }
@@ -709,7 +705,7 @@ mod tests {
             .await;
         let t = Some("ro");
         assert_eq!(
-            call(&r, "GET", "/api/states/light.hue_a", t, "").await.0,
+            call_get(&r, "/api/states/light.hue_a", t).await.0,
             StatusCode::OK
         );
         let body = r#"{"entity_id":"light.hue_a"}"#;
@@ -719,7 +715,7 @@ mod tests {
             "/api/services/scene/turn_on",
         ] {
             assert_eq!(
-                call(&r, "POST", uri, t, body).await.0,
+                call_post(&r, uri, t, body).await.0,
                 StatusCode::FORBIDDEN,
                 "{uri}"
             );
@@ -750,7 +746,7 @@ mod tests {
         app.core.set_state("light.hue_c", "off", Map::new());
         let get = |id: &str| {
             let (r, uri) = (r.clone(), format!("/api/states/{id}"));
-            async move { call(&r, "GET", &uri, Some(token), "").await.0 }
+            async move { call_get(&r, &uri, Some(token)).await.0 }
         };
         assert_eq!(get("light.hue_c").await, StatusCode::OK);
         // the token itself is unrestricted, but its owner is limited to Garmin
@@ -764,9 +760,8 @@ mod tests {
     #[tokio::test]
     async fn turn_on_string_entity_returns_state_array() {
         let (r, app, fake) = setup().await;
-        let (s, v) = call(
+        let (s, v) = call_post(
             &r,
-            "POST",
             "/api/services/light/turn_on",
             Some(TOKEN),
             r#"{"entity_id":"light.hue_a"}"#,
@@ -786,7 +781,7 @@ mod tests {
     async fn target_array_group_and_brightness() {
         let (r, _, fake) = setup().await;
         let body = r#"{"target":{"entity_id":["group.Garmin"]},"brightness_pct":50}"#;
-        let (s, v) = call(&r, "POST", "/api/services/light/turn_on", Some(TOKEN), body).await;
+        let (s, v) = call_post(&r, "/api/services/light/turn_on", Some(TOKEN), body).await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(v.as_array().unwrap().len(), 2);
         assert_eq!(
@@ -797,9 +792,8 @@ mod tests {
             })
         );
 
-        let (_, v) = call(
+        let (_, v) = call_post(
             &r,
-            "POST",
             "/api/services/light/turn_off",
             Some(TOKEN),
             r#"{"entity_id":"group.Garmin"}"#,
@@ -909,9 +903,8 @@ mod tests {
     async fn service_edge_cases() {
         let (r, ..) = setup().await;
         // unknown entity: empty array, still JSON
-        let (s, v) = call(
+        let (s, v) = call_post(
             &r,
-            "POST",
             "/api/services/light/turn_on",
             Some(TOKEN),
             r#"{"entity_id":"light.ghost"}"#,
@@ -919,13 +912,12 @@ mod tests {
         .await;
         assert_eq!((s, v), (StatusCode::OK, json!([])));
         // empty body
-        let (s, v) = call(&r, "POST", "/api/services/light/turn_off", Some(TOKEN), "").await;
+        let (s, v) = call_post(&r, "/api/services/light/turn_off", Some(TOKEN), "").await;
         assert_eq!((s, v), (StatusCode::OK, json!([])));
         // bad entity type
         assert_eq!(
-            call(
+            call_post(
                 &r,
-                "POST",
                 "/api/services/light/turn_on",
                 Some(TOKEN),
                 r#"{"entity_id":5}"#
@@ -936,14 +928,14 @@ mod tests {
         );
         // unknown service
         assert_eq!(
-            call(&r, "POST", "/api/services/light/blink", Some(TOKEN), "{}")
+            call_post(&r, "/api/services/light/blink", Some(TOKEN), "{}")
                 .await
                 .0,
             StatusCode::NOT_FOUND
         );
         // unauthenticated service call
         assert_eq!(
-            call(&r, "POST", "/api/services/light/turn_on", None, "{}")
+            call_post(&r, "/api/services/light/turn_on", None, "{}")
                 .await
                 .0,
             StatusCode::UNAUTHORIZED
@@ -956,37 +948,30 @@ mod tests {
         app.core.set_state("scene.hue_a", "unknown", Map::new());
         app.core.set_state("scene.hue_bad", "unknown", Map::new());
 
-        let (_, v) = call(&r, "GET", "/api/states/scene.hue_a", Some(TOKEN), "").await;
+        let (_, v) = call_get(&r, "/api/states/scene.hue_a", Some(TOKEN)).await;
         assert_eq!(v["state"], "unknown");
 
         let body = r#"{"entity_id":"scene.hue_a"}"#;
-        let (s, v) = call(&r, "POST", "/api/services/scene/turn_on", Some(TOKEN), body).await;
+        let (s, v) = call_post(&r, "/api/services/scene/turn_on", Some(TOKEN), body).await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(v[0]["entity_id"], "scene.hue_a");
         assert!(v[0]["state"].as_str().unwrap().contains('T'));
-        let (_, v) = call(&r, "GET", "/api/states/scene.hue_a", Some(TOKEN), "").await;
+        let (_, v) = call_get(&r, "/api/states/scene.hue_a", Some(TOKEN)).await;
         assert!(v["state"].as_str().unwrap().contains('T'));
 
         // unknown scenes are ignored, failures are 502, other services 404
         let ghost = r#"{"target":{"entity_id":["scene.ghost"]}}"#;
-        let (s, v) = call(
-            &r,
-            "POST",
-            "/api/services/scene/turn_on",
-            Some(TOKEN),
-            ghost,
-        )
-        .await;
+        let (s, v) = call_post(&r, "/api/services/scene/turn_on", Some(TOKEN), ghost).await;
         assert_eq!((s, v), (StatusCode::OK, json!([])));
         let bad = r#"{"entity_id":"scene.hue_bad"}"#;
         assert_eq!(
-            call(&r, "POST", "/api/services/scene/turn_on", Some(TOKEN), bad)
+            call_post(&r, "/api/services/scene/turn_on", Some(TOKEN), bad)
                 .await
                 .0,
             StatusCode::BAD_GATEWAY
         );
         assert_eq!(
-            call(&r, "POST", "/api/services/scene/create", Some(TOKEN), "{}")
+            call_post(&r, "/api/services/scene/create", Some(TOKEN), "{}")
                 .await
                 .0,
             StatusCode::NOT_FOUND
@@ -998,13 +983,13 @@ mod tests {
             .group_set("Mixed", &["light.hue_a".into(), "scene.hue_a".into()])
             .await
             .unwrap();
-        let (_, v) = call(&r, "GET", "/api/states/group.Mixed", Some(TOKEN), "").await;
+        let (_, v) = call_get(&r, "/api/states/group.Mixed", Some(TOKEN)).await;
         assert_eq!(
             v["attributes"]["entity_id"],
             json!(["light.hue_a", "scene.hue_a"])
         );
         let body = r#"{"entity_id":"group.Mixed"}"#;
-        let (_, v) = call(&r, "POST", "/api/services/light/turn_on", Some(TOKEN), body).await;
+        let (_, v) = call_post(&r, "/api/services/light/turn_on", Some(TOKEN), body).await;
         assert_eq!(v.as_array().unwrap().len(), 1);
         assert_eq!(fake.0.lock().unwrap().len(), 1);
     }
@@ -1014,19 +999,12 @@ mod tests {
         let (r, app, fake) = setup().await;
         app.core.store().group_set_exposed("Garmin", true).await;
         let body = r#"{"entity_id":"light.domus_group_Garmin"}"#;
-        let (s, v) = call(&r, "POST", "/api/services/light/turn_on", Some(TOKEN), body).await;
+        let (s, v) = call_post(&r, "/api/services/light/turn_on", Some(TOKEN), body).await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(v[0]["entity_id"], "light.domus_group_Garmin");
         assert_eq!(v[0]["state"], "on");
         assert_eq!(fake.0.lock().unwrap().len(), 2);
-        let (s, v) = call(
-            &r,
-            "GET",
-            "/api/states/light.domus_group_Garmin",
-            Some(TOKEN),
-            "",
-        )
-        .await;
+        let (s, v) = call_get(&r, "/api/states/light.domus_group_Garmin", Some(TOKEN)).await;
         assert_eq!((s, v["state"].as_str()), (StatusCode::OK, Some("on")));
     }
 
@@ -1061,12 +1039,12 @@ mod tests {
             "light.domus_group_Garmin",
         ] {
             let uri = format!("/api/states/{ok}");
-            assert_eq!(call(&r, "GET", &uri, t, "").await.0, StatusCode::OK, "{ok}");
+            assert_eq!(call_get(&r, &uri, t).await.0, StatusCode::OK, "{ok}");
         }
         for denied in ["group.Other", "light.hue_c", "scene.hue_a", "group.None"] {
             let uri = format!("/api/states/{denied}");
             assert_eq!(
-                call(&r, "GET", &uri, t, "").await.0,
+                call_get(&r, &uri, t).await.0,
                 StatusCode::NOT_FOUND,
                 "{denied}"
             );
@@ -1074,30 +1052,28 @@ mod tests {
 
         // out-of-scope entities are skipped, in-scope ones still run
         let body = r#"{"entity_id":["light.hue_a","light.hue_c","group.Other"]}"#;
-        let (s, v) = call(&r, "POST", "/api/services/light/turn_on", t, body).await;
+        let (s, v) = call_post(&r, "/api/services/light/turn_on", t, body).await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(v.as_array().unwrap().len(), 1);
         assert_eq!(v[0]["entity_id"], "light.hue_a");
         assert_eq!(fake.0.lock().unwrap().len(), 1);
 
         let body = r#"{"entity_id":"scene.hue_a"}"#;
-        let (s, v) = call(&r, "POST", "/api/services/scene/turn_on", t, body).await;
+        let (s, v) = call_post(&r, "/api/services/scene/turn_on", t, body).await;
         assert_eq!((s, v), (StatusCode::OK, json!([])));
-        let (_, v) = call(&r, "GET", "/api/states/scene.hue_a", Some(TOKEN), "").await;
+        let (_, v) = call_get(&r, "/api/states/scene.hue_a", Some(TOKEN)).await;
         assert_eq!(v["state"], "unknown");
 
         // the group's own light switch fans out to its members
         let body = r#"{"entity_id":"light.domus_group_Garmin"}"#;
-        let (s, v) = call(&r, "POST", "/api/services/light/turn_off", t, body).await;
+        let (s, v) = call_post(&r, "/api/services/light/turn_off", t, body).await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(v[0]["entity_id"], "light.domus_group_Garmin");
         assert_eq!(fake.0.lock().unwrap().len(), 3);
 
         // an unrestricted token still reaches everything
         assert_eq!(
-            call(&r, "GET", "/api/states/light.hue_c", Some(TOKEN), "")
-                .await
-                .0,
+            call_get(&r, "/api/states/light.hue_c", Some(TOKEN)).await.0,
             StatusCode::OK
         );
     }
