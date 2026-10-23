@@ -329,38 +329,57 @@ pub(crate) async fn run_light(
     body: &Value,
 ) -> Result<Vec<EntityState>, ServiceError> {
     let requested = requested_entities(body).map_err(bad_request)?;
-    // (lights, action) pairs. `toggle` decides per requested entity from its own state, so a
-    // group light that is on turns all of its members off.
-    let mut jobs: Vec<(Vec<String>, LightAction)> = Vec::new();
-    if service == "toggle" {
+    let jobs = if service == "toggle" {
         let transition_ms = requested_transition(body).map_err(bad_request)?;
-        let mut seen = HashSet::new();
-        for id in &requested {
-            let on = app.core.lookup(id).await.is_some_and(|s| s.state == "on");
-            let action = if on {
-                LightAction::TurnOff { transition_ms }
-            } else {
-                LightAction::TurnOn(TurnOn {
-                    transition_ms,
-                    ..TurnOn::default()
-                })
-            };
-            // Overlapping targets toggle once, like Home Assistant's de-duplicated target set.
-            let mut ids = app.core.expand_entities(std::slice::from_ref(id)).await;
-            ids.retain(|i| seen.insert(i.clone()));
-            jobs.push((ids, action));
-        }
+        toggle_jobs(app, &requested, transition_ms).await
     } else {
         let action = match light_action(service, body) {
             Ok(Some(a)) => a,
             Ok(None) => return Err((StatusCode::NOT_FOUND, "Service not found.".into())),
             Err(e) => return Err(bad_request(e)),
         };
-        jobs.push((app.core.expand_entities(&requested).await, action));
-    }
+        vec![(app.core.expand_entities(&requested).await, action)]
+    };
+    apply_light_jobs(app, scope, &jobs).await
+}
 
+/// Lights to act on together with the action to run on them.
+type LightJob = (Vec<String>, LightAction);
+
+/// `toggle` decides per requested entity from its own state, so a group light that is on turns
+/// all of its members off.
+async fn toggle_jobs(
+    app: &AppState,
+    requested: &[String],
+    transition_ms: Option<u32>,
+) -> Vec<LightJob> {
+    let mut jobs = Vec::new();
+    let mut seen = HashSet::new();
+    for id in requested {
+        let on = app.core.lookup(id).await.is_some_and(|s| s.state == "on");
+        let action = if on {
+            LightAction::TurnOff { transition_ms }
+        } else {
+            LightAction::TurnOn(TurnOn {
+                transition_ms,
+                ..TurnOn::default()
+            })
+        };
+        // Overlapping targets toggle once, like Home Assistant's de-duplicated target set.
+        let mut ids = app.core.expand_entities(std::slice::from_ref(id)).await;
+        ids.retain(|i| seen.insert(i.clone()));
+        jobs.push((ids, action));
+    }
+    jobs
+}
+
+async fn apply_light_jobs(
+    app: &AppState,
+    scope: &Scope,
+    jobs: &[LightJob],
+) -> Result<Vec<EntityState>, ServiceError> {
     let mut changed = Vec::new();
-    for (ids, action) in &jobs {
+    for (ids, action) in jobs {
         // A group may also hold scenes; those are not lights.
         for id in ids.iter().filter(|i| !i.starts_with("scene.")) {
             if !app.core.allowed(scope, id).await {
