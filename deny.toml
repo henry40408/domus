@@ -25,7 +25,7 @@ ignore = [
     # ctutils 0.4.2 (transitive via digest 0.11 and phc) is fixed in 0.4.4,
     # published 2026-10-23 01:04 UTC; the 168h cooldown ends 2026-10-30
     # 01:04 UTC. Upgrade to 0.4.4 and drop this entry then.
-    # Tracked in https://github.com/henry40408/domus/issues/
+    # Tracked in https://github.com/henry40408/domus/issues/75
     "RUSTSEC-2026-0385",
 ]
 
