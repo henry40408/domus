@@ -23,7 +23,7 @@ impl Env {
             data_dir: get("DOMUS_DATA_DIR")
                 .unwrap_or_else(|| "./data".into())
                 .into(),
-            log: get("DOMUS_LOG").unwrap_or_else(|| "info".into()),
+            log: get("RUST_LOG").unwrap_or_else(|| "error,domus=info,audit=info".into()),
             mdns: !matches!(
                 get("DOMUS_MDNS")
                     .as_deref()
@@ -48,6 +48,9 @@ mod tests {
         let e = Env::from_lookup(|_| None).unwrap();
         assert_eq!(e.bind, "127.0.0.1:8123".parse().unwrap());
         assert_eq!(e.data_dir, PathBuf::from("./data"));
+        assert_eq!(e.log, "error,domus=info,audit=info");
+        let e = Env::from_lookup(|k| (k == "RUST_LOG").then(|| "domus=debug".to_string())).unwrap();
+        assert_eq!(e.log, "domus=debug");
         let e =
             Env::from_lookup(|k| (k == "DOMUS_BIND").then(|| "0.0.0.0:9000".to_string())).unwrap();
         assert_eq!(e.bind.port(), 9000);
