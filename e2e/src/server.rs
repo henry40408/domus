@@ -34,7 +34,7 @@ impl Server {
             .env("DOMUS_BIND", format!("127.0.0.1:{port}"))
             .env("DOMUS_DATA_DIR", data.path())
             .env("DOMUS_MDNS", "0")
-            .env("DOMUS_LOG", "warn")
+            .env("RUST_LOG", "warn")
             .stdout(Stdio::inherit())
             .stderr(Stdio::piped())
             .spawn()
