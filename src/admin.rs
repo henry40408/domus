@@ -222,8 +222,8 @@ async fn setup(
         if let Some(wait) = app.guard.check(&key, now_secs()) {
             return too_many(wait);
         }
-        // Dashes are only for readability (`a1b2-c3d4`), so they are ignored on both sides.
-        let plain = |c: &str| c.trim().replace('-', "");
+        // Dashes are only for readability (`A1B2C-D3E4F`) and case is irrelevant, so both are ignored.
+        let plain = |c: &str| c.trim().replace('-', "").to_ascii_uppercase();
         if !constant_time_eq(
             plain(&body.setup_code).as_bytes(),
             plain(&expected).as_bytes(),
@@ -2304,7 +2304,7 @@ mod tests {
             call_post(&r, "/api/domus/setup", None, missing).await.0,
             StatusCode::FORBIDDEN
         );
-        let (s, h, _) = setup(" abc-123 ").await;
+        let (s, h, _) = setup(" ABC-123 ").await;
         assert_eq!(s, StatusCode::OK);
         assert!(h.contains_key("set-cookie"));
 
