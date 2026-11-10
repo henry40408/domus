@@ -10,7 +10,13 @@ version = 2
 # Deny crates with a known security advisory (RUSTSEC) or that have been yanked.
 # `ignore` holds advisory IDs we've reviewed and consciously accept.
 yanked = "deny"
-ignore = []
+ignore = [
+    # libsqlite3-sys 0.37 (transitive via sqlx-sqlite 0.9.0) bundles SQLite < 3.54.0.
+    # The fix is in libsqlite3-sys 0.39.1, but sqlx-sqlite requires <0.38.0.
+    # Drop this entry once sqlx-sqlite allows 0.39.
+    # Tracked in https://github.com/henry40408/domus/issues/84
+    "RUSTSEC-2026-0459",
+]
 
 [licenses]
 version = 2
