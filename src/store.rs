@@ -247,7 +247,7 @@ impl Store {
             .unwrap_or(0)
     }
 
-    /// `None` if the username is taken (names are case-insensitive).
+    /// `None` if the username is taken (names are case-insensitive for ASCII letters only).
     pub async fn create_user(
         &self,
         username: &str,

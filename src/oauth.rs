@@ -165,7 +165,7 @@ async fn login_flow(State(app): State<AppState>, Json(body): Json<LoginFlow>) ->
     match user {
         Some(user) => {
             app.guard.succeed(&key);
-            tracing::info!(target: "audit", user = %user.username, client = %body.client_id, "app login ok");
+            tracing::info!(target: "audit", user = user.username.as_str(), client = %body.client_id, "app login ok");
             let code = app.codes.issue(user.id, &body.client_id);
             no_store(Json(json!({ "code": code })))
         }
