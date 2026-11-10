@@ -2,7 +2,7 @@ use domus::core::Core;
 use domus::env::Env;
 use domus::hue::HueManager;
 use domus::store::Store;
-use domus::util::random_hex;
+use domus::util::random_base32;
 use domus::{AppState, build_app, resume_hue};
 use std::net::SocketAddr;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -64,9 +64,9 @@ async fn setup_code_if_no_users(store: &Store) -> Option<String> {
     if store.user_count().await != 0 {
         return None;
     }
-    // 32 bits is plenty: wrong guesses are throttled (about 4 an hour) and the code dies with setup.
-    let hex = random_hex(4);
-    let code = format!("{}-{}", &hex[..4], &hex[4..]);
+    // 50 bits (10 base32 chars): wrong guesses are throttled (about 4 an hour) and the code dies with setup.
+    let chars = random_base32(10);
+    let code = format!("{}-{}", &chars[..5], &chars[5..]);
     eprintln!("domus: no users yet. Setup code: {code}");
     tracing::warn!("no users yet; the setup code is required to create the first admin");
     Some(code)

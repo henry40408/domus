@@ -30,6 +30,16 @@ pub fn random_hex(bytes: usize) -> String {
     s
 }
 
+/// Crockford base32 without I, L, O, U: nothing that is easily misread when typed from a log.
+const BASE32_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/// `chars` random characters, 5 bits of entropy each.
+pub fn random_base32(chars: usize) -> String {
+    (0..chars)
+        .map(|_| BASE32_ALPHABET[(rand::random::<u8>() & 0x1f) as usize] as char)
+        .collect()
+}
+
 pub fn sha256_hex(input: &str) -> String {
     let digest = Sha256::digest(input.as_bytes());
     hex(digest.as_slice())
@@ -166,5 +176,12 @@ mod tests {
     fn random_hex_length() {
         assert_eq!(random_hex(16).len(), 32);
         assert_ne!(random_hex(16), random_hex(16));
+    }
+
+    #[test]
+    fn random_base32_uses_only_the_alphabet() {
+        let code = random_base32(1000);
+        assert_eq!(code.len(), 1000);
+        assert!(code.bytes().all(|c| BASE32_ALPHABET.contains(&c)));
     }
 }
