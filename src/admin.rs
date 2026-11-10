@@ -151,15 +151,14 @@ struct Credentials {
     password: String,
 }
 
+/// Callers pass the already trimmed name. Length counts characters, not bytes, so
+/// non-ASCII names are not penalised; control characters would forge audit log lines.
 fn valid_username(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 64
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '@'))
+    !name.is_empty() && name.chars().count() <= 64 && !name.chars().any(char::is_control)
 }
 
-const USERNAME_HINT: &str = "Username: letters, digits, _ - . and @ only (max 64).";
+const USERNAME_HINT: &str =
+    "Username must be 1 to 64 characters and must not contain control characters.";
 const PASSWORD_HINT: &str = "Password must be 12 to 128 characters and must not be the username.";
 
 fn valid_password(password: &str, username: &str) -> bool {
@@ -280,7 +279,7 @@ async fn login(
     match user {
         Some(user) => {
             app.guard.succeed(&key);
-            tracing::info!(target: "audit", user = %user.username, "login ok");
+            tracing::info!(target: "audit", user = user.username.as_str(), "login ok");
             start_session(&app, &headers, user.id).await
         }
         None => {
@@ -331,7 +330,7 @@ async fn session_from_token(State(app): State<AppState>, headers: HeaderMap) -> 
             "Could not start a session.",
         );
     }
-    tracing::info!(target: "audit", user = %user.username, refresh_id, "app session started");
+    tracing::info!(target: "audit", user = user.username.as_str(), refresh_id, "app session started");
     session_response(&headers, &session, APP_SESSION_TTL_SECS)
 }
 
@@ -356,7 +355,7 @@ async fn reauth(
         Some(h) if verify_password(&body.password, &h) => app.guard.succeed(&key),
         _ => {
             app.guard.fail(&key, now_secs());
-            tracing::warn!(target: "audit", user = %me.username, "reauth refused: wrong password");
+            tracing::warn!(target: "audit", user = me.username.as_str(), "reauth refused: wrong password");
             return message(StatusCode::UNAUTHORIZED, "Password is wrong.");
         }
     }
@@ -398,7 +397,7 @@ async fn session_revoke(
     Path(id): Path<i64>,
 ) -> Response {
     if app.core.store().delete_session_by_id(me.id, id).await {
-        tracing::info!(target: "audit", user = %me.username, "session revoked");
+        tracing::info!(target: "audit", user = me.username.as_str(), "session revoked");
         Json(json!({"ok": true})).into_response()
     } else {
         message(StatusCode::NOT_FOUND, "No such session.")
@@ -415,7 +414,7 @@ async fn sessions_revoke_others(
         .map(|t| sha256_hex(&t))
         .unwrap_or_default();
     let n = app.core.store().delete_other_sessions(me.id, &keep).await;
-    tracing::info!(target: "audit", user = %me.username, ended = n, "other sessions revoked");
+    tracing::info!(target: "audit", user = me.username.as_str(), ended = n, "other sessions revoked");
     Json(json!({"ok": true, "ended": n})).into_response()
 }
 
@@ -496,7 +495,7 @@ async fn password_change(
         Some(h) if verify_password(&body.current, &h) => app.guard.succeed(&key),
         _ => {
             app.guard.fail(&key, now_secs());
-            tracing::warn!(target: "audit", user = %me.username, "password change refused: wrong current password");
+            tracing::warn!(target: "audit", user = me.username.as_str(), "password change refused: wrong current password");
             return message(StatusCode::UNAUTHORIZED, "Current password is wrong.");
         }
     }
@@ -506,7 +505,7 @@ async fn password_change(
     store.set_password(me.id, &hash_password(&body.new)).await;
     store.delete_user_sessions(me.id).await;
     store.delete_user_refresh_tokens(me.id).await;
-    tracing::info!(target: "audit", user = %me.username, "password changed");
+    tracing::info!(target: "audit", user = me.username.as_str(), "password changed");
     start_session(&app, &headers, me.id).await
 }
 
@@ -541,7 +540,7 @@ async fn user_create(
         .await
     {
         Some(id) => {
-            tracing::info!(target: "audit", by = %me.username, user = username, admin = body.is_admin, "user created");
+            tracing::info!(target: "audit", by = me.username.as_str(), user = username, admin = body.is_admin, "user created");
             Json(json!({"id": id, "username": username})).into_response()
         }
         None => message(StatusCode::CONFLICT, "That username is taken."),
@@ -609,17 +608,17 @@ async fn user_update(
             // Admins are never limited.
             store.set_user_scope(id, None).await;
         }
-        tracing::info!(target: "audit", by = %me.username, user = %target.username, admin, "role changed");
+        tracing::info!(target: "audit", by = me.username.as_str(), user = target.username.as_str(), admin, "role changed");
     }
     if let Some(scope) = &scope {
         store.set_user_scope(id, scope.as_deref()).await;
-        tracing::info!(target: "audit", by = %me.username, user = %target.username, scope = ?scope, "group limit changed");
+        tracing::info!(target: "audit", by = me.username.as_str(), user = target.username.as_str(), scope = ?scope, "group limit changed");
     }
     if let Some(pw) = &body.password {
         store.set_password(id, &hash_password(pw)).await;
         store.delete_user_sessions(id).await;
         store.delete_user_refresh_tokens(id).await;
-        tracing::info!(target: "audit", by = %me.username, user = %target.username, "password reset");
+        tracing::info!(target: "audit", by = me.username.as_str(), user = target.username.as_str(), "password reset");
     }
     Json(json!({"ok": true})).into_response()
 }
@@ -634,7 +633,7 @@ async fn user_delete(
     }
     match app.core.store().delete_user_keeping_an_admin(id).await {
         DeleteUser::Deleted => {
-            tracing::info!(target: "audit", by = %me.username, id, "user deleted");
+            tracing::info!(target: "audit", by = me.username.as_str(), id, "user deleted");
             Json(json!({"ok": true})).into_response()
         }
         DeleteUser::LastAdmin => message(StatusCode::BAD_REQUEST, "Keep at least one admin."),
@@ -1002,7 +1001,7 @@ async fn token_create(
     {
         // The plaintext is returned exactly once; only its hash is stored.
         Some(id) => {
-            tracing::info!(target: "audit", user = %me.username, name, id, "token created");
+            tracing::info!(target: "audit", user = me.username.as_str(), name, id, "token created");
             Json(json!({"id": id, "name": name, "token": token})).into_response()
         }
         None => message(
@@ -1030,7 +1029,7 @@ async fn app_revoke(
         .delete_registration(id, token_owner(&me))
         .await
     {
-        tracing::info!(target: "audit", user = %me.username, id, "app device removed");
+        tracing::info!(target: "audit", user = me.username.as_str(), id, "app device removed");
         Json(json!({"ok": true})).into_response()
     } else {
         message(StatusCode::NOT_FOUND, "No such app device.")
@@ -1043,7 +1042,7 @@ async fn token_revoke(
     Path(id): Path<i64>,
 ) -> Response {
     if app.core.store().revoke_token(id, token_owner(&me)).await {
-        tracing::info!(target: "audit", user = %me.username, id, "token revoked");
+        tracing::info!(target: "audit", user = me.username.as_str(), id, "token revoked");
         Json(json!({"ok": true})).into_response()
     } else {
         message(StatusCode::NOT_FOUND, "No such token.")
@@ -1270,11 +1269,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn username_rule_is_trimmed_non_empty_64_chars_no_control() {
+        let ok = |n: &str| valid_username(n.trim());
+        assert!(!ok(""));
+        assert!(!ok("   "));
+        assert!(ok("  bob  "));
+        assert!(ok(&"a".repeat(64)));
+        assert!(!ok(&"a".repeat(65)));
+        assert!(ok(&"字".repeat(64)), "64 characters, 192 bytes");
+        assert!(!ok(&"字".repeat(65)));
+        assert!(!ok("a\nb"));
+        assert!(!ok("a\0b"));
+        assert!(!ok("a\u{7f}b"));
+        assert!(ok("a b"));
+        assert!(ok("Bob_1-x.y@example.com"));
+        assert!(ok("王小明"));
+    }
+
+    #[tokio::test]
+    async fn user_create_refuses_a_bad_username() {
+        let (r, _) = setup_app().await;
+        let admin = setup_admin(&r).await;
+        for name in ["a\nb".to_string(), "   ".to_string(), "a".repeat(65)] {
+            let body = serde_json::json!({"username": name, "password": "long enough pw12"});
+            let (status, _, _) =
+                call_post(&r, "/api/domus/users", Some(&admin), &body.to_string()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{name:?}");
+        }
+    }
+
     #[tokio::test]
     async fn setup_refuses_a_bad_username_and_a_short_password() {
         let (r, _) = setup_app().await;
         for body in [
-            r#"{"username":"a b","password":"correct horse"}"#,
+            r#"{"username":"a\nb","password":"correct horse"}"#,
+            r#"{"username":"   ","password":"correct horse"}"#,
             r#"{"username":"admin","password":"short"}"#,
         ] {
             assert_eq!(
@@ -1699,6 +1729,62 @@ mod tests {
                 .0,
             StatusCode::BAD_REQUEST
         );
+    }
+
+    #[tokio::test]
+    async fn a_non_ascii_user_can_be_created_and_log_in() {
+        let (r, _) = setup_app().await;
+        let admin = setup_admin(&r).await;
+        let body = r#"{"username":"王小明","password":"long enough pw12"}"#;
+        let (s, _, v) = call_post(&r, "/api/domus/users", Some(&admin), body).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v["username"], "王小明");
+        assert_eq!(
+            call_post(&r, "/api/domus/login", None, body).await.0,
+            StatusCode::OK
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            self.flush()?;
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+        type Writer = LogBuffer;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn audit_log_escapes_usernames_so_they_cannot_forge_fields() {
+        let log = LogBuffer::default();
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(log.clone())
+                .with_ansi(false)
+                .finish(),
+        );
+        let (r, _) = setup_app().await;
+        let admin = setup_admin(&r).await;
+        let name = r#"x" by="root"#;
+        let body = format!(r#"{{"username":{name:?},"password":"long enough pw12"}}"#);
+        call_post(&r, "/api/domus/users", Some(&admin), &body).await;
+        let (status, _, _) = call_post(&r, "/api/domus/login", None, &body).await;
+        assert_eq!(status, StatusCode::OK);
+        let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        assert!(text.contains(r#"user="x\" by=\"root""#), "{text}");
+        assert!(!text.contains(r#"user=x" by="root"#), "{text}");
     }
 
     #[tokio::test]

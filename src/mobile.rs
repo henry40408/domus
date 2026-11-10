@@ -109,7 +109,7 @@ async fn register(
         }
     }
     tracing::info!(
-        target: "audit", user_id, device = %fields.device_name, app = %fields.app_id,
+        target: "audit", user_id, device = fields.device_name.as_str(), app = fields.app_id.as_str(),
         "app device registered"
     );
     (
@@ -327,6 +327,51 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CREATED);
         body["webhook_id"].as_str().unwrap().to_string()
+    }
+
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            self.flush()?;
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+        type Writer = LogBuffer;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn audit_log_escapes_device_fields_so_they_cannot_forge_fields() {
+        let log = LogBuffer::default();
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(log.clone())
+                .with_ansi(false)
+                .finish(),
+        );
+        let (r, _) = setup().await;
+        let mut body = registration();
+        body["device_name"] = json!("x\" by=\"root\nforged line");
+        body["app_id"] = json!("a\" user_id=\"0");
+        let (status, _) = post_json(&r, "/api/mobile_app/registrations", Some(TOKEN), body).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.contains(r#"device="x\" by=\"root\nforged line""#),
+            "{text}"
+        );
+        assert!(text.contains(r#"app="a\" user_id=\"0""#), "{text}");
+        assert_eq!(text.lines().count(), 1, "{text}");
     }
 
     #[tokio::test]
