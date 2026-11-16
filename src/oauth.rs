@@ -890,4 +890,74 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], "invalid_request");
     }
+
+    fn pending(expires: i64) -> PendingCode {
+        PendingCode {
+            user_id: 1,
+            client_id: IOS.to_string(),
+            expires,
+        }
+    }
+
+    #[test]
+    fn a_code_lasts_one_minute() {
+        let codes = AuthCodes::default();
+        let before = now_secs();
+        let code = codes.issue(1, IOS);
+        let after = now_secs();
+        let expires = codes.0.lock().unwrap()[&sha256_hex(&code)].expires;
+        assert_eq!(CODE_TTL_SECS, 60);
+        assert!((before + 60..=after + 60).contains(&expires), "{expires}");
+    }
+
+    #[test]
+    fn a_code_works_once_and_only_for_its_client() {
+        let codes = AuthCodes::default();
+        let code = codes.issue(7, IOS);
+        assert_eq!(
+            codes.redeem(&code, "https://home-assistant.io/android"),
+            None
+        );
+        assert_eq!(
+            codes.redeem(&code, IOS),
+            None,
+            "a wrong guess burns the code"
+        );
+
+        let code = codes.issue(7, IOS);
+        assert_eq!(codes.redeem(&code, IOS), Some(7));
+        assert_eq!(codes.redeem(&code, IOS), None);
+    }
+
+    #[test]
+    fn a_full_code_table_drops_expired_codes_and_keeps_live_ones() {
+        let codes = AuthCodes::default();
+        {
+            let mut map = codes.0.lock().unwrap();
+            for i in 0..MAX_CODES - 1 {
+                map.insert(format!("expired{i}"), pending(now_secs() - 10));
+            }
+            map.insert("live".to_string(), pending(now_secs() + 30));
+        }
+        codes.issue(1, IOS);
+        let map = codes.0.lock().unwrap();
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key("live"));
+    }
+
+    #[tokio::test]
+    async fn an_access_token_lasts_thirty_minutes() {
+        let (r, app) = setup().await;
+        let before = now_secs();
+        app_login(&r).await;
+        let after = now_secs();
+        let tokens = app.core.store().list_tokens(None).await;
+        assert_eq!(tokens.len(), 1);
+        let expires = tokens[0].expires.unwrap();
+        assert_eq!(ACCESS_TTL_SECS, 30 * 60);
+        assert!(
+            (before + 1800..=after + 1800).contains(&expires),
+            "{expires}"
+        );
+    }
 }

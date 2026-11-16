@@ -214,4 +214,37 @@ mod tests {
             stop(&daemon);
         }
     }
+
+    #[test]
+    fn a_routable_ipv6_bind_address_is_advertised() {
+        let ip = advertise_address("[2001:db8::5]:8123".parse().unwrap());
+        assert_eq!(ip, Some("2001:db8::5".parse().unwrap()));
+    }
+
+    #[test]
+    fn local_ip_is_found_when_the_host_has_a_route() {
+        // Asks the OS the same question as local_ip(); the test can only say something on a host
+        // with a real route, so it reports a skip instead of passing in silence.
+        let probe = UdpSocket::bind("0.0.0.0:0").unwrap();
+        if probe.connect("192.0.2.1:9").is_err() {
+            eprintln!("skipped: no route in this sandbox");
+            return;
+        }
+        let ip = probe.local_addr().unwrap().ip();
+        if ip.is_loopback() || ip.is_unspecified() {
+            eprintln!("skipped: the route leaves through loopback");
+            return;
+        }
+        assert_eq!(local_ip(), Some(ip));
+    }
+
+    #[test]
+    fn is_uuid_accepts_only_the_dashed_36_character_form() {
+        assert!(is_uuid("0123abcd-4567-89ef-ABCD-0123456789ab"));
+        assert!(!is_uuid("abc"));
+        assert!(!is_uuid("0123abcd456789efABCD0123456789ab")); // no dashes, 32 chars
+        assert!(!is_uuid("0123abcd-4567-89ef-ABCD-0123456789a")); // 35 chars
+        assert!(!is_uuid("0123abcd-4567-89ef-ABCD-0123456789ag")); // not hex
+        assert!(!is_uuid("0123abcd_4567-89ef-ABCD-0123456789ab")); // wrong separator
+    }
 }

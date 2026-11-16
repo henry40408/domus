@@ -1527,7 +1527,8 @@ mod tests {
                 .fetch_one(&s.pool)
                 .await
                 .unwrap();
-        assert!(expires <= now_secs() + APP_SESSION_TTL_SECS);
+        let day = 24 * 3600;
+        assert!((now_secs() + day - 5..=now_secs() + day).contains(&expires));
 
         // without its refresh token (swept for idleness, say) it is dead everywhere, even
         // though the session row itself is still there
@@ -1711,5 +1712,229 @@ mod tests {
         let s = Store::open(&path).await.unwrap();
         assert_eq!(s.user_hash(1).await.as_deref(), Some("a"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn user_count_counts_users() {
+        let s = Store::open_memory().await.unwrap();
+        s.create_first_admin("a", "h").await.unwrap();
+        s.create_user("b", "h", false).await.unwrap();
+        assert_eq!(s.user_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn changing_an_unknown_user_reports_failure() {
+        let s = Store::open_memory().await.unwrap();
+        assert!(!s.set_password(99, "x").await);
+        assert!(!s.set_user_scope(99, None).await);
+    }
+
+    #[tokio::test]
+    async fn the_documented_lifetimes_hold() {
+        assert_eq!(SESSION_TTL_SECS, 7 * 24 * 3600);
+        assert_eq!(SESSION_IDLE_SECS, 24 * 3600);
+        assert_eq!(APP_SESSION_TTL_SECS, 24 * 3600);
+        assert_eq!(REAUTH_SECS, 10 * 60);
+        assert_eq!(Store::REFRESH_IDLE_SECS, 90 * 24 * 3600);
+    }
+
+    #[tokio::test]
+    async fn a_new_session_expires_after_its_lifetime_and_sweeps_idle_ones() {
+        let s = Store::open_memory().await.unwrap();
+        let id = s.create_user("u", "h", false).await.unwrap();
+        s.create_session("old", id, "").await;
+        sqlx::query("UPDATE sessions SET last_seen = ?1 WHERE token_hash = 'old'")
+            .bind(now_secs() - SESSION_IDLE_SECS - 5)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+
+        let before = now_secs();
+        s.create_session("new", id, "").await;
+        let after = now_secs();
+
+        let expires: i64 =
+            sqlx::query_scalar("SELECT expires FROM sessions WHERE token_hash = 'new'")
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
+        let week = 7 * 24 * 3600;
+        assert!((before + week..=after + week).contains(&expires));
+        let rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE token_hash = 'old'")
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
+        assert_eq!(rows, 0, "an idle session is deleted, not just hidden");
+    }
+
+    #[tokio::test]
+    async fn elevation_lasts_the_reauth_period() {
+        let s = Store::open_memory().await.unwrap();
+        let id = s.create_user("u", "h", false).await.unwrap();
+        s.create_session("a", id, "").await;
+        let before = now_secs();
+        s.session_elevate("a").await;
+        let after = now_secs();
+        let until: i64 =
+            sqlx::query_scalar("SELECT elevated_until FROM sessions WHERE token_hash = 'a'")
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
+        let ten_minutes = 10 * 60;
+        assert!((before + ten_minutes..=after + ten_minutes).contains(&until));
+    }
+
+    #[tokio::test]
+    async fn token_use_is_recorded_at_most_once_a_minute() {
+        let s = Store::open_memory().await.unwrap();
+        let id = s.create_user("u", "h", false).await.unwrap();
+        s.create_token(NewToken {
+            user_id: id,
+            name: "t",
+            token_hash: "h",
+            scope: None,
+            read_only: false,
+            expires: None,
+        })
+        .await
+        .unwrap();
+        let last_used = || async {
+            sqlx::query_scalar::<_, Option<i64>>("SELECT last_used FROM tokens")
+                .fetch_one(&s.pool)
+                .await
+                .unwrap()
+        };
+        let set_last_used = |secs_ago: i64| {
+            let pool = s.pool.clone();
+            async move {
+                sqlx::query("UPDATE tokens SET last_used = ?1")
+                    .bind(now_secs() - secs_ago)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        };
+
+        assert_eq!(last_used().await, None);
+        s.token_auth("h").await.unwrap();
+        assert!(last_used().await.unwrap() >= now_secs() - 1);
+
+        set_last_used(10).await;
+        let recent = last_used().await;
+        s.token_auth("h").await.unwrap();
+        assert_eq!(last_used().await, recent, "a recent use is not rewritten");
+
+        set_last_used(120).await;
+        s.token_auth("h").await.unwrap();
+        assert!(last_used().await.unwrap() >= now_secs() - 1);
+    }
+
+    #[tokio::test]
+    async fn refresh_tokens_idle_for_ninety_days_stop_working_and_are_swept() {
+        let s = Store::open_memory().await.unwrap();
+        let id = s.create_user("u", "h", false).await.unwrap();
+        let stale = s.refresh_create(id, "c", "stale").await.unwrap();
+        let live = s.refresh_create(id, "c", "live").await.unwrap();
+        assert!(
+            s.refresh_lookup("stale", "c").await.is_some(),
+            "creating another one keeps the live ones"
+        );
+        s.create_app_token(NewAppToken {
+            user_id: id,
+            name: "app",
+            token_hash: "access",
+            expires: now_secs() + 60,
+            refresh_id: stale,
+        })
+        .await;
+        s.create_app_token(NewAppToken {
+            user_id: id,
+            name: "live app",
+            token_hash: "live access",
+            expires: now_secs() + 60,
+            refresh_id: live,
+        })
+        .await;
+
+        // minting the access token counted as a use, so age both columns
+        sqlx::query("UPDATE refresh_tokens SET created = ?1, last_used = ?1 WHERE id = ?2")
+            .bind(now_secs() - Store::REFRESH_IDLE_SECS - 5)
+            .bind(stale)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        assert_eq!(s.refresh_lookup("stale", "c").await, None);
+        assert_eq!(s.refresh_lookup("live", "c").await, Some((live, id)));
+
+        // the next login sweeps the stale one, and the access token minted from it
+        s.refresh_create(id, "c", "another").await.unwrap();
+        let refresh_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM refresh_tokens")
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+        let token_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tokens")
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+        assert_eq!(refresh_rows, 2);
+        assert_eq!(token_rows, 1, "only the stale one's access token goes");
+    }
+
+    #[tokio::test]
+    async fn a_webhook_marks_the_registration_seen_at_most_once_a_minute() {
+        let s = Store::open_memory().await.unwrap();
+        let id = s.create_user("u", "h", false).await.unwrap();
+        let fields = RegistrationFields {
+            app_id: "app".into(),
+            app_name: "App".into(),
+            app_version: "1".into(),
+            device_id: None,
+            device_name: "phone".into(),
+            manufacturer: "m".into(),
+            model: "x".into(),
+            os_name: "os".into(),
+            os_version: None,
+        };
+        let reg = s
+            .registration_create(id, None, "hook", &fields)
+            .await
+            .unwrap();
+        let last_seen = || async {
+            sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT last_seen FROM registrations WHERE id = ?1",
+            )
+            .bind(reg)
+            .fetch_one(&s.pool)
+            .await
+            .unwrap()
+        };
+        let set_last_seen = |t: i64| {
+            let pool = s.pool.clone();
+            async move {
+                sqlx::query("UPDATE registrations SET last_seen = ?1 WHERE id = ?2")
+                    .bind(t)
+                    .bind(reg)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        };
+
+        assert_eq!(last_seen().await, None);
+        s.registration_by_webhook("hook").await.unwrap();
+        assert!(last_seen().await.is_some(), "the first call marks it seen");
+
+        let recent = now_secs() - 30;
+        set_last_seen(recent).await;
+        s.registration_by_webhook("hook").await.unwrap();
+        assert_eq!(last_seen().await, Some(recent), "seen 30 s ago: left alone");
+
+        set_last_seen(now_secs() - 120).await;
+        s.registration_by_webhook("hook").await.unwrap();
+        assert!(
+            last_seen().await.unwrap() >= now_secs() - 5,
+            "seen 2 min ago: refreshed"
+        );
     }
 }

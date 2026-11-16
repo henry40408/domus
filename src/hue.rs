@@ -1652,4 +1652,103 @@ mod tests {
         assert_eq!(bridge_base("192.168.1.2"), "https://192.168.1.2");
         assert_eq!(bridge_base("http://127.0.0.1:9/"), "http://127.0.0.1:9");
     }
+
+    fn light_modes(supports_ct: bool, supports_color: bool, mirek: Option<u16>) -> HueLight {
+        HueLight {
+            supports_ct,
+            supports_color,
+            mirek,
+            xy: Some((0.5, 0.4)),
+            ..HueLight::from_resource(&light_json("abcdef12-3456", "Desk", true, 50.0)).unwrap()
+        }
+    }
+
+    #[test]
+    fn white_mode_is_reported_only_for_lights_with_color_temperature() {
+        let a = light_modes(true, true, Some(300)).attributes();
+        assert_eq!(a["color_mode"], "color_temp");
+        assert_eq!(a["color_temp"], 300);
+
+        // a mirek on a light that cannot do white must not leak into the state
+        let a = light_modes(false, true, Some(300)).attributes();
+        assert_eq!(a["color_mode"], "xy");
+        assert!(!a.contains_key("color_temp"));
+    }
+
+    #[test]
+    fn xy_color_is_reported_only_for_lights_with_color() {
+        let a = light_modes(false, true, None).attributes();
+        assert_eq!(a["color_mode"], "xy");
+        assert_eq!(a["xy_color"], json!([0.5, 0.4]));
+
+        let a = light_modes(false, false, None).attributes();
+        assert!(!a.contains_key("color_mode"));
+        assert!(!a.contains_key("xy_color"));
+    }
+
+    #[tokio::test]
+    async fn a_put_fails_on_http_errors_and_bridge_errors() {
+        async fn put_light(Path(id): Path<String>) -> axum::response::Response {
+            use axum::response::IntoResponse;
+            match id.as_str() {
+                "http-error" => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                "bridge-error" => {
+                    Json(json!({"errors": [{"description": "nope"}]})).into_response()
+                }
+                _ => Json(json!({"errors": [], "data": []})).into_response(),
+            }
+        }
+        let app = Router::new().route("/clip/v2/resource/light/{id}", put(put_light));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = HueClient::new(&base, "key");
+        let body = json!({"on": {"on": true}});
+        assert_eq!(client.set_light("fine", &body).await, Ok(()));
+        let err = client.set_light("http-error", &body).await.unwrap_err();
+        assert!(err.contains("500"), "{err}");
+        let err = client.set_light("bridge-error", &body).await.unwrap_err();
+        assert!(err.contains("nope"), "{err}");
+    }
+
+    // A client without a timeout would wait forever, so the outer timeout turns that into a failure.
+    #[tokio::test]
+    async fn bridge_http_applies_the_requested_timeout() {
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", silent.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = silent.accept().await {
+                held.push(socket); // accept but never answer
+            }
+        });
+        let request = bridge_http(Some(Duration::from_millis(200)))
+            .get(url)
+            .send();
+        let outcome = tokio::time::timeout(Duration::from_secs(10), request)
+            .await
+            .expect("the client timeout must fire first");
+        assert!(outcome.unwrap_err().is_timeout());
+    }
+
+    #[tokio::test]
+    async fn manager_runs_between_start_and_reset_and_owns_the_hue_entities() {
+        let base = mock_server(Mock::default()).await;
+        let core = Core::new(Arc::new(Store::open_memory().await.unwrap()));
+        let manager = HueManager::new(core.clone());
+        assert!(!manager.is_running());
+
+        manager.start(&base, "key");
+        assert!(manager.is_running());
+
+        core.set_state("light.hue_a", "on", Map::new());
+        core.set_state("scene.hue_a", "unknown", Map::new());
+        core.set_state("light.other", "on", Map::new());
+        manager.reset();
+        assert!(!manager.is_running());
+        assert!(core.get_state("light.hue_a").is_none());
+        assert!(core.get_state("scene.hue_a").is_none());
+        assert!(core.get_state("light.other").is_some());
+    }
 }

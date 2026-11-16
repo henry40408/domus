@@ -625,6 +625,79 @@ mod tests {
         assert_eq!(epoch("1970-01-01T00:00:00.000000+00:00"), 0.0);
         assert_eq!(epoch("2026-10-01T12:34:56.250000+00:00"), 1_790_858_096.25);
         assert_eq!(epoch("2000-03-01T00:00:00.000000+00:00"), 951_868_800.0);
+        // February is the month the algorithm counts from the previous year
+        assert_eq!(epoch("2000-02-29T00:00:00.000000+00:00"), 951_782_400.0);
+        assert_eq!(epoch("2000-01-01T00:00:00.000000+00:00"), 946_684_800.0);
+    }
+
+    #[tokio::test]
+    async fn recheck_reports_a_change_of_scope_once() {
+        let (app, _) = serve_app().await;
+        let store = app.core.store().clone();
+        let bob = store.create_user("bob", "x", false).await.unwrap();
+        store
+            .create_token(NewToken {
+                user_id: bob,
+                name: "bob",
+                token_hash: &sha256_hex("bob"),
+                scope: None,
+                read_only: false,
+                expires: None,
+            })
+            .await
+            .unwrap();
+        let user = store.user_by_id(bob).await;
+        let mut session = Session {
+            app: app.clone(),
+            scope: None,
+            read_only: false,
+            user,
+            subs: Vec::new(),
+            events: HashSet::new(),
+            last_id: 0,
+        };
+        let hash = sha256_hex("bob");
+
+        assert_eq!(session.recheck(&hash, &None).await, Some(false));
+        assert!(store.set_user_scope(bob, Some(&["One".to_string()])).await);
+        assert_eq!(session.recheck(&hash, &None).await, Some(true));
+        assert_eq!(session.scope, Some(vec!["One".to_string()]));
+        assert_eq!(session.recheck(&hash, &None).await, Some(false));
+    }
+
+    #[tokio::test]
+    async fn services_and_panels_are_empty_objects() {
+        let (_, addr) = serve_app().await;
+        let mut c = authed(addr, TOKEN).await;
+        for (id, kind) in [(1, "get_services"), (2, "get_panels")] {
+            tell(&mut c, json!({"id": id, "type": kind})).await;
+            assert_eq!(recv(&mut c).await, result(id, json!({})), "{kind}");
+        }
+    }
+
+    #[tokio::test]
+    async fn scenes_can_be_called_but_only_turned_on() {
+        let (_, addr) = serve_app().await;
+        let mut c = authed(addr, TOKEN).await;
+        for (id, service, success) in [(1, "turn_on", true), (2, "nope", false)] {
+            tell(
+                &mut c,
+                json!({"id": id, "type": "call_service", "domain": "scene", "service": service,
+                       "service_data": {}}),
+            )
+            .await;
+            assert_eq!(recv(&mut c).await["success"], success, "{service}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_message_just_under_the_limit_is_served() {
+        let (_, addr) = serve_app().await;
+        let mut c = authed(addr, TOKEN).await;
+        let padding = "x".repeat(60 * 1024);
+        tell(&mut c, json!({"id": 1, "type": "ping", "padding": padding})).await;
+        assert_eq!(recv(&mut c).await, json!({"id": 1, "type": "pong"}));
+        assert_eq!(MAX_MESSAGE, 64 * 1024);
     }
 
     #[tokio::test]

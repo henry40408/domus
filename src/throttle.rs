@@ -121,6 +121,41 @@ mod tests {
     }
 
     #[test]
+    fn pruning_keeps_names_that_failed_within_the_last_lock_period() {
+        let g = LoginGuard::default();
+        let now = 100_000;
+        g.fail("recent", now - 1);
+        // Locked for the full 15 minutes, and that lock ends exactly now.
+        for _ in 0..9 {
+            g.fail("ends-now", now - MAX_LOCK_SECS);
+        }
+        g.fail("just-inside", now - MAX_LOCK_SECS + 1);
+        for i in 0..MAX_ENTRIES - 3 {
+            g.fail(&format!("idle{i}"), 0);
+        }
+        g.fail("trigger", now);
+
+        let entries = g.entries.lock().unwrap();
+        assert!(entries.contains_key("recent"));
+        assert!(entries.contains_key("just-inside"));
+        assert!(entries.contains_key("trigger"));
+        assert!(!entries.contains_key("ends-now"));
+        assert!(!entries.contains_key("idle0"));
+        assert_eq!(entries.len(), 3);
+    }
+
+    #[test]
+    fn failures_older_than_the_longest_lock_start_over() {
+        let g = LoginGuard::default();
+        for _ in 0..4 {
+            g.fail("a", 0);
+        }
+        // Exactly at the limit the old failures still count, so this is the fifth.
+        g.fail("a", MAX_LOCK_SECS);
+        assert_eq!(g.check("a", MAX_LOCK_SECS), Some(BASE_LOCK_SECS));
+    }
+
+    #[test]
     fn key_is_case_insensitive_and_bounded() {
         assert_eq!(key("login", " Admin "), "login:admin");
         assert_eq!(key("login", &"x".repeat(500)).len(), "login:".len() + 64);
