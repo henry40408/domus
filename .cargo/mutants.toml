@@ -1,0 +1,20 @@
+# Every exclusion needs a reason; revisit when the behaviour changes.
+test_tool = "nextest"
+
+exclude_re = [
+  # Start-up and shutdown wiring: it needs a real process, socket or signal.
+  'replace resume_hue with \(\)',
+  'replace prepare_data_dir -> ',
+  'replace shutdown_signal with \(\)',
+  'replace main with \(\)',
+  'replace == with != in main',
+  # Only burns argon2 time so unknown usernames cost as much as known ones; timing is not testable stably.
+  'replace verify_dummy with \(\)',
+  'replace warm_dummy with \(\)',
+  # mDNS advertising needs a network and another host to observe it.
+  'replace start -> Option<ServiceDaemon> with None',
+  'replace stop with \(\)',
+  # The Hue event loop needs a live bridge.
+  'replace HueIntegration::run with \(\)',
+  'replace HueIntegration::run_from with \(\)',
+]
