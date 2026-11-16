@@ -63,6 +63,12 @@ mod tests {
         assert_eq!(url("192.168.1.5:80"), "http://192.168.1.5:80/health");
     }
 
+    #[test]
+    fn a_specific_ipv6_bind_is_kept() {
+        let url = health_url("[2001:db8::5]:80".parse().unwrap());
+        assert_eq!(url, "http://[2001:db8::5]:80/health");
+    }
+
     #[tokio::test]
     async fn check_follows_the_server_status() {
         // nothing listens here: connection refused

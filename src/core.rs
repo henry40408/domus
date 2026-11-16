@@ -898,4 +898,25 @@ mod tests {
         assert_eq!(c.lookup(&b).await.unwrap().state, "on");
         assert_eq!(c.lookup("group.room").await.unwrap().state, "on");
     }
+
+    #[tokio::test]
+    async fn removing_an_integration_stops_it_serving() {
+        let c = core().await;
+        c.set_integration("roomy", Arc::new(Roomy));
+        assert_eq!(c.light_sets().len(), 1);
+        c.remove_integration("roomy");
+        assert!(c.light_sets().is_empty());
+    }
+
+    #[tokio::test]
+    async fn entity_ids_with_prefix_lists_only_matching_ids() {
+        let c = core().await;
+        for id in ["light.hue_a", "light.hue_b", "light.other", "scene.hue_a"] {
+            c.set_state(id, "on", Map::new());
+        }
+        let mut ids = c.entity_ids_with_prefix("light.hue_");
+        ids.sort();
+        assert_eq!(ids, ["light.hue_a", "light.hue_b"]);
+        assert!(c.entity_ids_with_prefix("nothing.").is_empty());
+    }
 }

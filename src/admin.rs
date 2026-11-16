@@ -1058,11 +1058,15 @@ async fn token_revoke(
 const ASSET_VERSION_PLACEHOLDER: &str = "__ASSET_VERSION__";
 
 fn cache_control_for(uri: &Uri) -> &'static str {
+    cache_control_for_version(uri, crate::GIT_VERSION)
+}
+
+fn cache_control_for_version(uri: &Uri, version: &str) -> &'static str {
     let stamped = uri.query().is_some_and(|q| {
         q.split('&')
-            .any(|kv| kv.strip_prefix("v=") == Some(crate::GIT_VERSION))
+            .any(|kv| kv.strip_prefix("v=") == Some(version))
     });
-    let stable = crate::GIT_VERSION != "dev" && !crate::GIT_VERSION.ends_with("-dirty");
+    let stable = version != "dev" && !version.ends_with("-dirty");
     if stamped && stable && uri.path() != "/" && uri.path() != "/index.html" {
         "public, max-age=31536000, immutable"
     } else {
@@ -2659,6 +2663,102 @@ mod tests {
         let index_stamped =
             static_files(format!("/?v={}", crate::GIT_VERSION).parse().unwrap()).await;
         assert_eq!(index_stamped.headers()[header::CACHE_CONTROL], "no-cache");
+    }
+
+    #[test]
+    fn only_a_stable_version_stamped_asset_is_cached_for_good() {
+        let cache =
+            |uri: &str, version: &str| cache_control_for_version(&uri.parse().unwrap(), version);
+        const FOREVER: &str = "public, max-age=31536000, immutable";
+        assert_eq!(cache("/app.js?v=1.2.3", "1.2.3"), FOREVER);
+        assert_eq!(cache("/app.js?x=1&v=1.2.3", "1.2.3"), FOREVER);
+        assert_eq!(cache("/app.js?v=1.2.2", "1.2.3"), "no-cache");
+        assert_eq!(cache("/app.js", "1.2.3"), "no-cache");
+        // the page itself is always revalidated, whatever its query says
+        assert_eq!(cache("/?v=1.2.3", "1.2.3"), "no-cache");
+        assert_eq!(cache("/index.html?v=1.2.3", "1.2.3"), "no-cache");
+        // a version that does not change between edits must never be cached
+        assert_eq!(cache("/app.js?v=dev", "dev"), "no-cache");
+        assert_eq!(cache("/app.js?v=1.2.3-dirty", "1.2.3-dirty"), "no-cache");
+    }
+
+    #[test]
+    fn files_are_served_with_their_content_type() {
+        for (path, mime) in [
+            ("index.html", "text/html; charset=utf-8"),
+            ("app.js", "text/javascript; charset=utf-8"),
+            ("app.css", "text/css; charset=utf-8"),
+            ("logo.svg", "image/svg+xml"),
+            ("data.bin", "application/octet-stream"),
+        ] {
+            assert_eq!(mime_for(path), mime, "{path}");
+        }
+    }
+
+    #[test]
+    fn group_names_use_letters_digits_underscore_and_dash() {
+        for ok in ["a", "A_b-9", &"x".repeat(64)] {
+            assert!(valid_group_name(ok), "{ok}");
+        }
+        for bad in ["", "a b", "a/b", "ä", &"x".repeat(65)] {
+            assert!(!valid_group_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_user_agent_is_read_from_the_header() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(user_agent(&headers), "");
+        headers.insert(header::USER_AGENT, "Companion/1.0".parse().unwrap());
+        assert_eq!(user_agent(&headers), "Companion/1.0");
+    }
+
+    #[tokio::test]
+    async fn token_names_may_be_64_characters_but_not_65() {
+        let (r, _) = setup_app().await;
+        let c = setup_admin(&r).await;
+        for (len, status) in [(64, StatusCode::OK), (65, StatusCode::BAD_REQUEST)] {
+            let body = format!(r#"{{"name":"{}"}}"#, "n".repeat(len));
+            assert_eq!(
+                call_post(&r, "/api/domus/tokens", Some(&c), &body).await.0,
+                status,
+                "{len}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn device_test_drives_every_light_it_is_given() {
+        let (r, app) = setup_app().await;
+        let c = setup_admin(&r).await;
+        app.core.set_integration("bridge", Arc::new(Bridge));
+        for id in ["light.hue_a", "light.hue_b"] {
+            app.core.set_state(id, "off", Map::new());
+        }
+        let body = r#"{"entity_ids":["light.hue_a","light.hue_b"],"on":true}"#;
+        let (s, ..) = call_post(&r, "/api/domus/devices/test", Some(&c), body).await;
+        assert_eq!(s, StatusCode::OK);
+        for id in ["light.hue_a", "light.hue_b"] {
+            assert_eq!(app.core.lookup(id).await.unwrap().state, "on", "{id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_limited_user_sees_a_room_only_when_every_light_is_theirs() {
+        let f = LimitedFixture::new().await;
+        f.limit_bob_to_g1().await;
+        let (_, _, rooms) = call_get(&f.r, "/api/domus/rooms", Some(&f.bob)).await;
+        assert_eq!(rooms, json!([]), "Study also holds light.hue_b");
+        let (_, _, rooms) = call_get(&f.r, "/api/domus/rooms", Some(&f.admin)).await;
+        assert_eq!(rooms.as_array().unwrap().len(), 1);
+
+        let both = r#"{"scope":["G1","G2"]}"#;
+        assert_eq!(
+            put_status(&f.r, &f.admin, &f.bob_uri, both).await,
+            StatusCode::OK
+        );
+        let (_, _, rooms) = call_get(&f.r, "/api/domus/rooms", Some(&f.bob)).await;
+        assert_eq!(rooms.as_array().unwrap().len(), 1, "every light is bob's");
     }
 
     struct Bridge;

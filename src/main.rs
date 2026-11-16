@@ -136,3 +136,22 @@ async fn main() {
         std::process::exit(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_setup_code_is_issued_only_while_there_is_no_user() {
+        let store = Store::open_memory().await.unwrap();
+        let first = setup_code_if_no_users(&store).await.unwrap();
+        let (left, right) = first.split_once('-').unwrap();
+        assert_eq!((left.len(), right.len()), (5, 5), "{first}");
+        assert!(first.chars().all(|c| c == '-' || c.is_ascii_alphanumeric()));
+        let second = setup_code_if_no_users(&store).await.unwrap();
+        assert_ne!(first, second, "every start draws a new code");
+
+        store.create_first_admin("admin", "hash").await.unwrap();
+        assert_eq!(setup_code_if_no_users(&store).await, None);
+    }
+}

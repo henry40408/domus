@@ -778,4 +778,15 @@ mod tests {
             StatusCode::GONE
         );
     }
+
+    #[test]
+    fn scalar_accepts_exactly_the_field_limit() {
+        let field = |len: usize| {
+            let mut body = Map::new();
+            body.insert("k".into(), Value::String("é".repeat(len)));
+            body
+        };
+        assert!(scalar(&field(FIELD_MAX), "k").unwrap().is_some());
+        assert!(scalar(&field(FIELD_MAX + 1), "k").is_err());
+    }
 }

@@ -156,6 +156,44 @@ mod tests {
     }
 
     #[test]
+    fn constant_time_eq_sees_every_difference() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
+        // Two differing bytes with the same xor must not cancel each other out.
+        assert!(!constant_time_eq(&[1, 1], &[0, 0]));
+        assert!(!constant_time_eq(&[0xff, 0xff], &[0, 0]));
+    }
+
+    #[test]
+    fn now_secs_is_the_unix_clock() {
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let now = now_secs();
+        assert!((before..=before + 5).contains(&now), "{now}");
+    }
+
+    #[test]
+    fn dates_across_century_and_leap_boundaries() {
+        // 2100 is not a leap year; 2000 and 2400 are. These sit on the 100- and 400-year edges
+        // of the calendar algorithm.
+        for (secs, date) in [
+            (951_782_400, "2000-02-29"),
+            (951_868_800, "2000-03-01"),
+            (4_107_456_000, "2100-02-28"),
+            (4_107_542_400, "2100-03-01"),
+            (7_263_216_000, "2200-03-01"),
+            (13_574_563_200, "2400-02-29"),
+            (13_574_649_600, "2400-03-01"),
+        ] {
+            let t = UNIX_EPOCH + Duration::from_secs(secs);
+            assert_eq!(rfc3339_micros(t), format!("{date}T00:00:00.000000+00:00"));
+        }
+    }
+
+    #[test]
     fn password_roundtrip() {
         let stored = hash_password("hunter2");
         assert!(verify_password("hunter2", &stored));

@@ -1096,4 +1096,104 @@ mod tests {
             StatusCode::OK
         );
     }
+
+    #[test]
+    fn a_null_entity_id_requests_nothing() {
+        assert_eq!(requested_entities(&json!({"entity_id": null})), Ok(vec![]));
+    }
+
+    fn assert_close(actual: (f64, f64), expected: (f64, f64)) {
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-4;
+        assert!(
+            near(actual.0, expected.0) && near(actual.1, expected.1),
+            "{actual:?} != {expected:?}"
+        );
+    }
+
+    #[test]
+    fn rgb_to_xy_matches_known_colours() {
+        // Expected values computed by hand from the Hue wide-gamut matrix.
+        let cases = [
+            ((255.0, 0.0, 0.0), (0.7006, 0.2993)),
+            ((0.0, 255.0, 0.0), (0.1724, 0.7468)),
+            ((0.0, 0.0, 255.0), (0.1355, 0.0399)),
+            ((255.0, 255.0, 255.0), (0.3227, 0.3290)),
+            ((128.0, 64.0, 32.0), (0.5737, 0.3592)),
+            // 10/255 is below the sRGB knee, so these use the linear branch
+            ((10.0, 5.0, 0.0), (0.5313, 0.4428)),
+            // mixes both branches
+            ((50.0, 10.0, 0.0), (0.6571, 0.3362)),
+            ((0.0, 10.0, 50.0), (0.1380, 0.0869)),
+        ];
+        for ((r, g, b), expected) in cases {
+            assert_close(rgb_to_xy(r, g, b), expected);
+        }
+    }
+
+    #[test]
+    fn rgb_to_xy_clamps_and_handles_black() {
+        assert_eq!(rgb_to_xy(0.0, 0.0, 0.0), (0.3127, 0.3290));
+        assert_close(rgb_to_xy(300.0, -20.0, 0.0), (0.7006, 0.2993));
+    }
+
+    #[test]
+    fn hs_to_rgb_covers_every_hue_sector() {
+        let cases = [
+            ((0.0, 100.0), (255.0, 0.0, 0.0)),
+            ((30.0, 100.0), (255.0, 127.5, 0.0)),
+            ((60.0, 100.0), (255.0, 255.0, 0.0)),
+            ((90.0, 100.0), (127.5, 255.0, 0.0)),
+            ((120.0, 100.0), (0.0, 255.0, 0.0)),
+            ((150.0, 100.0), (0.0, 255.0, 127.5)),
+            ((180.0, 100.0), (0.0, 255.0, 255.0)),
+            ((210.0, 100.0), (0.0, 127.5, 255.0)),
+            ((240.0, 100.0), (0.0, 0.0, 255.0)),
+            ((270.0, 100.0), (127.5, 0.0, 255.0)),
+            ((300.0, 100.0), (255.0, 0.0, 255.0)),
+            ((330.0, 100.0), (255.0, 0.0, 127.5)),
+            // hue wraps around
+            ((360.0, 100.0), (255.0, 0.0, 0.0)),
+            ((-30.0, 100.0), (255.0, 0.0, 127.5)),
+        ];
+        for ((h, s), (r, g, b)) in cases {
+            let got = hs_to_rgb(h, s);
+            let near = |a: f64, b: f64| (a - b).abs() < 1e-6;
+            assert!(
+                near(got.0, r) && near(got.1, g) && near(got.2, b),
+                "hs({h}, {s}) = {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hs_to_rgb_desaturates_toward_white() {
+        assert_eq!(hs_to_rgb(200.0, 0.0), (255.0, 255.0, 255.0));
+        let (r, g, b) = hs_to_rgb(30.0, 50.0);
+        assert!((r - 255.0).abs() < 1e-6);
+        assert!((g - 191.25).abs() < 1e-6);
+        assert!((b - 127.5).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn toggle_turning_on_keeps_the_transition() {
+        let (r, _app, fake) = setup().await;
+        let body = r#"{"entity_id":"light.hue_a","transition":2}"#;
+        let (s, _) = call_post(&r, "/api/services/light/toggle", Some(TOKEN), body).await;
+        assert_eq!(s, StatusCode::OK);
+        let calls = fake.0.lock().unwrap().clone();
+        let expected = LightAction::TurnOn(TurnOn {
+            transition_ms: Some(2000),
+            ..TurnOn::default()
+        });
+        assert_eq!(calls, [("light.hue_a".to_string(), expected)]);
+    }
+
+    #[tokio::test]
+    async fn visible_states_keeps_only_the_requested_ids() {
+        let (_r, app, _fake) = setup().await;
+        let only: HashSet<String> = ["light.hue_b".to_string()].into();
+        let states = visible_states(&app, &None, Some(&only)).await;
+        let ids: Vec<_> = states.iter().map(|s| s.entity_id.as_str()).collect();
+        assert_eq!(ids, ["light.hue_b"]);
+    }
 }
