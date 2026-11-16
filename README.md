@@ -243,6 +243,16 @@ cargo clippy --all-targets -- -D warnings
 cargo nextest run
 ```
 
+### Mutation testing
+
+A pull request is mutated on its changed lines only and the result is reported, not enforced. To
+check a change locally (needs [cargo-mutants](https://mutants.rs/)):
+
+```sh
+git diff main -- src > changes.diff
+cargo mutants --in-diff changes.diff
+```
+
 ### Coverage
 
 CI uploads coverage to [Codecov](https://codecov.io/gh/henry40408/domus) using
