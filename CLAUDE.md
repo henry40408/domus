@@ -42,7 +42,7 @@ Gherkin scenarios (`e2e/features/*.feature`) run through godog and drive `bin/do
 
 - `internal/server/testdata/rust/*.json` are 275 golden responses captured from the last Rust server; `rust-order.txt` is the replay order. `parity_test.go` replays the 67 whose request has no normalised placeholder against a fresh app; the others are covered by the per-area handler tests. `internal/store/testdata/` holds databases created by the Rust server (see its `README.txt`); the store must open them unchanged.
 - `cmd/domus/main_test.go` builds the binary once in `TestMain` and `exec`s it. Read the listening address from the log line `listening on http://<addr>` (slog quotes the message).
-- Known, accepted differences from Rust: JSON parser error wording (statuses match) and WebSocket close code 1000 instead of 1005.
+- Known, accepted differences from Rust: JSON parser error wording (statuses match), WebSocket close code 1000 instead of 1005, JSON object keys that `encoding/json` matches case-insensitively with the last duplicate key winning, and a form body with invalid percent-encoding answered 422 where Rust answered 400 `invalid_grant`. The last two only affect the caller's own request, and the official apps encode correctly.
 
 ## Architecture
 

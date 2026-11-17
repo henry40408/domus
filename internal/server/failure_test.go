@@ -73,17 +73,19 @@ func TestAFailingStoreIsLoggedWhereTheAnswerStaysUsable(t *testing.T) {
 		path    string
 		body    string
 		message string
+		status  int
+		answer  string
 	}{
-		{"apps", "DROP TABLE registrations", "GET", "/api/domus/apps", "", "listing app devices failed"},
-		{"groups", "DROP TABLE groups", "GET", "/api/domus/groups", "", "listing groups failed"},
-		{"group members", "DROP TABLE group_members", "GET", "/api/domus/groups", "", "group members lookup failed"},
-		{"hue", "DROP TABLE hue", "GET", "/api/domus/hue", "", "reading the paired bridge failed"},
-		{"tokens", "DROP TABLE tokens", "GET", "/api/domus/tokens", "", "listing tokens failed"},
-		{"scoped token", "DROP TABLE groups", "POST", "/api/domus/tokens", `{"name":"t","scope":["g"]}`, "group lookup failed"},
-		{"logout", "CREATE TRIGGER x BEFORE DELETE ON sessions " + refuseWrites, "POST", "/api/domus/logout", "", "deleting the session failed"},
-		{"other sessions", "CREATE TRIGGER x BEFORE DELETE ON sessions " + refuseWrites, "POST", "/api/domus/sessions/revoke-others", "", "deleting other sessions failed"},
-		{"expose flag", "CREATE TRIGGER x BEFORE UPDATE ON groups " + refuseWrites, "PUT", "/api/domus/groups/g", `{"members":[],"expose_light":true}`, "setting the group light flag failed"},
-		{"delete user", "CREATE TRIGGER x BEFORE DELETE ON users WHEN OLD.id = 2 " + refuseWrites, "DELETE", "/api/domus/users/2", "", "deleting a user failed"},
+		{"apps", "DROP TABLE registrations", "GET", "/api/domus/apps", "", "listing app devices failed", 200, `[]`},
+		{"groups", "DROP TABLE groups", "GET", "/api/domus/groups", "", "listing groups failed", 200, `[]`},
+		{"group members", "DROP TABLE group_members", "GET", "/api/domus/groups", "", "group members lookup failed", 200, `[{"expose_light":false,"light_entity_id":"light.domus_group_g","members":[],"name":"g"}]`},
+		{"hue", "DROP TABLE hue", "GET", "/api/domus/hue", "", "reading the paired bridge failed", 200, `{"ip":null,"paired":false,"running":false}`},
+		{"tokens", "DROP TABLE tokens", "GET", "/api/domus/tokens", "", "listing tokens failed", 200, `[]`},
+		{"scoped token", "DROP TABLE groups", "POST", "/api/domus/tokens", `{"name":"t","scope":["g"]}`, "group lookup failed", 400, `{"message":"No such group: g."}`},
+		{"logout", "CREATE TRIGGER x BEFORE DELETE ON sessions " + refuseWrites, "POST", "/api/domus/logout", "", "deleting the session failed", 200, `{"ok":true}`},
+		{"other sessions", "CREATE TRIGGER x BEFORE DELETE ON sessions " + refuseWrites, "POST", "/api/domus/sessions/revoke-others", "", "deleting other sessions failed", 200, `{"ended":0,"ok":true}`},
+		{"expose flag", "CREATE TRIGGER x BEFORE UPDATE ON groups " + refuseWrites, "PUT", "/api/domus/groups/g", `{"members":[],"expose_light":true}`, "setting the group light flag failed", 200, `{"ok":true}`},
+		{"delete user", "CREATE TRIGGER x BEFORE DELETE ON users WHEN OLD.id = 2 " + refuseWrites, "DELETE", "/api/domus/users/2", "", "deleting a user failed", 500, `{"message":"Could not delete the user."}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -94,7 +96,9 @@ func TestAFailingStoreIsLoggedWhereTheAnswerStaysUsable(t *testing.T) {
 			app.login(t, "admin", "correct horse")
 			app.damage(t, tt.damage)
 			app.logs.Reset()
-			app.adminDo(t, tt.method, tt.path, cookie, tt.body)
+			rec := app.adminDo(t, tt.method, tt.path, cookie, tt.body)
+			equal(t, rec.Code, tt.status)
+			equal(t, rec.Body.String(), tt.answer)
 			app.wantLogged(t, tt.message)
 		})
 	}
