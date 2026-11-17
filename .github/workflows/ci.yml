@@ -90,15 +90,17 @@ jobs:
           go-version-file: go.mod
       - run: go test -mod=vendor -race ./...
 
-  # Pushes to main mutate the whole module (about a minute locally); pull
-  # requests mutate only the lines changed against the base branch. The
+  # Pushes to main mutate the whole module (31 to 37 minutes locally with two
+  # workers; the time on a runner is not measured yet, so adjust the timeout
+  # below after the first run); pull requests mutate only the lines changed
+  # against the base branch, which is nearly everything in the rewrite PR. The
   # efficacy threshold and the `e2e/` and `vendor/` exclusions live in
   # `.gremlins.yaml`: gremlins v0.6.0 silently ignores `--threshold-efficacy`
   # on the command line, so the job could never fail on a low score.
   mutation:
     name: mutation
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
