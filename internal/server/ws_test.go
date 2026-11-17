@@ -207,9 +207,13 @@ func TestRecheckEndsWhenTheLoginIsGone(t *testing.T) {
 func TestServicesAndPanelsAreEmptyObjects(t *testing.T) {
 	app := newWSApp(t, nil)
 	client := app.authed(t, wsToken)
-	for id, kind := range map[int]string{1: "get_services", 2: "get_panels"} {
-		answer := client.ask(map[string]any{"id": id, "type": kind})
-		equal(t, answer, map[string]any{"id": float64(id), "type": "result", "success": true, "result": map[string]any{}})
+	// Ids must ascend on one connection, so the order is fixed.
+	for _, c := range []struct {
+		id   int
+		kind string
+	}{{1, "get_services"}, {2, "get_panels"}} {
+		answer := client.ask(map[string]any{"id": c.id, "type": c.kind})
+		equal(t, answer, map[string]any{"id": float64(c.id), "type": "result", "success": true, "result": map[string]any{}})
 	}
 }
 
