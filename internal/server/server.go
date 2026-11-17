@@ -3,6 +3,8 @@ package server
 
 import (
 	"log/slog"
+	"sync"
+	"time"
 
 	"github.com/henry40408/domus/internal/auth"
 	"github.com/henry40408/domus/internal/core"
@@ -18,6 +20,11 @@ type Config struct {
 	// means the build's own version.
 	Version string
 	Logger  *slog.Logger
+	// SetupCode is the one-time code the first admin must enter; empty means
+	// none is required.
+	SetupCode string
+	// Now is the clock for login throttling; nil means time.Now.
+	Now func() time.Time
 }
 
 // App is the domus server: its state and its HTTP handler.
@@ -26,6 +33,13 @@ type App struct {
 	hue     *hue.Manager
 	version string
 	logger  *slog.Logger
+	// audit carries security events (logins, setup, session changes).
+	audit *slog.Logger
+	now   func() time.Time
+	guard auth.LoginGuard
+
+	setupMu   sync.Mutex
+	setupCode string
 }
 
 // New builds the app. It does no I/O, except that it computes the dummy
@@ -40,6 +54,18 @@ func New(cfg Config) *App {
 	if appVersion == "" {
 		appVersion = version.Version()
 	}
+	now := cfg.Now
+	if now == nil {
+		now = time.Now
+	}
 	auth.WarmDummy()
-	return &App{core: cfg.Core, hue: cfg.Hue, version: appVersion, logger: logger}
+	return &App{
+		core:      cfg.Core,
+		hue:       cfg.Hue,
+		version:   appVersion,
+		logger:    logger,
+		audit:     logger.With("target", "audit"),
+		now:       now,
+		setupCode: cfg.SetupCode,
+	}
 }

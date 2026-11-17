@@ -36,13 +36,21 @@ func newTestApp(t *testing.T) *testApp {
 
 func newTestAppWithVersion(t *testing.T, version string) *testApp {
 	t.Helper()
+	return newTestAppWith(t, func(cfg *Config) { cfg.Version = version })
+}
+
+// newTestAppWith builds the test app after tweak adjusted its Config.
+func newTestAppWith(t *testing.T, tweak func(cfg *Config)) *testApp {
+	t.Helper()
 	st, err := store.OpenMemory(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	c := core.New(st, nil)
-	app := New(Config{Core: c, Hue: hue.NewManager(c, hue.Timing{}, nil), Version: version})
+	cfg := Config{Core: c, Hue: hue.NewManager(c, hue.Timing{}, nil), Version: goldenVersion}
+	tweak(&cfg)
+	app := New(cfg)
 	return &testApp{app: app, store: st, handler: app.Handler()}
 }
 
@@ -62,6 +70,9 @@ func (a *testApp) do(t *testing.T, req request) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(req.method, req.path, strings.NewReader(req.body))
 	for name, value := range req.headers {
 		r.Header.Set(name, value)
+		if strings.EqualFold(name, "Host") {
+			r.Host = value
+		}
 	}
 	rec := httptest.NewRecorder()
 	a.handler.ServeHTTP(rec, r)
@@ -79,6 +90,10 @@ type golden struct {
 		Method  string            `json:"method"`
 		Path    string            `json:"path"`
 		Headers map[string]string `json:"headers"`
+		// Body is a JSON body, BodyText any other; golden checks that need a
+		// body send it themselves.
+		Body     json.RawMessage `json:"body"`
+		BodyText *string         `json:"body_text"`
 	} `json:"request"`
 	Response goldenResponse `json:"response"`
 }

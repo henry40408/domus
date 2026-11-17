@@ -11,6 +11,7 @@ func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", a.health)
 	a.registerAPI(mux)
+	a.registerAdmin(mux)
 	mux.Handle("/", fallback(mux, a.staticFiles))
 	return securityHeaders(mux)
 }
