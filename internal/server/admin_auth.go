@@ -25,6 +25,8 @@ func (a *App) registerAdmin(mux *http.ServeMux) {
 	routes.route("GET /sessions", needSession, a.listSessions)
 	routes.route("POST /sessions/revoke-others", needSession, a.revokeOtherSessions)
 	routes.route("DELETE /sessions/{id}", needSession, a.revokeSession)
+	routes.route("GET /events", needSession, a.events)
+	a.registerManagement(routes)
 	routes.mount()
 }
 

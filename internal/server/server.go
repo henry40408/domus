@@ -25,6 +25,36 @@ type Config struct {
 	SetupCode string
 	// Now is the clock for login throttling; nil means time.Now.
 	Now func() time.Time
+	// Timing holds the intervals tests shorten; zero fields mean the default.
+	Timing Timing
+	// Shutdown is closed when the server starts shutting down, so long-lived
+	// responses (event streams) end and do not hold the graceful stop. Nil
+	// means never.
+	Shutdown <-chan struct{}
+}
+
+// Timing is the set of intervals the server waits on.
+type Timing struct {
+	// EventsRecheck is how often an open event stream re-checks its session.
+	EventsRecheck time.Duration
+	// EventsKeepAlive is how often an idle event stream sends a comment, so
+	// proxies keep the connection open.
+	EventsKeepAlive time.Duration
+}
+
+const (
+	defaultEventsRecheck   = 30 * time.Second
+	defaultEventsKeepAlive = 15 * time.Second
+)
+
+func (t Timing) withDefaults() Timing {
+	if t.EventsRecheck <= 0 {
+		t.EventsRecheck = defaultEventsRecheck
+	}
+	if t.EventsKeepAlive <= 0 {
+		t.EventsKeepAlive = defaultEventsKeepAlive
+	}
+	return t
 }
 
 // App is the domus server: its state and its HTTP handler.
@@ -37,6 +67,9 @@ type App struct {
 	audit *slog.Logger
 	now   func() time.Time
 	guard auth.LoginGuard
+
+	timing   Timing
+	shutdown <-chan struct{}
 
 	setupMu   sync.Mutex
 	setupCode string
@@ -66,6 +99,8 @@ func New(cfg Config) *App {
 		logger:    logger,
 		audit:     logger.With("target", "audit"),
 		now:       now,
+		timing:    cfg.Timing.withDefaults(),
+		shutdown:  cfg.Shutdown,
 		setupCode: cfg.SetupCode,
 	}
 }
