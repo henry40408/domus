@@ -14,6 +14,7 @@ func (a *App) Handler() http.Handler {
 	a.registerAdmin(mux)
 	a.registerOAuth(mux)
 	a.registerMobile(mux)
+	a.registerWebsocket(mux)
 	mux.Handle("/", fallback(mux, a.staticFiles))
 	return securityHeaders(mux)
 }

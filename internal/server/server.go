@@ -40,11 +40,18 @@ type Timing struct {
 	// EventsKeepAlive is how often an idle event stream sends a comment, so
 	// proxies keep the connection open.
 	EventsKeepAlive time.Duration
+	// WebsocketAuth is how long a WebSocket client may take to authenticate.
+	WebsocketAuth time.Duration
+	// WebsocketRecheck is how often an open WebSocket re-checks its login and
+	// the groups of its user.
+	WebsocketRecheck time.Duration
 }
 
 const (
-	defaultEventsRecheck   = 30 * time.Second
-	defaultEventsKeepAlive = 15 * time.Second
+	defaultEventsRecheck    = 30 * time.Second
+	defaultEventsKeepAlive  = 15 * time.Second
+	defaultWebsocketAuth    = 10 * time.Second
+	defaultWebsocketRecheck = 30 * time.Second
 )
 
 func (t Timing) withDefaults() Timing {
@@ -53,6 +60,12 @@ func (t Timing) withDefaults() Timing {
 	}
 	if t.EventsKeepAlive <= 0 {
 		t.EventsKeepAlive = defaultEventsKeepAlive
+	}
+	if t.WebsocketAuth <= 0 {
+		t.WebsocketAuth = defaultWebsocketAuth
+	}
+	if t.WebsocketRecheck <= 0 {
+		t.WebsocketRecheck = defaultWebsocketRecheck
 	}
 	return t
 }

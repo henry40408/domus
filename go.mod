@@ -6,6 +6,7 @@ toolchain go1.26.11
 
 require (
 	github.com/brutella/dnssd v1.2.14
+	github.com/coder/websocket v1.8.15
 	golang.org/x/crypto v0.58.0
 	modernc.org/sqlite v1.62.0
 )
