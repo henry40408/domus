@@ -88,13 +88,13 @@ func (a *App) updateUser(w http.ResponseWriter, r *http.Request) {
 	me := sessionUser(r)
 	// The role goes first: demoting the last admin is refused atomically, and
 	// nothing else of this request may have been applied by then.
-	if body.IsAdmin != nil && !a.applyRole(w, r, me, target, *body.IsAdmin) {
+	if body.IsAdmin != nil && !a.applyRole(w, r, userEdit{me, target}, *body.IsAdmin) {
 		return
 	}
 	if change.set {
 		a.applyScope(r, me, target, change.groups)
 	}
-	if body.Password != nil && !a.resetPassword(w, r, me, target, *body.Password) {
+	if body.Password != nil && !a.resetPassword(w, r, userEdit{me, target}, *body.Password) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
@@ -143,8 +143,14 @@ func (a *App) requestedScopeChange(w http.ResponseWriter, r *http.Request, body 
 	return scopeChange{set: true, groups: valid}, true
 }
 
+// userEdit is an admin changing another account.
+type userEdit struct {
+	me, target store.User
+}
+
 // applyRole sets the role and reports false after answering a refusal.
-func (a *App) applyRole(w http.ResponseWriter, r *http.Request, me, target store.User, admin bool) bool {
+func (a *App) applyRole(w http.ResponseWriter, r *http.Request, edit userEdit, admin bool) bool {
+	me, target := edit.me, edit.target
 	st := a.core.Store()
 	if err := st.SetAdmin(r.Context(), target.ID, admin); err != nil {
 		// Deleted by someone else meanwhile, or the last admin.
@@ -174,7 +180,8 @@ func (a *App) applyScope(r *http.Request, me, target store.User, groups store.Sc
 
 // resetPassword sets another user's password and ends their sessions; it
 // reports false after answering a failure.
-func (a *App) resetPassword(w http.ResponseWriter, r *http.Request, me, target store.User, password string) bool {
+func (a *App) resetPassword(w http.ResponseWriter, r *http.Request, edit userEdit, password string) bool {
+	me, target := edit.me, edit.target
 	if err := a.replacePassword(r, target.ID, password); err != nil {
 		a.logger.Warn("resetting the password failed", "error", err)
 		writeMessage(w, http.StatusInternalServerError, "Could not change the password.")

@@ -130,9 +130,17 @@ func (a *App) checkSetupCode(w http.ResponseWriter, supplied string) bool {
 }
 
 // plainSetupCode ignores dashes, which are only there for readability
-// (A1B2C-D3E4F), and case.
+// (A1B2C-D3E4F), and ASCII case. strings.ToUpper would fold non-ASCII letters
+// such as U+017F onto S, which the Rust server did not.
 func plainSetupCode(code string) string {
-	return strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(code), "-", ""))
+	return strings.Map(upperASCII, strings.ReplaceAll(strings.TrimSpace(code), "-", ""))
+}
+
+func upperASCII(r rune) rune {
+	if r >= 'a' && r <= 'z' {
+		return r - 'a' + 'A'
+	}
+	return r
 }
 
 func (a *App) spendSetupCode() {
@@ -220,7 +228,7 @@ func (a *App) sessionFromToken(w http.ResponseWriter, r *http.Request) {
 	}
 	session := auth.RandomHex(32)
 	agent := "HA app · " + userAgent(r)
-	if err := st.CreateAppSession(ctx, auth.SHA256Hex(session), userID, refreshID, agent); err != nil {
+	if err := st.CreateAppSession(ctx, store.NewAppLoginSession{TokenHash: auth.SHA256Hex(session), UserID: userID, RefreshID: refreshID, UserAgent: agent}); err != nil {
 		a.logger.Warn("creating an app session failed", "error", err)
 		writeMessage(w, http.StatusInternalServerError, "Could not start a session.")
 		return
@@ -261,7 +269,7 @@ func (a *App) reauth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	me := sessionUser(r)
-	if !a.confirmPassword(w, r, me, *body.Password, "Password is wrong.", "reauth refused: wrong password") {
+	if !a.confirmPassword(w, r, me, passwordCheck{*body.Password, "Password is wrong.", "reauth refused: wrong password"}) {
 		return
 	}
 	if token, ok := sessionToken(r); ok {
@@ -272,20 +280,26 @@ func (a *App) reauth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+// passwordCheck is a password to verify, with what to answer and audit when it
+// is wrong.
+type passwordCheck struct {
+	password, refusal, auditText string
+}
+
 // confirmPassword is the throttled check of the caller's own password that
 // password change and reauth share. A success clears the failure count. It
 // answers the request itself when it refuses.
-func (a *App) confirmPassword(w http.ResponseWriter, r *http.Request, me store.User, password, refusal, auditText string) bool {
+func (a *App) confirmPassword(w http.ResponseWriter, r *http.Request, me store.User, check passwordCheck) bool {
 	key := auth.ThrottleKey("password", me.Username)
 	if wait := a.guard.Check(key, a.now().Unix()); wait > 0 {
 		writeTooMany(w, wait)
 		return false
 	}
 	hash, err := a.core.Store().UserHash(r.Context(), me.ID)
-	if err != nil || !auth.VerifyPassword(password, hash) {
+	if err != nil || !auth.VerifyPassword(check.password, hash) {
 		a.guard.Fail(key, a.now().Unix())
-		a.audit.Warn(auditText, "user", me.Username)
-		writeMessage(w, http.StatusUnauthorized, refusal)
+		a.audit.Warn(check.auditText, "user", me.Username)
+		writeMessage(w, http.StatusUnauthorized, check.refusal)
 		return false
 	}
 	a.guard.Succeed(key)
@@ -313,7 +327,7 @@ func (a *App) passwordChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	me := sessionUser(r)
-	if !a.confirmPassword(w, r, me, *body.Current, "Current password is wrong.", "password change refused: wrong current password") {
+	if !a.confirmPassword(w, r, me, passwordCheck{*body.Current, "Current password is wrong.", "password change refused: wrong current password"}) {
 		return
 	}
 	if !auth.ValidPassword(*body.New, me.Username) {

@@ -87,6 +87,8 @@ func (a *App) websocket(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return // Accept has answered the request
 	}
+	a.websockets.Add(1)
+	defer a.websockets.Done()
 	conn.SetReadLimit(wsMaxMessage)
 	ctx, cancel := context.WithCancel(r.Context())
 	inbox := make(chan inbound)
@@ -158,8 +160,8 @@ func (a *App) serveSession(ctx context.Context, session *wsSession, inbox <-chan
 		select {
 		case <-ctx.Done():
 			return
-		// Graceful shutdown waits for open connections, so end this one when
-		// it starts.
+		// http.Server.Shutdown ignores hijacked connections, so end this one
+		// when shutdown starts; WaitForWebsockets then waits for it.
 		case <-a.shutdown:
 			return
 		case message := <-inbox:

@@ -379,7 +379,7 @@ func TestAppSessionsFollowTheirRefreshToken(t *testing.T) {
 	s := openMemory(t)
 	id := must(s.CreateUser(ctx, "u", "h", false))
 	refresh := must(s.RefreshCreate(ctx, id, "client", "r1"))
-	noError(t, s.CreateAppSession(ctx, "a", id, refresh, "ua"))
+	noError(t, s.CreateAppSession(ctx, NewAppLoginSession{TokenHash: "a", UserID: id, RefreshID: refresh, UserAgent: "ua"}))
 	must(s.SessionUser(ctx, "a"))
 	if !must(s.SessionNeedsReauth(ctx, "a")) {
 		t.Fatal("a fresh app session needs a password re-entry")
@@ -390,7 +390,7 @@ func TestAppSessionsFollowTheirRefreshToken(t *testing.T) {
 	}
 
 	// a second exchange for the same app login replaces the first session
-	noError(t, s.CreateAppSession(ctx, "b", id, refresh, "ua"))
+	noError(t, s.CreateAppSession(ctx, NewAppLoginSession{TokenHash: "b", UserID: id, RefreshID: refresh, UserAgent: "ua"}))
 	if _, err := s.SessionUser(ctx, "a"); !isNotFound(err) {
 		t.Fatalf("replaced session: %v", err)
 	}

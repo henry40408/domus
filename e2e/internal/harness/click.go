@@ -78,7 +78,7 @@ func clickUntil(b *Browser, spec clickSpec) error {
 		if attempt < ClickAttempts {
 			continue
 		}
-		accepted, scripted := standIn(spec, element, probe, probeErr, reported)
+		accepted, scripted := standIn(spec, element, probeReport{probe, probeErr, reported})
 		if accepted {
 			return nil
 		}
@@ -89,11 +89,19 @@ func clickUntil(b *Browser, spec clickSpec) error {
 		spec.what, ClickAttempts, strings.Join(probes, " | "))
 }
 
+// probeReport is what probing a click target found: the probe, the error from
+// probing, and the text describing both.
+type probeReport struct {
+	probe    clickProbe
+	err      error
+	reported string
+}
+
 // standIn is the last resort once every real click is spent: is the browser
 // deaf, or the page unresponsive? It reports whether the scripted click may
 // stand in for the real ones, and what that click did.
-func standIn(spec clickSpec, element *Element, probe clickProbe, probeErr error, reported string) (bool, scriptedResult) {
-	nothingArrived := probeErr == nil && inputNeverArrived(probe)
+func standIn(spec clickSpec, element *Element, report probeReport) (bool, scriptedResult) {
+	nothingArrived := report.err == nil && inputNeverArrived(report.probe)
 	scripted := scriptedClick(element, spec.tookEffect)
 	logf("e2e: scripted click on %s: %s", spec.what, scripted)
 
@@ -103,7 +111,7 @@ func standIn(spec clickSpec, element *Element, probe clickProbe, probeErr error,
 	logf("e2e: WARNING — stood in for %s with a scripted click. The "+
 		"browser accepted %d real clicks and delivered none "+
 		"of them to the page, so this scenario did not test that the "+
-		"control is reachable by a pointer. See %s", spec.what, ClickAttempts, reported)
+		"control is reachable by a pointer. See %s", spec.what, ClickAttempts, report.reported)
 	return true, scripted
 }
 

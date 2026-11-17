@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
@@ -109,5 +110,38 @@ func TestACodeThatExpiresRightNowIsSweptFromAFullTable(t *testing.T) {
 	codes.issue(1, iosClient)
 	if len(codes.codes) != 1 {
 		t.Fatalf("%d codes left, want only the new one", len(codes.codes))
+	}
+}
+
+func TestTheSetupCodeFoldsOnlyAsciiLetters(t *testing.T) {
+	equal(t, plainSetupCode(" a1b2c-d3e4f "), "A1B2CD3E4F")
+	// U+017F and U+0131 would become S and I under Unicode upper-casing.
+	equal(t, plainSetupCode("ſı"), "ſı")
+}
+
+func TestWaitingForWebsocketsEndsWithTheContext(t *testing.T) {
+	app := newTestApp(t).app
+	app.websockets.Add(1)
+	defer app.websockets.Done()
+	ctx, cancel := context.WithTimeout(bg, 20*time.Millisecond)
+	defer cancel()
+	app.WaitForWebsockets(ctx)
+	if ctx.Err() == nil {
+		t.Fatal("returned before the open socket ended or the context did")
+	}
+}
+
+func TestWaitingForWebsocketsReturnsOnceTheyAreGone(t *testing.T) {
+	app := newTestApp(t).app
+	app.websockets.Add(1)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		app.websockets.Done()
+	}()
+	ctx, cancel := context.WithTimeout(bg, 5*time.Second)
+	defer cancel()
+	app.WaitForWebsockets(ctx)
+	if ctx.Err() != nil {
+		t.Fatal("timed out although the socket ended")
 	}
 }

@@ -69,6 +69,8 @@ func (a *App) events(w http.ResponseWriter, r *http.Request) {
 		if _, err := fmt.Fprint(w, frame); err != nil || flusher.Flush() != nil {
 			return
 		}
+		// Like axum's KeepAlive, only a quiet stream gets a comment.
+		keepAlive.Reset(a.timing.EventsKeepAlive)
 	}
 }
 

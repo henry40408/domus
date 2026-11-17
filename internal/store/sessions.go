@@ -109,18 +109,26 @@ func (s *Store) DeleteOtherSessions(ctx context.Context, userID int64, keepHash 
 	return res.RowsAffected()
 }
 
+// NewAppLoginSession is the session an app login starts.
+type NewAppLoginSession struct {
+	TokenHash string
+	UserID    int64
+	RefreshID int64
+	UserAgent string
+}
+
 // CreateAppSession starts a session for the app login refreshID, replacing
 // the one it already had. It ends with that login and is short-lived;
 // sensitive actions in it need a password re-entry.
-func (s *Store) CreateAppSession(ctx context.Context, tokenHash string, userID, refreshID int64, userAgent string) error {
+func (s *Store) CreateAppSession(ctx context.Context, session NewAppLoginSession) error {
 	now := s.now()
-	_, _ = s.db.ExecContext(ctx, "DELETE FROM sessions WHERE refresh_id = ?1", refreshID)
+	_, _ = s.db.ExecContext(ctx, "DELETE FROM sessions WHERE refresh_id = ?1", session.RefreshID)
 	// One statement, so a failure can never leave a plain password-style
 	// session behind.
 	_, err := s.db.ExecContext(ctx,
 		`INSERT OR REPLACE INTO sessions (token_hash, expires, user_id, created, last_seen, user_agent, refresh_id)
              VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6)`,
-		tokenHash, now+AppSessionTTLSecs, userID, now, truncateUserAgent(userAgent), refreshID)
+		session.TokenHash, now+AppSessionTTLSecs, session.UserID, now, truncateUserAgent(session.UserAgent), session.RefreshID)
 	return err
 }
 

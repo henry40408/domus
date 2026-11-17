@@ -14,8 +14,12 @@ type Manager struct {
 	timing Timing
 	logger *slog.Logger
 
-	mu   sync.Mutex
-	task *task
+	// pairMu serialises StartSynced, so two pairings cannot interleave and
+	// leave the lights of the bridge that lost behind. It is separate from mu
+	// so status queries are not blocked by a sync.
+	pairMu sync.Mutex
+	mu     sync.Mutex
+	task   *task
 }
 
 // task is the goroutine that syncs and follows the event stream.
@@ -52,6 +56,8 @@ func (m *Manager) Start(base, key string) {
 // StartSynced is like Start, but finishes the first sync before returning so
 // callers see the lights. The sync runs without any lock held.
 func (m *Manager) StartSynced(ctx context.Context, base, key string) {
+	m.pairMu.Lock()
+	defer m.pairMu.Unlock()
 	m.Reset()
 	integration := m.newIntegration(base, key)
 	integration.syncAndLog(ctx)

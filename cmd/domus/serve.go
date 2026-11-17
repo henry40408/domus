@@ -75,7 +75,7 @@ func runServer(p process, e env) error {
 	case <-ctx.Done():
 		logger.Info("shutting down")
 		close(stopping)
-		shutdownGracefully(httpServer, logger)
+		shutdownGracefully(httpServer, app, logger)
 		err = <-serveErr
 	}
 	if advertiser != nil {
@@ -99,10 +99,11 @@ func newHTTPServer(handler http.Handler, logger *slog.Logger) *http.Server {
 	}
 }
 
-func shutdownGracefully(httpServer *http.Server, logger *slog.Logger) {
+func shutdownGracefully(httpServer *http.Server, app *server.App, logger *slog.Logger) {
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	err := httpServer.Shutdown(ctx)
+	app.WaitForWebsockets(ctx)
 	if err == nil {
 		return
 	}

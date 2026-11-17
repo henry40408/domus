@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"log/slog"
 	"sync"
 	"time"
@@ -85,8 +86,26 @@ type App struct {
 	timing   Timing
 	shutdown <-chan struct{}
 
+	// websockets counts open WebSocket handlers: http.Server.Shutdown does not
+	// track hijacked connections, so WaitForWebsockets does.
+	websockets sync.WaitGroup
+
 	setupMu   sync.Mutex
 	setupCode string
+}
+
+// WaitForWebsockets blocks until every WebSocket handler has returned or ctx
+// ends. Call it after the shutdown channel is closed.
+func (a *App) WaitForWebsockets(ctx context.Context) {
+	done := make(chan struct{})
+	go func() {
+		a.websockets.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }
 
 // New builds the app. It does no I/O, except that it computes the dummy

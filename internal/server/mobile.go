@@ -239,15 +239,24 @@ func (a *App) webhook(w http.ResponseWriter, r *http.Request) {
 		writeMessage(w, http.StatusBadRequest, "Missing type.")
 		return
 	}
-	a.answerWebhook(w, r, reg, kind, body["data"])
+	a.answerWebhook(w, r, webhookCall{reg: reg, kind: kind, data: body["data"]})
 }
 
-func (a *App) answerWebhook(w http.ResponseWriter, r *http.Request, reg store.Registration, kind string, data any) {
-	switch kind {
+// webhookCall is a validated webhook request: who sent it, what it is and its
+// data.
+type webhookCall struct {
+	reg  store.Registration
+	kind string
+	data any
+}
+
+func (a *App) answerWebhook(w http.ResponseWriter, r *http.Request, call webhookCall) {
+	data := call.data
+	switch call.kind {
 	case "get_config":
 		writeJSON(w, http.StatusOK, haConfig())
 	case "update_registration":
-		a.updateRegistration(w, r, reg, data)
+		a.updateRegistration(w, r, call.reg, data)
 	case "register_sensor":
 		writeJSON(w, http.StatusCreated, map[string]bool{"success": true})
 	case "update_sensor_states":
