@@ -26,6 +26,12 @@ func TestWildcardBindsAreReachedThroughLoopback(t *testing.T) {
 	}
 }
 
+func TestAMalformedURLIsUnhealthy(t *testing.T) {
+	if checkHealth("http://127.0.0.1:1/\x7f") == nil {
+		t.Fatal("a URL that cannot be requested was healthy")
+	}
+}
+
 func TestASpecificIPv6BindIsKept(t *testing.T) {
 	got := healthURL(netip.MustParseAddrPort("[2001:db8::5]:80"))
 	if got != "http://[2001:db8::5]:80/health" {

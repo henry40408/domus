@@ -1,12 +1,20 @@
 package main
 
 import (
+	"errors"
 	"log/slog"
 	"net/netip"
 	"slices"
 	"strings"
 	"testing"
 )
+
+func TestAUsageErrorExposesTheErrorItWraps(t *testing.T) {
+	cause := errors.New("bad bind")
+	if !errors.Is(usageError{cause}, cause) {
+		t.Fatal("errors.Is cannot reach the wrapped error")
+	}
+}
 
 func envOf(values map[string]string) func(string) (string, bool) {
 	return func(key string) (string, bool) {

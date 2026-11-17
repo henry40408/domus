@@ -132,6 +132,41 @@ func TestHueResumesOnlyWhenABridgeWasPaired(t *testing.T) {
 	}
 }
 
+func closedStore(t *testing.T) *store.Store {
+	t.Helper()
+	st, err := store.OpenMemory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+	return st
+}
+
+func TestAnUnreadableUserTableCountsAsNoUsers(t *testing.T) {
+	var stderr, logs bytes.Buffer
+	code := setupCodeIfNoUsers(context.Background(), closedStore(t), &stderr, newLogger(&logs, slog.LevelDebug))
+	if code == "" || !strings.Contains(stderr.String(), code) {
+		t.Fatalf("code = %q, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(logs.String(), "cannot count the users") {
+		t.Fatalf("logs = %q", logs.String())
+	}
+}
+
+func TestHueStaysOffWhenThePairedBridgeCannotBeRead(t *testing.T) {
+	st := closedStore(t)
+	manager := hue.NewManager(core.New(st, nil), hue.Timing{}, discardLogger())
+	t.Cleanup(manager.Reset)
+	var logs bytes.Buffer
+	resumeHue(context.Background(), st, manager, newLogger(&logs, slog.LevelDebug))
+	if manager.IsRunning() {
+		t.Fatal("Hue started although the bridge could not be read")
+	}
+	if !strings.Contains(logs.String(), "cannot read the paired Hue bridge") {
+		t.Fatalf("logs = %q", logs.String())
+	}
+}
+
 func TestTheServerHasNoWriteTimeout(t *testing.T) {
 	server := newHTTPServer(http.NotFoundHandler(), discardLogger())
 	if server.WriteTimeout != 0 {

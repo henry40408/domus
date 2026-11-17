@@ -428,3 +428,33 @@ func assertMode(t *testing.T, path string, want os.FileMode) {
 		t.Errorf("%s has mode %o, want %o", path, got, want)
 	}
 }
+
+func TestADataDirThatCannotBeMadeExitsWithOne(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(blocker, "data")
+	stdout, stderr, code := runToCompletion(t, serverEnv(t, "DOMUS_DATA_DIR="+dir))
+	if code != 1 || stdout != "" || !strings.HasPrefix(stderr, "domus: cannot prepare data dir "+dir+": ") {
+		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+}
+
+// mDNS is on by default. Which line the log gets depends on the host's
+// network (a LAN address, none, or a refused socket), so the test checks that
+// the server reaches a decision and still shuts down cleanly.
+func TestTheServerStopsCleanlyWithMDNSEnabled(t *testing.T) {
+	server := startServer(t, serverEnv(t, "DOMUS_BIND=0.0.0.0:0", "DOMUS_MDNS=1"))
+	server.waitListening(t)
+	server.terminate(t)
+	if exit := server.finish(t); exit != 0 {
+		t.Fatalf("exit %d; logs:\n%s", exit, strings.Join(server.logs, "\n"))
+	}
+	logs := strings.Join(server.logs, "\n")
+	if !strings.Contains(logs, "advertising on the LAN") &&
+		!strings.Contains(logs, "not advertising over mDNS") &&
+		!strings.Contains(logs, "mDNS discovery disabled") {
+		t.Fatalf("mDNS made no decision; logs:\n%s", logs)
+	}
+}
