@@ -249,8 +249,11 @@ mutant efficacy of at least 95% ([gremlins](https://github.com/go-gremlins/greml
 
 ```sh
 go clean -testcache
-go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 unleash -E '^e2e/' -E '^vendor/' --threshold-efficacy 95 .
+go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 unleash .
 ```
+
+The 95% threshold and the excluded paths are in `.gremlins.yaml`. Do not pass `--threshold-efficacy`:
+gremlins v0.6.0 ignores it on the command line.
 
 ### Coverage
 
