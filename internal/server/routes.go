@@ -12,6 +12,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /health", a.health)
 	a.registerAPI(mux)
 	a.registerAdmin(mux)
+	a.registerOAuth(mux)
+	a.registerMobile(mux)
 	mux.Handle("/", fallback(mux, a.staticFiles))
 	return securityHeaders(mux)
 }

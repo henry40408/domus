@@ -67,6 +67,7 @@ type App struct {
 	audit *slog.Logger
 	now   func() time.Time
 	guard auth.LoginGuard
+	codes *authCodes
 
 	timing   Timing
 	shutdown <-chan struct{}
@@ -99,6 +100,7 @@ func New(cfg Config) *App {
 		logger:    logger,
 		audit:     logger.With("target", "audit"),
 		now:       now,
+		codes:     newAuthCodes(now),
 		timing:    cfg.Timing.withDefaults(),
 		shutdown:  cfg.Shutdown,
 		setupCode: cfg.SetupCode,
