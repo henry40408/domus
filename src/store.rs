@@ -218,7 +218,7 @@ impl Store {
 
     async fn init(pool: SqlitePool) -> sqlx::Result<Self> {
         upgrade_unversioned(&pool).await?;
-        sqlx::migrate!("./migrations")
+        sqlx::migrate!("./internal/store/migrations")
             .run(&pool)
             .await
             .map_err(sqlx::Error::from)?;
