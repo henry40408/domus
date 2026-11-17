@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/coder/websocket"
@@ -42,7 +43,39 @@ type inbound struct {
 	err    error
 }
 
+// upgradeRefusal is the text axum answers (with status 400) for a request that
+// is not a WebSocket handshake; empty when the handshake headers look right.
+// The library would answer 426, which the Rust build never did.
+func upgradeRefusal(r *http.Request) string {
+	switch {
+	case !headerHasToken(r.Header, "Connection", "upgrade"):
+		return "Connection header did not include 'upgrade'"
+	case !headerHasToken(r.Header, "Upgrade", "websocket"):
+		return "`Upgrade` header did not include 'websocket'"
+	case r.Header.Get("Sec-WebSocket-Version") != "13":
+		return "`Sec-WebSocket-Version` header did not include '13'"
+	case r.Header.Get("Sec-WebSocket-Key") == "":
+		return "`Sec-WebSocket-Key` header missing"
+	}
+	return ""
+}
+
+func headerHasToken(h http.Header, name, token string) bool {
+	for _, value := range h.Values(name) {
+		for _, part := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (a *App) websocket(w http.ResponseWriter, r *http.Request) {
+	if refusal := upgradeRefusal(r); refusal != "" {
+		writeText(w, http.StatusBadRequest, refusal)
+		return
+	}
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		// The Origin check guards endpoints that a browser authenticates by
 		// itself (cookies). This one has no ambient credential: the first

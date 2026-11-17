@@ -92,8 +92,9 @@ type golden struct {
 		Headers map[string]string `json:"headers"`
 		// Body is a JSON body, BodyText any other; golden checks that need a
 		// body send it themselves.
-		Body     json.RawMessage `json:"body"`
-		BodyText *string         `json:"body_text"`
+		Body     json.RawMessage   `json:"body"`
+		BodyText *string           `json:"body_text"`
+		Form     map[string]string `json:"form"`
 	} `json:"request"`
 	Response goldenResponse `json:"response"`
 }

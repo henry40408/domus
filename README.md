@@ -62,7 +62,7 @@ Configuration is environment variables only:
 |-------------------|------------------|-----------------------------------------------------|
 | `DOMUS_BIND`      | `127.0.0.1:8123` | Listen address (plain HTTP). The container image sets `0.0.0.0:8123`. |
 | `DOMUS_DATA_DIR`  | `./data`         | SQLite location (dir mode `0700`, `domus.db` `0600`). The container image sets `/data`. |
-| `RUST_LOG`        | `error,domus=info,audit=info` | Log filter (`tracing` env-filter syntax) |
+| `DOMUS_LOG_LEVEL` | `info`           | Log level: `debug`, `info`, `warn` or `error`. The old `RUST_LOG` is retired: setting it (even empty) makes domus exit with status 1 and name its replacement. |
 | `DOMUS_MDNS`      | on               | Advertise `_home-assistant._tcp` over mDNS so the Companion apps find domus; only when not bound to loopback. `0`/`false`/`off`/`no` disables. |
 
 Everything else is configured in the admin page at `/`.

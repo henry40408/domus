@@ -674,7 +674,33 @@ func TestConnectionsEndOnRevocationAndOnShutdown(t *testing.T) {
 func TestAConnectionThatIsNotUpgradedIsRefused(t *testing.T) {
 	app := newWSApp(t, nil)
 	rec := app.get(t, "/api/websocket")
-	equal(t, rec.Code, 426)
+	equal(t, rec.Code, 400)
+	equal(t, rec.Body.String(), "Connection header did not include 'upgrade'")
 	rec = app.do(t, request{method: "POST", path: "/api/websocket"})
 	equal(t, rec.Code, 405)
+}
+
+func TestAHandshakeWithMissingHeadersIsRefusedLikeAxum(t *testing.T) {
+	app := newWSApp(t, nil)
+	good := map[string]string{
+		"Connection": "keep-alive, Upgrade", "Upgrade": "websocket",
+		"Sec-WebSocket-Version": "13", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+	}
+	cases := []struct{ drop, want string }{
+		{"Connection", "Connection header did not include 'upgrade'"},
+		{"Upgrade", "`Upgrade` header did not include 'websocket'"},
+		{"Sec-WebSocket-Version", "`Sec-WebSocket-Version` header did not include '13'"},
+		{"Sec-WebSocket-Key", "`Sec-WebSocket-Key` header missing"},
+	}
+	for _, tc := range cases {
+		headers := map[string]string{}
+		for name, value := range good {
+			if name != tc.drop {
+				headers[name] = value
+			}
+		}
+		rec := app.do(t, request{path: "/api/websocket", headers: headers})
+		equal(t, rec.Code, 400)
+		equal(t, rec.Body.String(), tc.want)
+	}
 }
