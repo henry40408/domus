@@ -44,3 +44,8 @@ func Cacheable(v string) bool {
 	}
 	return !strings.HasSuffix(v, "-dirty") && !strings.Contains(v, "+dirty")
 }
+
+// HAVersion is the Home Assistant version domus claims to be. The Companion
+// apps gate features on it, so it must not be raised without checking what
+// they then expect from the server.
+const HAVersion = "2025.12.0"
