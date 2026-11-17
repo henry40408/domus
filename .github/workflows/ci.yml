@@ -61,6 +61,19 @@ jobs:
           # Dependabot PRs cannot read repository secrets.
           fail_ci_if_error: ${{ github.actor != 'dependabot[bot]' }}
 
+  go:
+    name: go
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(git ls-files -z '*.go' ':!:vendor' ':!:e2e' | xargs -0 gofmt -l)"
+      - run: go vet ./...
+      - run: go test -race ./...
+
   lint-workflow:
     name: lint-workflow
     runs-on: ubuntu-latest
