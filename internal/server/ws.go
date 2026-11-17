@@ -76,6 +76,10 @@ func (a *App) websocket(w http.ResponseWriter, r *http.Request) {
 		writeText(w, http.StatusBadRequest, refusal)
 		return
 	}
+	// Count the handler before Accept hijacks the connection: after the hijack
+	// http.Server.Shutdown no longer tracks it, so a count taken later could
+	// miss a socket that is being upgraded while the server shuts down.
+	a.websockets.Add(1)
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		// The Origin check guards endpoints that a browser authenticates by
 		// itself (cookies). This one has no ambient credential: the first
@@ -84,11 +88,10 @@ func (a *App) websocket(w http.ResponseWriter, r *http.Request) {
 		InsecureSkipVerify: true,
 		CompressionMode:    websocket.CompressionDisabled,
 	})
+	defer a.websockets.Done()
 	if err != nil {
 		return // Accept has answered the request
 	}
-	a.websockets.Add(1)
-	defer a.websockets.Done()
 	conn.SetReadLimit(wsMaxMessage)
 	ctx, cancel := context.WithCancel(r.Context())
 	inbox := make(chan inbound)

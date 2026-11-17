@@ -675,6 +675,43 @@ func TestConnectionsEndOnRevocationAndOnShutdown(t *testing.T) {
 	equal(t, staying.closed(), true)
 }
 
+func TestShutdownWaitsForAnOpenConnectionUntilItEnds(t *testing.T) {
+	app := newWSApp(t, nil)
+	client := app.authed(t, wsToken)
+
+	short, cancelShort := context.WithTimeout(bg, 50*time.Millisecond)
+	defer cancelShort()
+	app.app.WaitForWebsockets(short)
+	if short.Err() == nil {
+		t.Fatal("returned while a connection was still open")
+	}
+
+	noError(t, client.conn.Close(websocket.StatusNormalClosure, ""))
+	long, cancelLong := context.WithTimeout(bg, wsWait)
+	defer cancelLong()
+	app.app.WaitForWebsockets(long)
+	if long.Err() != nil {
+		t.Fatal("still waiting after the connection ended")
+	}
+}
+
+func TestAFailedUpgradeIsNotWaitedFor(t *testing.T) {
+	app := newWSApp(t, nil)
+	// A recorder cannot be hijacked, so Accept fails after the headers pass.
+	rec := app.do(t, request{path: "/api/websocket", headers: map[string]string{
+		"Connection": "Upgrade", "Upgrade": "websocket",
+		"Sec-WebSocket-Version": "13", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+	}})
+	equal(t, rec.Code, 501)
+
+	ctx, cancel := context.WithTimeout(bg, 500*time.Millisecond)
+	defer cancel()
+	app.app.WaitForWebsockets(ctx)
+	if ctx.Err() != nil {
+		t.Fatal("a failed upgrade is still counted as an open connection")
+	}
+}
+
 func TestAConnectionThatIsNotUpgradedIsRefused(t *testing.T) {
 	app := newWSApp(t, nil)
 	rec := app.get(t, "/api/websocket")
