@@ -5,61 +5,171 @@ on:
     branches: [main]
   pull_request:
 
-env:
-  CARGO_TERM_COLOR: always
+# A newer push cancels the running one for the same ref; tag runs never are.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
+  # Replaces `cargo deny`: the licence allow-list below is enforced with
+  # go-licenses.
+  deps:
+    name: deps
+    runs-on: ubuntu-latest
+    env:
+      # The root module allows only these. `e2e/` additionally allows MPL-2.0
+      # (godog pulls in go-immutable-radix, go-memdb and golang-lru); MPL-2.0
+      # must not reach the root module, which ships in the image.
+      ALLOWED_LICENSES: Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MIT,MIT-0,Zlib,Unlicense,CC0-1.0,Unicode-3.0,BSL-1.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go mod tidy -diff
+      - run: |
+          go mod vendor
+          test -z "$(git status --porcelain -- vendor go.mod go.sum)"
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      # go-licenses needs GOROOT set explicitly, else it fails on the standard
+      # library with "does not have module info". The module's own LICENSE is
+      # not a dependency, so it is ignored.
+      - run: |
+          GOROOT="$(go env GOROOT)" go run github.com/google/go-licenses/v2@v2.0.1 check ./... \
+            --include_tests --ignore github.com/henry40408/domus \
+            --allowed_licenses="$ALLOWED_LICENSES"
+      # `e2e/` is a separate Go module with its own vendor directory.
+      - run: go mod tidy -diff
+        working-directory: e2e
+      - run: |
+          go mod vendor
+          test -z "$(git status --porcelain -- vendor go.mod go.sum)"
+        working-directory: e2e
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+        working-directory: e2e
+      # `--include_tests` because the Gherkin and browser libraries are test
+      # dependencies of this module.
+      - run: |
+          GOROOT="$(go env GOROOT)" go run github.com/google/go-licenses/v2@v2.0.1 check ./... \
+            --include_tests --ignore github.com/henry40408/domus/e2e \
+            --allowed_licenses="$ALLOWED_LICENSES,MPL-2.0"
+        working-directory: e2e
+
   lint:
     name: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # rust-toolchain.toml pins the toolchain and its components; rustup
-      # installs it on the first cargo invocation.
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: |
+          unformatted="$(git ls-files -z '*.go' | grep -zvE '(^|/)vendor/' | xargs -0 gofmt -l 2>&1)"
+          echo "$unformatted"
+          test -z "$unformatted"
+      - run: go vet -mod=vendor ./...
+      - run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+      - run: go vet -mod=vendor ./...
+        working-directory: e2e
+      - run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+        working-directory: e2e
+      # CI and the Dockerfile read the Go version from the root go.mod only, so
+      # the nested module must not drift from it.
+      - run: |
+          root="$(grep -E '^(go|toolchain) ' go.mod)"
+          nested="$(grep -E '^(go|toolchain) ' e2e/go.mod)"
+          test "$root" = "$nested" || { echo "e2e/go.mod differs from go.mod:"; echo "$root"; echo "--"; echo "$nested"; exit 1; }
 
   test:
     name: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          tool: nextest
-      - run: cargo nextest run
+          go-version-file: go.mod
+      - run: go test -mod=vendor -race ./...
 
-  deny:
-    name: deny
+  # Pushes to main mutate the whole module (31 to 37 minutes locally with two
+  # workers; the time on a runner is not measured yet, so adjust the timeout
+  # below after the first run); pull requests mutate only the lines changed
+  # against the base branch, which is nearly everything in the rewrite PR. The
+  # efficacy threshold and the `e2e/` and `vendor/` exclusions live in
+  # `.gremlins.yaml`: gremlins v0.6.0 silently ignores `--threshold-efficacy`
+  # on the command line, so the job could never fail on a low score.
+  mutation:
+    name: mutation
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2
         with:
-          tool: cargo-deny@0.18.9
-      - run: cargo deny check
+          # `--diff` needs the base branch's history, not a shallow clone.
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # Gremlins derives each mutant's timeout from how long its coverage run
+      # took. A cached test result makes that near zero, so nearly every mutant
+      # "times out", which the efficacy score ignores: the job would pass
+      # without testing anything.
+      - run: go clean -testcache
+      - name: Mutate the whole module (push)
+        if: github.event_name != 'pull_request'
+        run: |
+          go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 unleash .
+      - name: Mutate the changed lines (pull request)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 unleash \
+            --diff "origin/$BASE_REF" .
 
   coverage:
     name: coverage
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # cargo-llvm-cov installs the llvm-tools-preview component itself, so the
-      # toolchain needs no extra declaration beyond rust-toolchain.toml.
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          tool: cargo-llvm-cov,nextest
-      - run: cargo llvm-cov nextest --lcov --output-path lcov.info
+          go-version-file: go.mod
+      # `-coverprofile` ignores the binary cmd/domus's TestMain execs; with
+      # DOMUS_COVERDIR set it builds that binary with `-cover`.
+      - run: |
+          DOMUS_COVERDIR="$PWD/covdata" go test -mod=vendor -coverprofile=coverage.out ./...
+          go tool covdata textfmt -i=covdata -o coverage-bin.out
+          tail -n +2 coverage-bin.out >> coverage.out
       - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: henry40408/domus
-          files: lcov.info
+          files: coverage.out
           # Dependabot PRs cannot read repository secrets.
           fail_ci_if_error: ${{ github.actor != 'dependabot[bot]' }}
+
+  e2e:
+    name: e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # full history so the VCS-stamped version resolves
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # Prebuild the server the suite launches, keeping the compile off its
+      # timeout.
+      - run: go build -mod=vendor -o bin/domus ./cmd/domus
+      # The runner ships Chrome; chromedp starts it itself, so no driver is needed.
+      # Pinned, because chromedp's own search would pick the runner's Chromium
+      # snapshot ahead of google-chrome.
+      - run: google-chrome --version
+      - run: go test -count=1 -v -timeout 15m ./...
+        working-directory: e2e
+        env:
+          E2E_CHROME: /usr/bin/google-chrome
 
   lint-workflow:
     name: lint-workflow

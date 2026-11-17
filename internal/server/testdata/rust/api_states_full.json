@@ -1,0 +1,337 @@
+{
+  "name": "api_states_full",
+  "request": {
+    "method": "GET",
+    "path": "/api/states",
+    "headers": {
+      "Authorization": "Bearer <TOKEN>"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": [
+      {
+        "entity_id": "group.all_scenes",
+        "state": "off",
+        "attributes": {
+          "entity_id": [
+            "scene.hue_b2000001",
+            "scene.hue_b2000004",
+            "scene.hue_b2000006"
+          ],
+          "friendly_name": "all_scenes"
+        },
+        "last_changed": "<TS>",
+        "last_updated": "<TS>",
+        "context": {
+          "id": "<HEX26>",
+          "parent_id": null,
+          "user_id": null
+        }
+      },
+      {
+        "entity_id": "group.bedroom-lights",
+        "state": "on",
+        "attributes": {
+          "entity_id": [
+            "light.hue_a1000004",
+            "light.hue_a1000005"
+          ],
+          "friendly_name": "bedroom-lights"
+        },
+        "last_changed": "<TS>",
+        "last_updated": "<TS>",
+        "context": {
+          "id": "<HEX26>",
+          "parent_id": null,
+          "user_id": null
+        }
+      },
+      {
+        "entity_id": "group.living",
+        "state": "on",
+        "attributes": {
+          "entity_id": [
+            "light.domus_group_living",
+            "light.hue_a1000003",
+            "light.hue_a1000001",
+            "scene.hue_b2000002",
+            "light.hue_a1000002"
+          ],
+          "friendly_name": "living"
+        },
+        "last_changed": "<TS>",
+        "last_updated": "<TS>",
+        "context": {
+          "id": "<HEX26>",
+          "parent_id": null,
+          "user_id": null
+        }
+      },
+      {
+        "entity_id": "light.domus_group_living",
+        "state": "on",
+        "attributes": {
+          "friendly_name": "living"
+        },
+        "last_changed": "<TS>",
+        "last_updated": "<TS>",
+        "context": {
+          "id": "<HEX26>",
+          "parent_id": null,
+          "user_id": null
+        }
+      },
+      {
+        "entity_id": "light.hue_a1000001",
+        "state": "on",
+        "attributes": {
+          "brightness": 204,
+          "color_mode": "color_temp",
+          "color_temp": 366,
+          "friendly_name": "Ceiling",
+          "supported_color_modes": [
+            "brightness",
+            "color_temp",
+            "xy"
+          ]
+        },
+        "last_changed": "<TS>",
+        "last_updated": "<TS>",
+        "context": {
+          "id": "<HEX26>",
+          "parent_id": null,
+          "user_id": null
+        }
+      },
+      {
+        "entity_id": "light.hue_a1000002",
+        "state": "on",
+        "attributes": {
+          "brightness": 140,
+          "color_mode": "color_temp",
+          "color_temp": 454,
+          "friendly_name": "Floor lamp",
+          "supported_color_modes": [
+            "brightness",
+            "color_temp",
+            "xy"
+          ]
+        },
+        "last_changed": "<TS>",
+        "last_updated": "<TS>",
+        "context": {
+          "id": "<HEX26>",
+          "parent_id": null,
+          "user_id": null
+        }
+      },
+      {
+        "entity_id": "light.hue_a1000003",
+        "state": "on",
+        "attributes": {
+          "brightness": 102,
+          "color_mode": "color_temp",
+          "color_temp": 300,
+          "friendly_name": "TV strip",
+          "supported_color_modes": [
+            "brightness",
+            "color_temp",
+            "xy"
+          ]
+        },
+        "last_changed": "<TS>",
+        "last_updated": "<TS>",
+        "context": {
+          "id": "<HEX26>",
+          "parent_id": null,
+          "user_id": null
+        }
+      },
+      {
+        "entity_id": "light.hue_a1000004",
+        "state": "on",
+        "attributes": {
+          "brightness": 77,
+          "color_mode": "color_temp",
+          "color_temp": 400,
+          "friendly_name": "Bedside left",
+          "supported_color_modes": [
+            "brightness",
+            "color_temp"
+          ]
+        },
+        "last_changed": "<TS>",
+        "last_updated": "<TS>",
+        "context": {
+          "id": "<HEX26>",
+          "parent_id": null,
+          "user_id": null
+        }
+      },
+      {
+        "entity_id": "light.hue_a1000005",
+        "state": "off",
+        "attributes": {
+          "friendly_name": "Bedside right",
+          "supported_color_modes": [
+            "brightness",
+            "color_temp"
+          ]
+        },
+        "last_changed": "<TS>",
+        "last_updated": "<TS>",
+        "context": {
+          "id": "<HEX26>",
+          "parent_id": null,
+          "user_id": null
+        }
+      },
+      {
+        "entity_id": "light.hue_a1000006",
+        "state": "on",
+        "attributes": {
+          "brightness": 255,
+          "color_mode": "color_temp",
+          "color_temp": 250,
+          "friendly_name": "Desk lamp",
+          "supported_color_modes": [
+            "brightness",
+            "color_temp"
+          ]
+        },
+        "last_changed": "<TS>",
+        "last_updated": "<TS>",
+        "context": {
+          "id": "<HEX26>",
+          "parent_id": null,
+          "user_id": null
+        }
+      },
+      {
+        "entity_id": "light.hue_a1000007",
+        "state": "off",
+        "attributes": {
+          "friendly_name": "Monitor light",
+          "supported_color_modes": [
+            "brightness",
+            "color_temp",
+            "xy"
+          ]
+        },
+        "last_changed": "<TS>",
+        "last_updated": "<TS>",
+        "context": {
+          "id": "<HEX26>",
+          "parent_id": null,
+          "user_id": null
+        }
+      },
+      {
+        "entity_id": "scene.hue_b2000001",
+        "state": "unknown",
+        "attributes": {
+          "friendly_name": "Living Room: Relax"
+        },
+        "last_changed": "<TS>",
+        "last_updated": "<TS>",
+        "context": {
+          "id": "<HEX26>",
+          "parent_id": null,
+          "user_id": null
+        }
+      },
+      {
+        "entity_id": "scene.hue_b2000002",
+        "state": "unknown",
+        "attributes": {
+          "friendly_name": "Living Room: Movie night"
+        },
+        "last_changed": "<TS>",
+        "last_updated": "<TS>",
+        "context": {
+          "id": "<HEX26>",
+          "parent_id": null,
+          "user_id": null
+        }
+      },
+      {
+        "entity_id": "scene.hue_b2000003",
+        "state": "unknown",
+        "attributes": {
+          "friendly_name": "Living Room: Energize"
+        },
+        "last_changed": "<TS>",
+        "last_updated": "<TS>",
+        "context": {
+          "id": "<HEX26>",
+          "parent_id": null,
+          "user_id": null
+        }
+      },
+      {
+        "entity_id": "scene.hue_b2000004",
+        "state": "unknown",
+        "attributes": {
+          "friendly_name": "Bedroom: Nightlight"
+        },
+        "last_changed": "<TS>",
+        "last_updated": "<TS>",
+        "context": {
+          "id": "<HEX26>",
+          "parent_id": null,
+          "user_id": null
+        }
+      },
+      {
+        "entity_id": "scene.hue_b2000005",
+        "state": "unknown",
+        "attributes": {
+          "friendly_name": "Bedroom: Read"
+        },
+        "last_changed": "<TS>",
+        "last_updated": "<TS>",
+        "context": {
+          "id": "<HEX26>",
+          "parent_id": null,
+          "user_id": null
+        }
+      },
+      {
+        "entity_id": "scene.hue_b2000006",
+        "state": "unknown",
+        "attributes": {
+          "friendly_name": "Office: Focus"
+        },
+        "last_changed": "<TS>",
+        "last_updated": "<TS>",
+        "context": {
+          "id": "<HEX26>",
+          "parent_id": null,
+          "user_id": null
+        }
+      },
+      {
+        "entity_id": "scene.hue_b2000007",
+        "state": "unknown",
+        "attributes": {
+          "friendly_name": "Office: Concentrate"
+        },
+        "last_changed": "<TS>",
+        "last_updated": "<TS>",
+        "context": {
+          "id": "<HEX26>",
+          "parent_id": null,
+          "user_id": null
+        }
+      }
+    ]
+  }
+}

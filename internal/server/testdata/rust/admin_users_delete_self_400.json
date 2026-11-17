@@ -1,0 +1,24 @@
+{
+  "name": "admin_users_delete_self_400",
+  "request": {
+    "method": "DELETE",
+    "path": "/api/domus/users/1",
+    "headers": {
+      "Cookie": "domus_session=<HEX64>"
+    }
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": {
+      "message": "You cannot delete yourself."
+    }
+  }
+}

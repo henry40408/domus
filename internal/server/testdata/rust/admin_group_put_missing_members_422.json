@@ -1,0 +1,24 @@
+{
+  "name": "admin_group_put_missing_members_422",
+  "request": {
+    "method": "PUT",
+    "path": "/api/domus/groups/x",
+    "headers": {
+      "Content-Type": "application/json",
+      "Cookie": "domus_session=<HEX64>"
+    },
+    "body": {}
+  },
+  "response": {
+    "status": 422,
+    "headers": {
+      "content-type": "text/plain; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body_text": "Failed to deserialize the JSON body into the target type: missing field `members` at line 1 column 2"
+  }
+}

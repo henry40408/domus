@@ -1,0 +1,30 @@
+{
+  "name": "admin_group_put_bad_member_400",
+  "request": {
+    "method": "PUT",
+    "path": "/api/domus/groups/x",
+    "headers": {
+      "Content-Type": "application/json",
+      "Cookie": "domus_session=<HEX64>"
+    },
+    "body": {
+      "members": [
+        "switch.a"
+      ]
+    }
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": {
+      "message": "Members must be light or scene entities."
+    }
+  }
+}

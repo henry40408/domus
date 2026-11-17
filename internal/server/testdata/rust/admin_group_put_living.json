@@ -1,0 +1,34 @@
+{
+  "name": "admin_group_put_living",
+  "request": {
+    "method": "PUT",
+    "path": "/api/domus/groups/living",
+    "headers": {
+      "Content-Type": "application/json",
+      "Cookie": "domus_session=<HEX64>"
+    },
+    "body": {
+      "members": [
+        "light.hue_a1000003",
+        "light.hue_a1000001",
+        "scene.hue_b2000002",
+        "light.hue_a1000002"
+      ],
+      "expose_light": true
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": {
+      "ok": true
+    }
+  }
+}

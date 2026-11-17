@@ -1,0 +1,21 @@
+{
+  "name": "api_states_replaced_access_token_401",
+  "request": {
+    "method": "GET",
+    "path": "/api/states",
+    "headers": {
+      "Authorization": "Bearer <TOKEN>"
+    }
+  },
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "text/plain; charset=utf-8",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body_text": "401: Unauthorized"
+  }
+}

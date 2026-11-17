@@ -1,0 +1,29 @@
+{
+  "name": "webhook_register_sensor",
+  "request": {
+    "method": "POST",
+    "path": "/api/webhook/<HEX32>",
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "type": "register_sensor",
+      "data": {
+        "unique_id": "battery"
+      }
+    }
+  },
+  "response": {
+    "status": 201,
+    "headers": {
+      "content-type": "application/json",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": {
+      "success": true
+    }
+  }
+}

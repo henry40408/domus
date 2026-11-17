@@ -1,0 +1,57 @@
+{
+  "name": "api_service_turn_on_rgb",
+  "request": {
+    "method": "POST",
+    "path": "/api/services/light/turn_on",
+    "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <TOKEN>"
+    },
+    "body": {
+      "entity_id": "light.hue_a1000002",
+      "rgb_color": [
+        255,
+        0,
+        0
+      ],
+      "brightness_pct": 50
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": [
+      {
+        "entity_id": "light.hue_a1000002",
+        "state": "on",
+        "attributes": {
+          "brightness": 128,
+          "color_mode": "xy",
+          "friendly_name": "Floor lamp",
+          "supported_color_modes": [
+            "brightness",
+            "color_temp",
+            "xy"
+          ],
+          "xy_color": [
+            0.7006,
+            0.2993
+          ]
+        },
+        "last_changed": "<TS>",
+        "last_updated": "<TS>",
+        "context": {
+          "id": "<HEX26>",
+          "parent_id": null,
+          "user_id": null
+        }
+      }
+    ]
+  }
+}

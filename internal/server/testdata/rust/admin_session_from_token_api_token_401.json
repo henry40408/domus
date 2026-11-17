@@ -1,0 +1,24 @@
+{
+  "name": "admin_session_from_token_api_token_401",
+  "request": {
+    "method": "POST",
+    "path": "/api/domus/session/from-token",
+    "headers": {
+      "Authorization": "Bearer <TOKEN>"
+    }
+  },
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": {
+      "message": "Invalid token."
+    }
+  }
+}

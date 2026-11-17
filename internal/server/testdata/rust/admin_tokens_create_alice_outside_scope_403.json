@@ -1,0 +1,31 @@
+{
+  "name": "admin_tokens_create_alice_outside_scope_403",
+  "request": {
+    "method": "POST",
+    "path": "/api/domus/tokens",
+    "headers": {
+      "Content-Type": "application/json",
+      "Cookie": "domus_session=<HEX64>"
+    },
+    "body": {
+      "name": "x",
+      "scope": [
+        "living"
+      ]
+    }
+  },
+  "response": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": {
+      "message": "Your account may not use the group living."
+    }
+  }
+}

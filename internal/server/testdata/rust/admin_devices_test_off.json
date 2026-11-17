@@ -1,0 +1,32 @@
+{
+  "name": "admin_devices_test_off",
+  "request": {
+    "method": "POST",
+    "path": "/api/domus/devices/test",
+    "headers": {
+      "Content-Type": "application/json",
+      "Cookie": "domus_session=<HEX64>"
+    },
+    "body": {
+      "entity_ids": [
+        "light.hue_a1000001",
+        "light.hue_a1000002"
+      ],
+      "on": false
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": {
+      "state": "off"
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "admin_login_wrong_content_type_415",
+  "request": {
+    "method": "POST",
+    "path": "/api/domus/login",
+    "headers": {
+      "Content-Type": "text/plain"
+    },
+    "body_text": "{\"username\":\"x\",\"password\":\"y\"}"
+  },
+  "response": {
+    "status": 415,
+    "headers": {
+      "content-type": "text/plain; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body_text": "Expected request with `Content-Type: application/json`"
+  }
+}

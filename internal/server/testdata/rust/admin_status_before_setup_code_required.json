@@ -1,0 +1,26 @@
+{
+  "name": "admin_status_before_setup_code_required",
+  "request": {
+    "method": "GET",
+    "path": "/api/domus/status"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": {
+      "hue_paired": false,
+      "logged_in": false,
+      "setup_code_required": true,
+      "setup_done": false,
+      "user": null,
+      "version": "<VERSION>"
+    }
+  }
+}

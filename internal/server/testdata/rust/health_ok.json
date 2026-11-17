@@ -1,0 +1,22 @@
+{
+  "name": "health_ok",
+  "request": {
+    "method": "GET",
+    "path": "/health"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": {
+      "status": "ok",
+      "version": "<VERSION>"
+    }
+  }
+}

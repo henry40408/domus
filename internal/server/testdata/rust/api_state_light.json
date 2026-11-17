@@ -1,0 +1,42 @@
+{
+  "name": "api_state_light",
+  "request": {
+    "method": "GET",
+    "path": "/api/states/light.hue_a1000001",
+    "headers": {
+      "Authorization": "Bearer <TOKEN>"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": {
+      "entity_id": "light.hue_a1000001",
+      "state": "on",
+      "attributes": {
+        "brightness": 204,
+        "color_mode": "color_temp",
+        "color_temp": 366,
+        "friendly_name": "Ceiling",
+        "supported_color_modes": [
+          "brightness",
+          "color_temp",
+          "xy"
+        ]
+      },
+      "last_changed": "<TS>",
+      "last_updated": "<TS>",
+      "context": {
+        "id": "<HEX26>",
+        "parent_id": null,
+        "user_id": null
+      }
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "webhook_after_revoke_410",
+  "request": {
+    "method": "POST",
+    "path": "/api/webhook/<HEX32>",
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "type": "get_config"
+    }
+  },
+  "response": {
+    "status": 410,
+    "headers": {
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body_empty": true
+  }
+}

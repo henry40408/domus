@@ -1,0 +1,20 @@
+{
+  "name": "static_index_html",
+  "request": {
+    "method": "GET",
+    "path": "/index.html"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-cache",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body_sha256": "66b221a2b6ffb997ba702734962f1333bfda0d411dcc5b57c106d34370a87e16",
+    "body_length": 475
+  }
+}

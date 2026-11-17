@@ -1,3 +1,7 @@
-/target
 /data
-/mutants.out*
+
+# Go build and test output.
+/bin/
+coverage.out
+coverage-bin.out
+/covdata/

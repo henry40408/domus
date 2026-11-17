@@ -1,0 +1,26 @@
+{
+  "name": "webhook_not_object_400",
+  "request": {
+    "method": "POST",
+    "path": "/api/webhook/<HEX32>",
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": [
+      1
+    ]
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": {
+      "message": "Expected a JSON object."
+    }
+  }
+}

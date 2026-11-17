@@ -1,0 +1,31 @@
+{
+  "name": "admin_tokens_create_read-only",
+  "request": {
+    "method": "POST",
+    "path": "/api/domus/tokens",
+    "headers": {
+      "Content-Type": "application/json",
+      "Cookie": "domus_session=<HEX64>"
+    },
+    "body": {
+      "name": "read-only",
+      "read_only": true
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": {
+      "id": 3,
+      "name": "read-only",
+      "token": "<TOKEN>"
+    }
+  }
+}

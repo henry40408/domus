@@ -1,0 +1,25 @@
+{
+  "name": "mobile_register_form_415",
+  "request": {
+    "method": "POST",
+    "path": "/api/mobile_app/registrations",
+    "headers": {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Authorization": "Bearer <TOKEN>"
+    },
+    "form": {
+      "a": "b"
+    }
+  },
+  "response": {
+    "status": 415,
+    "headers": {
+      "content-type": "text/plain; charset=utf-8",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body_text": "Expected request with `Content-Type: application/json`"
+  }
+}

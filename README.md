@@ -1,6 +1,6 @@
 # domus
 
-> A lightweight, Home Assistant API-compatible server in Rust for Philips Hue lights.
+> A lightweight, Home Assistant API-compatible server in Go for Philips Hue lights.
 
 [![CI](https://github.com/henry40408/domus/actions/workflows/ci.yml/badge.svg)](https://github.com/henry40408/domus/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/henry40408/domus/graph/badge.svg)](https://codecov.io/gh/henry40408/domus)
@@ -51,7 +51,7 @@ The code stops working once the admin exists.
 ```sh
 git clone https://github.com/henry40408/domus.git
 cd domus
-cargo run --release
+go run ./cmd/domus
 ```
 
 ## Configuration
@@ -62,7 +62,7 @@ Configuration is environment variables only:
 |-------------------|------------------|-----------------------------------------------------|
 | `DOMUS_BIND`      | `127.0.0.1:8123` | Listen address (plain HTTP). The container image sets `0.0.0.0:8123`. |
 | `DOMUS_DATA_DIR`  | `./data`         | SQLite location (dir mode `0700`, `domus.db` `0600`). The container image sets `/data`. |
-| `RUST_LOG`        | `error,domus=info,audit=info` | Log filter (`tracing` env-filter syntax) |
+| `DOMUS_LOG_LEVEL` | `info`           | Log level: `debug`, `info`, `warn` or `error`. The old `RUST_LOG` is retired: setting it (even empty) makes domus exit with status 1 and name its replacement. |
 | `DOMUS_MDNS`      | on               | Advertise `_home-assistant._tcp` over mDNS so the Companion apps find domus; only when not bound to loopback. `0`/`false`/`off`/`no` disables. |
 
 Everything else is configured in the admin page at `/`.
@@ -170,9 +170,9 @@ volumes:
 docker build -t domus:local .
 ```
 
-Static musl binary cross-compiled with cargo-zigbuild, on a distroless base.
+Static Go binary (CGO off, pure-Go SQLite) cross-compiled by the Go toolchain, on a distroless base.
 
-The version shown in the admin sidebar, `GET /api/domus/status` and the startup log comes from `git describe --tags --always --dirty` (set by `build.rs`). The image has no `.git`, so pass it in: `docker build --build-arg GIT_VERSION=v0.2.1 -t domus:local .` (CI does this for you); without it the image reports `dev`.
+The version shown in the admin sidebar, `GET /api/domus/status` and the startup log comes from `git describe --tags --always --dirty`, injected with `-ldflags "-X github.com/henry40408/domus/internal/version.version=..."`; a plain `go build` inside a checkout reports the version Go stamps from VCS. The image has no `.git`, so pass it in: `docker build --build-arg GIT_VERSION=v0.2.1 -t domus:local .` (CI does this for you); without it the image reports `dev`.
 
 ### Caching behind a CDN
 
@@ -232,47 +232,59 @@ Registries (the list commands return empty lists), the official HA frontend, oth
 
 ### Prerequisites
 
-- Rust (edition 2024)
-- [cargo-nextest](https://nexte.st/)
+- Go (the version is in `go.mod`). Dependencies are vendored and committed; nothing to download.
 
 ### Running Tests
 
 ```sh
-cargo fmt
-cargo clippy --all-targets -- -D warnings
-cargo nextest run
+gofmt -l $(git ls-files '*.go' ':!:vendor' ':!:e2e')   # must print nothing
+go vet ./...
+go test -race ./...
 ```
 
 ### Mutation testing
 
-A pull request is mutated on its changed lines only and the result is reported, not enforced. To
-check a change locally (needs [cargo-mutants](https://mutants.rs/)):
+CI mutates the whole module on pushes to `main` and the changed lines on pull requests, and requires a
+mutant efficacy of at least 95% ([gremlins](https://github.com/go-gremlins/gremlins)). Locally:
 
 ```sh
-git diff main -- src > changes.diff
-cargo mutants --in-diff changes.diff
+go clean -testcache
+go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 unleash .
 ```
+
+The 95% threshold and the excluded paths are in `.gremlins.yaml`. Do not pass `--threshold-efficacy`:
+gremlins v0.6.0 ignores it on the command line.
 
 ### Coverage
 
-CI uploads coverage to [Codecov](https://codecov.io/gh/henry40408/domus) using
-[cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) (`src/main.rs` is excluded, see `codecov.yml`).
-Forks need a `CODECOV_TOKEN` repository secret. To run it locally:
+CI uploads coverage to [Codecov](https://codecov.io/gh/henry40408/domus). `-coverprofile` ignores the
+binary that the `cmd/domus` tests build and run, so they build it with `-cover` when `DOMUS_COVERDIR` is set:
 
 ```sh
-cargo llvm-cov nextest --html
+DOMUS_COVERDIR="$PWD/covdata" go test -coverprofile=coverage.out ./...
+go tool covdata textfmt -i=covdata -o coverage-bin.out
+tail -n +2 coverage-bin.out >> coverage.out
+go tool cover -func=coverage.out | tail -1
 ```
+
+Forks need a `CODECOV_TOKEN` repository secret.
+
+### End-to-end tests
+
+`e2e/` is a separate Go module (godog + chromedp, a real headless Chrome or Chromium against a fake Hue
+Bridge). Run it from there: `go test -count=1 -v ./...` (build `bin/domus` first or let it build one).
+`E2E_CHROME` pins the browser binary and `E2E_FEATURES=features/login.feature` picks feature files.
 
 ### Screenshots
 
 The README images are generated from a fake Hue Bridge, so no real house ends up in them. After a UI
 change, rebuild (the web assets are embedded at compile time) and regenerate; this needs a local
-Chrome or Chromium (`brew install --cask ungoogled-chromium`) and network access on the first run
-(it downloads chromedriver). It runs `target/debug/domus`, so build into the default target dir:
+Chrome or Chromium (`brew install --cask ungoogled-chromium`); there is no driver to download. It runs
+`bin/domus`:
 
 ```sh
-cargo build
-cd e2e && cargo run --bin screenshots
+go build -o bin/domus ./cmd/domus
+cd e2e && go run ./cmd/screenshots
 ```
 
 Commit the updated images under `screenshots/` with the UI change. Fonts and Chromium differ by

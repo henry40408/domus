@@ -1,0 +1,24 @@
+{
+  "name": "webhook_get_zones",
+  "request": {
+    "method": "POST",
+    "path": "/api/webhook/<HEX32>",
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "type": "get_zones"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": []
+  }
+}

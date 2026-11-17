@@ -1,0 +1,26 @@
+{
+  "name": "health_https_forwarded",
+  "request": {
+    "method": "GET",
+    "path": "/health",
+    "headers": {
+      "X-Forwarded-Proto": "https"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer",
+      "strict-transport-security": "max-age=31536000; includeSubDomains"
+    },
+    "body": {
+      "status": "ok",
+      "version": "<VERSION>"
+    }
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "name": "admin_sessions_admin",
+  "request": {
+    "method": "GET",
+    "path": "/api/domus/sessions",
+    "headers": {
+      "Cookie": "domus_session=<HEX64>"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": [
+      {
+        "created": "<UNIX>",
+        "current": false,
+        "id": 3,
+        "last_seen": "<UNIX>",
+        "user_agent": "domus-capture/1.0 (case)"
+      },
+      {
+        "created": "<UNIX>",
+        "current": false,
+        "id": 2,
+        "last_seen": "<UNIX>",
+        "user_agent": "domus-capture/1.0 (https)"
+      },
+      {
+        "created": "<UNIX>",
+        "current": true,
+        "id": 1,
+        "last_seen": "<UNIX>",
+        "user_agent": "domus-capture/1.0 (setup)"
+      }
+    ]
+  }
+}

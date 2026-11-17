@@ -1,0 +1,22 @@
+{
+  "name": "api_service_turn_on_empty_body",
+  "request": {
+    "method": "POST",
+    "path": "/api/services/light/turn_on",
+    "headers": {
+      "Authorization": "Bearer <TOKEN>"
+    },
+    "body_text": ""
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": []
+  }
+}

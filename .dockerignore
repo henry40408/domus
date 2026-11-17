@@ -1,7 +1,15 @@
-target
 data
+
+# CI passes the version in as GIT_VERSION; excluding .git stops every commit
+# from invalidating the `COPY . .` layer and the build behind it.
 .git
 .claude
 .github
+
+# Browser tests: a separate Go module that never ships in the image.
 e2e
 screenshots
+
+# Local build and coverage output.
+bin
+covdata
