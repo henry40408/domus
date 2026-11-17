@@ -51,6 +51,7 @@ type request struct {
 	method  string
 	path    string
 	headers map[string]string
+	body    string
 }
 
 func (a *testApp) do(t *testing.T, req request) *httptest.ResponseRecorder {
@@ -58,7 +59,7 @@ func (a *testApp) do(t *testing.T, req request) *httptest.ResponseRecorder {
 	if req.method == "" {
 		req.method = http.MethodGet
 	}
-	r := httptest.NewRequest(req.method, req.path, nil)
+	r := httptest.NewRequest(req.method, req.path, strings.NewReader(req.body))
 	for name, value := range req.headers {
 		r.Header.Set(name, value)
 	}
