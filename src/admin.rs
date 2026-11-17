@@ -31,7 +31,7 @@ const MAX_PASSWORD_LEN: usize = 128;
 const TOKEN_PREFIX: &str = "domus_";
 
 #[derive(RustEmbed)]
-#[folder = "web/"]
+#[folder = "internal/assets/static/"]
 struct Assets;
 
 fn message(status: StatusCode, msg: &str) -> Response {

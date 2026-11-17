@@ -119,7 +119,7 @@ struct AuthorizeQuery {
     redirect_uri: String,
 }
 
-const LOGIN_PAGE: &str = include_str!("oauth/login.html");
+const LOGIN_PAGE: &str = include_str!("../internal/server/oauth_login.html");
 
 async fn authorize(Query(q): Query<AuthorizeQuery>) -> Response {
     if !valid_client(&q.client_id, &q.redirect_uri) {
