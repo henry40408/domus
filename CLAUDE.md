@@ -24,7 +24,7 @@ Subcommand: `domus healthcheck` calls `GET /health` on `DOMUS_BIND` and exits 0 
 
 - Third-party modules are **vendored and committed** (`vendor/`, about 140 MB); builds and tests use `-mod=vendor` (Go selects it while `vendor/` exists). To add or update one: `go get <module>@<version>`, `go mod tidy`, `go mod vendor`, and commit `go.mod`, `go.sum` and `vendor/` together. Do the same inside `e2e/` for its own module. Never ignore a path inside `vendor/` in `.gitignore`.
 - **Never use a dependency version published less than 7 days ago** (Go modules, GitHub Actions, base images, the Go toolchain), indirect ones included. Check with `go list -m -f '{{.Path}} {{.Version}} {{.Time}}' all`; pin an older version with `go get <module>@<older>` when needed. Dependabot uses `cooldown.default-days: 7`.
-- Licences: add only permissive ones (Apache-2.0, BSD-2/3-Clause, ISC, MIT, MIT-0, Zlib, Unlicense, CC0, Unicode-3.0, BSL-1.0). There is no automated gate; read the LICENSE of every new module.
+- Licences: add only permissive ones (Apache-2.0, BSD-2/3-Clause, ISC, MIT, MIT-0, Zlib, Unlicense, CC0, Unicode-3.0, BSL-1.0). There is no automated gate; read the LICENSE of every new module. Exception: the test-only `e2e/` module may carry the MPL-2.0 modules godog pulls in (`go-immutable-radix`, `go-memdb`, `golang-lru`); MPL-2.0 must never enter the root module or the image. Do not swap a dependency for a worse one to avoid a licence question; ask first.
 - GitHub Actions are pinned by commit SHA with the tag as a trailing comment (`uses: owner/repo@<sha> # v1.2.3`).
 
 ### E2E (`e2e/`)
