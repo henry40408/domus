@@ -27,7 +27,12 @@ func buildInfoVersion() string {
 	if !ok {
 		return "unknown"
 	}
-	v := info.Main.Version
+	return moduleVersion(info.Main.Version)
+}
+
+// moduleVersion maps the versions Go stamps for a build outside a tagged
+// module ("" and "(devel)") to "unknown".
+func moduleVersion(v string) string {
 	if v == "" || v == "(devel)" {
 		return "unknown"
 	}
