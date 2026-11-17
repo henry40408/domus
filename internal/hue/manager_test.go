@@ -2,6 +2,7 @@ package hue
 
 import (
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 
@@ -35,6 +36,41 @@ func TestStartSyncedHasTheLightsReadyOnReturn(t *testing.T) {
 	waitFor(t, "event stream", func() bool { return mock.streamCount() == 1 })
 	if got := mock.listCount("light"); got != 1 {
 		t.Fatalf("got %d light syncs", got)
+	}
+}
+
+func TestTwoPairingsAtOnceLeaveOnlyTheLastBridgesLights(t *testing.T) {
+	checkGoroutines(t)
+	slow := newMock()
+	slow.set("light", lightJSON("aaaaaaaa-0000", "Slow", true, 40))
+	slow.holdOpen = true
+	slowBase := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		slow.handler().ServeHTTP(w, r)
+	}))
+	fast := newMock()
+	fast.set("light", lightJSON("bbbbbbbb-0000", "Fast", true, 40))
+	fast.holdOpen = true
+	fastBase := serve(t, fast.handler())
+	c := newCore(t)
+	manager := NewManager(c, Timing{}, quietLogger())
+	t.Cleanup(manager.Reset)
+
+	first := make(chan struct{})
+	go func() {
+		defer close(first)
+		manager.StartSynced(ctx, slowBase, "key")
+	}()
+	// Let the first pairing reach its slow sync before the second starts.
+	time.Sleep(50 * time.Millisecond)
+	manager.StartSynced(ctx, fastBase, "key")
+	<-first
+
+	// Without the lock the first pairing finishes last and leaves its light
+	// next to the second one's.
+	ids := c.EntityIDsWithPrefix(entityPrefix)
+	if len(ids) != 1 || ids[0] != "light.hue_bbbbbbbb" {
+		t.Fatalf("got %v", ids)
 	}
 }
 

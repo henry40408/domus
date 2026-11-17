@@ -182,6 +182,40 @@ func TestEventsSendKeepAliveComments(t *testing.T) {
 	}
 }
 
+func TestEventsSendNoKeepAliveWhileChangesKeepComing(t *testing.T) {
+	const keepAlive = 500 * time.Millisecond
+	app := newTestAppWith(t, func(cfg *Config) {
+		cfg.Timing = Timing{EventsKeepAlive: keepAlive}
+	})
+	admin := app.setupAdmin(t)
+	server := startEventServer(t, app)
+	stream, _ := openEvents(t, server.URL, admin)
+
+	// A change every fifth of the interval for more than two intervals: a
+	// ticker that is not reset after each frame would fire in between.
+	for i := 0; i < 12; i++ {
+		app.app.core.SetState("light.a", strconv.Itoa(i), nil)
+		time.Sleep(keepAlive / 5)
+	}
+	for drained := false; !drained; {
+		select {
+		case frame := <-stream.frames:
+			if strings.HasPrefix(frame, ":") {
+				t.Fatalf("a keep-alive came while changes were flowing: %q", frame)
+			}
+		default:
+			drained = true
+		}
+	}
+	// Once the stream is quiet, the keep-alive returns.
+	select {
+	case frame := <-stream.frames:
+		equal(t, frame, ":\n\n")
+	case <-time.After(eventWait):
+		t.Fatal("no keep-alive on the quiet stream")
+	}
+}
+
 // stalledWriter is a response writer that blocks every body write until
 // release is closed, like a client that stopped reading.
 type stalledWriter struct {

@@ -117,6 +117,8 @@ func TestTheSetupCodeFoldsOnlyAsciiLetters(t *testing.T) {
 	equal(t, plainSetupCode(" a1b2c-d3e4f "), "A1B2CD3E4F")
 	// U+017F and U+0131 would become S and I under Unicode upper-casing.
 	equal(t, plainSetupCode("ſı"), "ſı")
+	// The characters next to the range, and both of its ends.
+	equal(t, plainSetupCode("`a@z{"), "`A@Z{")
 }
 
 func TestWaitingForWebsocketsEndsWithTheContext(t *testing.T) {
