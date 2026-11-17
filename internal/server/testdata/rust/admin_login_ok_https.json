@@ -1,0 +1,32 @@
+{
+  "name": "admin_login_ok_https",
+  "request": {
+    "method": "POST",
+    "path": "/api/domus/login",
+    "headers": {
+      "X-Forwarded-Proto": "https",
+      "User-Agent": "domus-capture/1.0 (https)",
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "username": "admin",
+      "password": "Fixture-Admin-Pass-1"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer",
+      "strict-transport-security": "max-age=31536000; includeSubDomains",
+      "set-cookie": "domus_session=<HEX64>; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800; Secure"
+    },
+    "body": {
+      "ok": true
+    }
+  }
+}

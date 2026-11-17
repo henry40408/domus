@@ -1,0 +1,28 @@
+{
+  "name": "admin_devices_test_scene",
+  "request": {
+    "method": "POST",
+    "path": "/api/domus/devices/test",
+    "headers": {
+      "Content-Type": "application/json",
+      "Cookie": "domus_session=<HEX64>"
+    },
+    "body": {
+      "entity_id": "scene.hue_b2000002"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": {
+      "state": "<TS>"
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "static_app_js_versioned",
+  "request": {
+    "method": "GET",
+    "path": "/app.js?v=<VERSION>"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/javascript; charset=utf-8",
+      "cache-control": "public, max-age=31536000, immutable",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body_sha256": "7be2648ad4e2943e483f79789f076a8b7fbe45ddca27dd772baf8394e1b8f0d1",
+    "body_length": 45425
+  }
+}

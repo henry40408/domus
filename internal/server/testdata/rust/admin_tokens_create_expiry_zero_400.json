@@ -1,0 +1,29 @@
+{
+  "name": "admin_tokens_create_expiry_zero_400",
+  "request": {
+    "method": "POST",
+    "path": "/api/domus/tokens",
+    "headers": {
+      "Content-Type": "application/json",
+      "Cookie": "domus_session=<HEX64>"
+    },
+    "body": {
+      "name": "x",
+      "expires_days": 0
+    }
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": {
+      "message": "Expiry must be 1 to 3650 days."
+    }
+  }
+}

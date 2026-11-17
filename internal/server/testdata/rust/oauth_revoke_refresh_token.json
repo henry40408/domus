@@ -1,0 +1,24 @@
+{
+  "name": "oauth_revoke_refresh_token",
+  "request": {
+    "method": "POST",
+    "path": "/auth/revoke",
+    "headers": {
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    "form": {
+      "token": "<REFRESH_TOKEN>"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body_empty": true
+  }
+}

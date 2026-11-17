@@ -1,0 +1,83 @@
+{
+  "name": "api_service_turn_off_group",
+  "request": {
+    "method": "POST",
+    "path": "/api/services/light/turn_off",
+    "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <TOKEN>"
+    },
+    "body": {
+      "entity_id": "group.living"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": [
+      {
+        "entity_id": "light.hue_a1000003",
+        "state": "off",
+        "attributes": {
+          "friendly_name": "TV strip",
+          "supported_color_modes": [
+            "brightness",
+            "color_temp",
+            "xy"
+          ]
+        },
+        "last_changed": "<TS>",
+        "last_updated": "<TS>",
+        "context": {
+          "id": "<HEX26>",
+          "parent_id": null,
+          "user_id": null
+        }
+      },
+      {
+        "entity_id": "light.hue_a1000001",
+        "state": "off",
+        "attributes": {
+          "friendly_name": "Ceiling",
+          "supported_color_modes": [
+            "brightness",
+            "color_temp",
+            "xy"
+          ]
+        },
+        "last_changed": "<TS>",
+        "last_updated": "<TS>",
+        "context": {
+          "id": "<HEX26>",
+          "parent_id": null,
+          "user_id": null
+        }
+      },
+      {
+        "entity_id": "light.hue_a1000002",
+        "state": "off",
+        "attributes": {
+          "friendly_name": "Floor lamp",
+          "supported_color_modes": [
+            "brightness",
+            "color_temp",
+            "xy"
+          ]
+        },
+        "last_changed": "<TS>",
+        "last_updated": "<TS>",
+        "context": {
+          "id": "<HEX26>",
+          "parent_id": null,
+          "user_id": null
+        }
+      }
+    ]
+  }
+}

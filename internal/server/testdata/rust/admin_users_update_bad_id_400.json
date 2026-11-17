@@ -1,0 +1,24 @@
+{
+  "name": "admin_users_update_bad_id_400",
+  "request": {
+    "method": "PUT",
+    "path": "/api/domus/users/abc",
+    "headers": {
+      "Content-Type": "application/json",
+      "Cookie": "domus_session=<HEX64>"
+    },
+    "body": {}
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "text/plain; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body_text": "Invalid URL: Cannot parse `abc` to a `i64`"
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "name": "mobile_register_bob_api_token_no_os_version",
+  "request": {
+    "method": "POST",
+    "path": "/api/mobile_app/registrations",
+    "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer <TOKEN>"
+    },
+    "body": {
+      "app_id": "io.homeassistant.companion.android",
+      "app_name": "Home Assistant",
+      "app_version": "2025.10.0",
+      "device_id": "bob-watch-1",
+      "device_name": "Bob watch",
+      "manufacturer": "Google",
+      "model": "Pixel 8",
+      "os_name": "Android",
+      "supports_encryption": true,
+      "app_data": {
+        "push_token": "abc"
+      }
+    }
+  },
+  "response": {
+    "status": 201,
+    "headers": {
+      "content-type": "application/json",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": {
+      "cloudhook_url": null,
+      "remote_ui_url": null,
+      "secret": null,
+      "webhook_id": "<HEX32>"
+    }
+  }
+}

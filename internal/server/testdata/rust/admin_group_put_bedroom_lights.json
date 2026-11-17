@@ -1,0 +1,32 @@
+{
+  "name": "admin_group_put_bedroom_lights",
+  "request": {
+    "method": "PUT",
+    "path": "/api/domus/groups/bedroom-lights",
+    "headers": {
+      "Content-Type": "application/json",
+      "Cookie": "domus_session=<HEX64>"
+    },
+    "body": {
+      "members": [
+        "light.hue_a1000004",
+        "light.hue_a1000005"
+      ],
+      "expose_light": false
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": {
+      "ok": true
+    }
+  }
+}

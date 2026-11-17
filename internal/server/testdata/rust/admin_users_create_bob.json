@@ -1,0 +1,30 @@
+{
+  "name": "admin_users_create_bob",
+  "request": {
+    "method": "POST",
+    "path": "/api/domus/users",
+    "headers": {
+      "Content-Type": "application/json",
+      "Cookie": "domus_session=<HEX64>"
+    },
+    "body": {
+      "username": "bob",
+      "password": "bob$pass word!2026 ✓"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": {
+      "id": 3,
+      "username": "bob"
+    }
+  }
+}

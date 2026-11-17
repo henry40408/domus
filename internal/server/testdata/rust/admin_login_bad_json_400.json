@@ -1,0 +1,23 @@
+{
+  "name": "admin_login_bad_json_400",
+  "request": {
+    "method": "POST",
+    "path": "/api/domus/login",
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body_text": "{nope"
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "text/plain; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body_text": "Failed to parse the request body as JSON: key must be a string at line 1 column 2"
+  }
+}

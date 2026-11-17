@@ -1,0 +1,34 @@
+{
+  "name": "admin_tokens_create_alice-narrower",
+  "request": {
+    "method": "POST",
+    "path": "/api/domus/tokens",
+    "headers": {
+      "Content-Type": "application/json",
+      "Cookie": "domus_session=<HEX64>"
+    },
+    "body": {
+      "name": "alice-narrower",
+      "scope": [
+        "bedroom-lights"
+      ],
+      "read_only": true
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": {
+      "id": 8,
+      "name": "alice-narrower",
+      "token": "<TOKEN>"
+    }
+  }
+}

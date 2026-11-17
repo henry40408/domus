@@ -1,0 +1,21 @@
+{
+  "name": "admin_lights_no_session_401_after_pair",
+  "request": {
+    "method": "GET",
+    "path": "/api/domus/lights"
+  },
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": {
+      "message": "Login required."
+    }
+  }
+}

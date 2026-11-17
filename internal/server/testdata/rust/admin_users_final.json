@@ -1,0 +1,53 @@
+{
+  "name": "admin_users_final",
+  "request": {
+    "method": "GET",
+    "path": "/api/domus/users",
+    "headers": {
+      "Cookie": "domus_session=<HEX64>"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": [
+      {
+        "created": "<UNIX>",
+        "id": 1,
+        "is_admin": true,
+        "scope": null,
+        "username": "admin"
+      },
+      {
+        "created": "<UNIX>",
+        "id": 2,
+        "is_admin": false,
+        "scope": [
+          "bedroom-lights"
+        ],
+        "username": "alice"
+      },
+      {
+        "created": "<UNIX>",
+        "id": 3,
+        "is_admin": false,
+        "scope": null,
+        "username": "bob"
+      },
+      {
+        "created": "<UNIX>",
+        "id": 4,
+        "is_admin": false,
+        "scope": null,
+        "username": "dave"
+      }
+    ]
+  }
+}

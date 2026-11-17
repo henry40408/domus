@@ -1,0 +1,30 @@
+{
+  "name": "oauth_login_flow_bad_client_400",
+  "request": {
+    "method": "POST",
+    "path": "/auth/login_flow",
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "username": "x",
+      "password": "y",
+      "client_id": "bad",
+      "redirect_uri": "bad"
+    }
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": {
+      "error": "invalid_request"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "api_states_post_no_token_401",
+  "request": {
+    "method": "POST",
+    "path": "/api/states"
+  },
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "text/plain; charset=utf-8",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer",
+      "allow": "GET,HEAD"
+    },
+    "body_text": "401: Unauthorized"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "admin_tokens_create_dave-token",
+  "request": {
+    "method": "POST",
+    "path": "/api/domus/tokens",
+    "headers": {
+      "Content-Type": "application/json",
+      "Cookie": "domus_session=<HEX64>"
+    },
+    "body": {
+      "name": "dave-token"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": {
+      "id": 10,
+      "name": "dave-token",
+      "token": "<TOKEN>"
+    }
+  }
+}

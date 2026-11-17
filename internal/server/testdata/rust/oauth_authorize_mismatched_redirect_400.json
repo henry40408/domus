@@ -1,0 +1,19 @@
+{
+  "name": "oauth_authorize_mismatched_redirect_400",
+  "request": {
+    "method": "GET",
+    "path": "/auth/authorize?client_id=https%3A%2F%2Fhome-assistant.io%2FiOS&redirect_uri=homeassistant-dev%3A%2F%2Fauth-callback"
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "text/plain; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body_text": "Unknown client or redirect URI."
+  }
+}

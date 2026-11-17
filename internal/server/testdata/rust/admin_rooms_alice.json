@@ -1,0 +1,31 @@
+{
+  "name": "admin_rooms_alice",
+  "request": {
+    "method": "GET",
+    "path": "/api/domus/rooms",
+    "headers": {
+      "Cookie": "domus_session=<HEX64>"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": [
+      {
+        "entity_ids": [
+          "light.hue_a1000004",
+          "light.hue_a1000005"
+        ],
+        "kind": "room",
+        "name": "Bedroom"
+      }
+    ]
+  }
+}

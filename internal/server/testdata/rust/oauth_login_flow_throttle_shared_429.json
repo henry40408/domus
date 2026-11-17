@@ -1,0 +1,31 @@
+{
+  "name": "oauth_login_flow_throttle_shared_429",
+  "request": {
+    "method": "POST",
+    "path": "/auth/login_flow",
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "username": "mallory",
+      "password": "x",
+      "client_id": "https://home-assistant.io/iOS",
+      "redirect_uri": "homeassistant://auth-callback"
+    }
+  },
+  "response": {
+    "status": 429,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer",
+      "retry-after": "<N>"
+    },
+    "body": {
+      "message": "Too many failed attempts. Try again in <N> seconds."
+    }
+  }
+}

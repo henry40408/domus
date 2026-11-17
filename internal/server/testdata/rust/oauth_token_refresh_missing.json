@@ -1,0 +1,28 @@
+{
+  "name": "oauth_token_refresh_missing",
+  "request": {
+    "method": "POST",
+    "path": "/auth/token",
+    "headers": {
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    "form": {
+      "grant_type": "refresh_token",
+      "client_id": "https://home-assistant.io/iOS"
+    }
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": {
+      "error": "invalid_request"
+    }
+  }
+}

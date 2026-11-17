@@ -1,0 +1,20 @@
+{
+  "name": "oauth_authorize_ok_ios",
+  "request": {
+    "method": "GET",
+    "path": "/auth/authorize?client_id=https%3A%2F%2Fhome-assistant.io%2FiOS&redirect_uri=homeassistant%3A%2F%2Fauth-callback"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body_sha256": "03346510eacdf50332faaf36576207f3f0a806ef90753904c812d18d459efd40",
+    "body_length": 734
+  }
+}

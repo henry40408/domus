@@ -1,0 +1,20 @@
+{
+  "name": "static_favicon_svg",
+  "request": {
+    "method": "GET",
+    "path": "/favicon.svg"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "image/svg+xml",
+      "cache-control": "no-cache",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body_sha256": "0519c9371b9462c7d03cba8273422a80875647d09a992f19ab987fc42facfa7d",
+    "body_length": 326
+  }
+}

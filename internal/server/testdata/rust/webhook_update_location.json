@@ -1,0 +1,29 @@
+{
+  "name": "webhook_update_location",
+  "request": {
+    "method": "POST",
+    "path": "/api/webhook/<HEX32>",
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "type": "update_location",
+      "data": {
+        "gps": [
+          1,
+          2
+        ]
+      }
+    }
+  },
+  "response": {
+    "status": 204,
+    "headers": {
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body_empty": true
+  }
+}

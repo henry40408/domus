@@ -1,0 +1,30 @@
+{
+  "name": "admin_users_create_app_session_needs_reauth_403",
+  "request": {
+    "method": "POST",
+    "path": "/api/domus/users",
+    "headers": {
+      "Content-Type": "application/json",
+      "Cookie": "domus_session=<HEX64>"
+    },
+    "body": {
+      "username": "x",
+      "password": "another-pass-123"
+    }
+  },
+  "response": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer"
+    },
+    "body": {
+      "message": "Enter your password to continue.",
+      "reauth": true
+    }
+  }
+}
