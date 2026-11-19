@@ -79,13 +79,10 @@ type Client struct {
 // logger means slog.Default().
 func NewClient(base, key string, timing Timing, logger *slog.Logger) *Client {
 	timing = timing.withDefaults()
-	if logger == nil {
-		logger = slog.Default()
-	}
 	return &Client{
 		base:   strings.TrimRight(base, "/"),
 		key:    key,
-		logger: logger,
+		logger: cmp.Or(logger, slog.Default()),
 		http:   newBridgeHTTP(timing.HTTPTimeout, timing.ConnectTimeout),
 		sse:    newBridgeHTTP(0, timing.ConnectTimeout),
 	}

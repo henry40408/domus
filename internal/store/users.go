@@ -32,10 +32,6 @@ const (
 // ErrAlreadySetUp is returned by CreateFirstAdmin when a user exists.
 var ErrAlreadySetUp = errors.New("a user already exists")
 
-type rowScanner interface {
-	Scan(dest ...any) error
-}
-
 // scanUser reads the columns id, username, is_admin, created, scope and then
 // any extra destinations.
 func scanUser(row rowScanner, extra ...any) (User, error) {
@@ -102,20 +98,8 @@ func (s *Store) UserHash(ctx context.Context, id int64) (string, error) {
 
 // ListUsers lists all users by id.
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT id, username, is_admin, created, scope FROM users ORDER BY id")
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var users []User
-	for rows.Next() {
-		user, err := scanUser(rows)
-		if err != nil {
-			return nil, err
-		}
-		users = append(users, user)
-	}
-	return users, rows.Err()
+	return queryAll(ctx, s.db, func(row rowScanner) (User, error) { return scanUser(row) },
+		"SELECT id, username, is_admin, created, scope FROM users ORDER BY id")
 }
 
 // SetPassword replaces the user's password hash (ErrNotFound for an unknown
@@ -151,36 +135,36 @@ func (s *Store) SetAdmin(ctx context.Context, id int64, isAdmin bool) error {
 func (s *Store) DeleteUserKeepingAnAdmin(ctx context.Context, id int64) (DeleteResult, error) {
 	const deleteUser = `DELETE FROM users WHERE id = ?1
                AND (is_admin = 0 OR (SELECT COUNT(*) FROM users WHERE is_admin = 1) > 1)`
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return DeleteFailed, err
-	}
-	defer func() { _ = tx.Rollback() }()
-	res, err := tx.ExecContext(ctx, deleteUser, id)
-	if err != nil {
-		return DeleteFailed, err
-	}
-	gone, err := res.RowsAffected()
-	if err != nil {
-		return DeleteFailed, err
-	}
-	if gone == 0 {
-		return missingUserResult(ctx, tx, id)
-	}
-	for _, statement := range []string{
-		"DELETE FROM sessions WHERE user_id = ?1",
-		"DELETE FROM tokens WHERE user_id = ?1",
-		"DELETE FROM refresh_tokens WHERE user_id = ?1",
-		"DELETE FROM registrations WHERE user_id = ?1",
-	} {
-		if _, err := tx.ExecContext(ctx, statement, id); err != nil {
-			return DeleteFailed, fmt.Errorf("delete user data: %w", err)
+	result := DeleteFailed
+	err := s.inTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, deleteUser, id)
+		if err != nil {
+			return err
 		}
-	}
-	if err := tx.Commit(); err != nil {
+		gone, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if gone == 0 {
+			result, err = missingUserResult(ctx, tx, id)
+			return err
+		}
+		err = execAll(ctx, tx, []string{
+			"DELETE FROM sessions WHERE user_id = ?1",
+			"DELETE FROM tokens WHERE user_id = ?1",
+			"DELETE FROM refresh_tokens WHERE user_id = ?1",
+			"DELETE FROM registrations WHERE user_id = ?1",
+		}, id)
+		if err != nil {
+			return fmt.Errorf("delete user data: %w", err)
+		}
+		result = UserDeleted
+		return nil
+	})
+	if err != nil {
 		return DeleteFailed, err
 	}
-	return UserDeleted, nil
+	return result, nil
 }
 
 // missingUserResult tells why nothing was deleted: the user is gone already,

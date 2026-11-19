@@ -23,9 +23,6 @@ func (a *App) listSessions(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		a.logger.Warn("listing sessions failed", "error", err)
 	}
-	if sessions == nil {
-		sessions = []store.SessionInfo{}
-	}
 	writeJSON(w, http.StatusOK, sessions)
 }
 

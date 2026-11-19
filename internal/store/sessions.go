@@ -70,27 +70,22 @@ func (s *Store) SessionValid(ctx context.Context, tokenHash string) (bool, error
 // marks the caller's own.
 func (s *Store) ListSessions(ctx context.Context, userID int64, currentHash string) ([]SessionInfo, error) {
 	now := s.now()
-	rows, err := s.db.QueryContext(ctx,
+	return queryAll(ctx, s.db, scanSessionInfo,
 		`SELECT s.rowid, s.created, s.last_seen, s.user_agent, s.token_hash = ?2 FROM sessions s
              WHERE s.user_id = ?1 AND s.expires > ?3 AND s.last_seen > ?4
                AND (s.refresh_id IS NULL OR EXISTS (SELECT 1 FROM refresh_tokens r WHERE r.id = s.refresh_id))
              ORDER BY s.created DESC, s.rowid DESC`,
 		userID, currentHash, now, now-SessionIdleSecs)
-	if err != nil {
-		return nil, err
+}
+
+func scanSessionInfo(row rowScanner) (SessionInfo, error) {
+	var info SessionInfo
+	var userAgent sql.NullString
+	if err := row.Scan(&info.ID, &info.Created, &info.LastSeen, &userAgent, &info.Current); err != nil {
+		return SessionInfo{}, err
 	}
-	defer func() { _ = rows.Close() }()
-	var sessions []SessionInfo
-	for rows.Next() {
-		var info SessionInfo
-		var userAgent sql.NullString
-		if err := rows.Scan(&info.ID, &info.Created, &info.LastSeen, &userAgent, &info.Current); err != nil {
-			return nil, err
-		}
-		info.UserAgent = userAgent.String
-		sessions = append(sessions, info)
-	}
-	return sessions, rows.Err()
+	info.UserAgent = userAgent.String
+	return info, nil
 }
 
 // DeleteSessionByID ends one of the user's own sessions (ErrNotFound when it

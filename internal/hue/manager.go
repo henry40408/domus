@@ -1,6 +1,7 @@
 package hue
 
 import (
+	"cmp"
 	"context"
 	"log/slog"
 	"sync"
@@ -32,10 +33,7 @@ type task struct {
 // NewManager is a manager with nothing running. A nil logger means
 // slog.Default().
 func NewManager(c *core.Core, timing Timing, logger *slog.Logger) *Manager {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	return &Manager{core: c, timing: timing, logger: logger}
+	return &Manager{core: c, timing: timing, logger: cmp.Or(logger, slog.Default())}
 }
 
 // IsRunning reports whether a Hue task is running.

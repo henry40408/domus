@@ -33,9 +33,6 @@ func (a *App) groupJSON(r *http.Request, name string) map[string]any {
 	if err != nil {
 		a.logger.Warn("group members lookup failed", "group", name, "error", err)
 	}
-	if members == nil {
-		members = []string{}
-	}
 	exposed, err := st.GroupExposed(r.Context(), name)
 	if err != nil {
 		a.logger.Warn("group exposure lookup failed", "group", name, "error", err)

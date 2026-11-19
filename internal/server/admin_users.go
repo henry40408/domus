@@ -14,9 +14,6 @@ func (a *App) listUsers(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		a.logger.Warn("listing users failed", "error", err)
 	}
-	if users == nil {
-		users = []store.User{}
-	}
 	writeJSON(w, http.StatusOK, users)
 }
 

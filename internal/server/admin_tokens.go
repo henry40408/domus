@@ -33,9 +33,6 @@ func (a *App) listTokens(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		a.logger.Warn("listing tokens failed", "error", err)
 	}
-	if tokens == nil {
-		tokens = []store.TokenInfo{}
-	}
 	writeJSON(w, http.StatusOK, tokens)
 }
 

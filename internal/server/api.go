@@ -171,20 +171,20 @@ func callFailed(entityID string) error {
 var errServiceNotFound error = &httpError{status: http.StatusNotFound, message: "Service not found."}
 
 func (a *App) lightService(w http.ResponseWriter, r *http.Request, token store.TokenAuth) {
-	body, ok := serviceBody(w, r, token)
-	if !ok {
-		return
-	}
-	changed, failure := a.runLight(r.Context(), token.Scope, r.PathValue("service"), body)
-	writeServiceReply(w, changed, failure)
+	a.serveService(w, r, token, a.runLight)
 }
 
 func (a *App) sceneService(w http.ResponseWriter, r *http.Request, token store.TokenAuth) {
+	a.serveService(w, r, token, a.runScene)
+}
+
+func (a *App) serveService(w http.ResponseWriter, r *http.Request, token store.TokenAuth,
+	run func(ctx context.Context, scope store.Scope, service string, body any) ([]core.State, error)) {
 	body, ok := serviceBody(w, r, token)
 	if !ok {
 		return
 	}
-	changed, failure := a.runScene(r.Context(), token.Scope, r.PathValue("service"), body)
+	changed, failure := run(r.Context(), token.Scope, r.PathValue("service"), body)
 	writeServiceReply(w, changed, failure)
 }
 

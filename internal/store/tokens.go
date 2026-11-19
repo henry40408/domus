@@ -78,27 +78,22 @@ func (s *Store) CreateToken(ctx context.Context, token NewToken) (int64, error) 
 
 // ListTokens lists all tokens, or only those of userID when given.
 func (s *Store) ListTokens(ctx context.Context, userID *int64) ([]TokenInfo, error) {
-	rows, err := s.db.QueryContext(ctx,
+	return queryAll(ctx, s.db, scanTokenInfo,
 		`SELECT t.id, t.name, t.created, t.last_used, t.scope, t.user_id, u.username, t.read_only, t.expires
              FROM tokens t LEFT JOIN users u ON u.id = t.user_id
              WHERE ?1 IS NULL OR t.user_id = ?1 ORDER BY t.id`,
 		userID)
-	if err != nil {
-		return nil, err
+}
+
+func scanTokenInfo(row rowScanner) (TokenInfo, error) {
+	var info TokenInfo
+	var scope sql.NullString
+	if err := row.Scan(&info.ID, &info.Name, &info.Created, &info.LastUsed, &scope,
+		&info.UserID, &info.Username, &info.ReadOnly, &info.Expires); err != nil {
+		return TokenInfo{}, err
 	}
-	defer func() { _ = rows.Close() }()
-	var tokens []TokenInfo
-	for rows.Next() {
-		var info TokenInfo
-		var scope sql.NullString
-		if err := rows.Scan(&info.ID, &info.Name, &info.Created, &info.LastUsed, &scope,
-			&info.UserID, &info.Username, &info.ReadOnly, &info.Expires); err != nil {
-			return nil, err
-		}
-		info.Scope = parseScope(scope)
-		tokens = append(tokens, info)
-	}
-	return tokens, rows.Err()
+	info.Scope = parseScope(scope)
+	return info, nil
 }
 
 // RevokeToken revokes a token; with userID only if it belongs to that user.

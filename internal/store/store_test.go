@@ -930,6 +930,113 @@ func TestRefreshTokensIdleForNinetyDaysStopWorkingAndAreSwept(t *testing.T) {
 	}
 }
 
+func TestInTxCommitsOnSuccessAndRollsBackOnFailure(t *testing.T) {
+	s := openMemory(t)
+	insertUser := func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "INSERT INTO users (username, password_hash, created) VALUES ('tx-user', 'h', 0)")
+		return err
+	}
+	errBoom := errors.New("boom")
+
+	err := s.inTx(ctx, func(tx *sql.Tx) error {
+		if err := insertUser(tx); err != nil {
+			return err
+		}
+		return errBoom
+	})
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("inTx error = %v, want the callback's error", err)
+	}
+	if n := queryInt(t, s, "SELECT COUNT(*) FROM users WHERE username = 'tx-user'"); n != 0 {
+		t.Fatalf("users after rollback = %d", n)
+	}
+
+	noError(t, s.inTx(ctx, insertUser))
+	if n := queryInt(t, s, "SELECT COUNT(*) FROM users WHERE username = 'tx-user'"); n != 1 {
+		t.Fatalf("users after commit = %d", n)
+	}
+}
+
+func TestInTxReportsAFailedBegin(t *testing.T) {
+	s := openMemory(t)
+	noError(t, s.Close())
+	called := false
+	err := s.inTx(ctx, func(*sql.Tx) error {
+		called = true
+		return nil
+	})
+	if err == nil {
+		t.Fatal("inTx on a closed database succeeded")
+	}
+	if called {
+		t.Fatal("inTx ran the callback without a transaction")
+	}
+}
+
+func TestCreateAppTokenRollsBackWhenAStatementFails(t *testing.T) {
+	cases := []struct{ name, trigger string }{
+		{"insert", "BEFORE INSERT ON tokens"},
+		{"delete of the older token", "BEFORE DELETE ON tokens"},
+		{"refresh token update", "BEFORE UPDATE ON refresh_tokens"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := openMemory(t)
+			id, err := s.CreateUser(ctx, "u", "h", false)
+			noError(t, err)
+			refresh, err := s.RefreshCreate(ctx, id, "c", "refresh")
+			noError(t, err)
+			noError(t, s.CreateAppToken(ctx, NewAppToken{UserID: id, Name: "app", TokenHash: "old", Expires: nowSecs() + 60, RefreshID: refresh}))
+			exec(t, s, "UPDATE refresh_tokens SET last_used = 1")
+			exec(t, s, "CREATE TRIGGER fail "+c.trigger+" BEGIN SELECT RAISE(ABORT, 'forced'); END")
+
+			err = s.CreateAppToken(ctx, NewAppToken{UserID: id, Name: "app", TokenHash: "new", Expires: nowSecs() + 60, RefreshID: refresh})
+			if err == nil {
+				t.Fatal("CreateAppToken succeeded")
+			}
+			if n := queryInt(t, s, "SELECT COUNT(*) FROM tokens WHERE token_hash = 'old'"); n != 1 {
+				t.Fatalf("old token rows = %d, want 1", n)
+			}
+			if n := queryInt(t, s, "SELECT COUNT(*) FROM tokens WHERE token_hash = 'new'"); n != 0 {
+				t.Fatalf("new token rows = %d, want 0", n)
+			}
+			if n := queryInt(t, s, "SELECT last_used FROM refresh_tokens"); n != 1 {
+				t.Fatalf("last_used = %d, want it untouched", n)
+			}
+		})
+	}
+}
+
+func TestEndingAppLoginsRollsBackWhenAStatementFails(t *testing.T) {
+	ends := map[string]func(*Store, int64, int64) error{
+		"one login": func(s *Store, _, refresh int64) error { return s.refreshDelete(ctx, refresh) },
+		"all of a user's logins": func(s *Store, user, _ int64) error {
+			return s.DeleteUserRefreshTokens(ctx, user)
+		},
+	}
+	for name, end := range ends {
+		t.Run(name, func(t *testing.T) {
+			s := openMemory(t)
+			id, err := s.CreateUser(ctx, "u", "h", false)
+			noError(t, err)
+			refresh, err := s.RefreshCreate(ctx, id, "c", "refresh")
+			noError(t, err)
+			noError(t, s.CreateAppToken(ctx, NewAppToken{UserID: id, Name: "app", TokenHash: "access", Expires: nowSecs() + 60, RefreshID: refresh}))
+			exec(t, s, "CREATE TRIGGER fail BEFORE DELETE ON refresh_tokens BEGIN SELECT RAISE(ABORT, 'forced'); END")
+
+			if err := end(s, id, refresh); err == nil {
+				t.Fatal("ending the login succeeded")
+			}
+			if n := queryInt(t, s, "SELECT COUNT(*) FROM tokens"); n != 1 {
+				t.Fatalf("access tokens = %d, the earlier delete must roll back", n)
+			}
+			if n := queryInt(t, s, "SELECT COUNT(*) FROM refresh_tokens"); n != 1 {
+				t.Fatalf("refresh tokens = %d, want 1", n)
+			}
+		})
+	}
+}
+
 func TestAWebhookMarksTheRegistrationSeenAtMostOnceAMinute(t *testing.T) {
 	s := openMemory(t)
 	id, err := s.CreateUser(ctx, "u", "h", false)

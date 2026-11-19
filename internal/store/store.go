@@ -168,3 +168,56 @@ func affected(res sql.Result, err error) error {
 func (s *Store) exists(ctx context.Context, query string, args ...any) (bool, error) {
 	return rowExists(ctx, s.db, query, args...)
 }
+
+// inTx runs fn in a transaction: it commits when fn succeeds and rolls back
+// (returning fn's error) when it fails.
+func (s *Store) inTx(ctx context.Context, fn func(*sql.Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// execAll runs each statement with the same single argument.
+func execAll(ctx context.Context, tx *sql.Tx, statements []string, arg any) error {
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement, arg); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+// queryer is what *sql.DB and *sql.Tx share.
+type queryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+// queryAll scans every row of the query. The slice is never nil, even beside
+// an error, so callers that log the error and carry on still encode a JSON []
+// without patching it.
+func queryAll[T any](ctx context.Context, db queryer, scan func(rowScanner) (T, error), query string, args ...any) ([]T, error) {
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return []T{}, err
+	}
+	defer func() { _ = rows.Close() }()
+	items := make([]T, 0)
+	for rows.Next() {
+		item, err := scan(rows)
+		if err != nil {
+			return []T{}, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
