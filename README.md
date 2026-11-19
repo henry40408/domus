@@ -237,8 +237,8 @@ Registries (the list commands return empty lists), the official HA frontend, oth
 ### Running Tests
 
 ```sh
-gofmt -l $(git ls-files '*.go' ':!:vendor' ':!:e2e')   # must print nothing
-go vet ./...
+golangci-lint fmt --diff ./...   # must print nothing; `run` does not check formatting
+golangci-lint run ./...          # config in .golangci.yml; suppress with //nolint:<linter> // reason
 go test -race ./...
 ```
 

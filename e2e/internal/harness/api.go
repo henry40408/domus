@@ -50,7 +50,7 @@ func (a *API) Do(request Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	raw, _ := io.ReadAll(response.Body)
 	if response.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("%s %s answered %d: %s", request.Method, request.Path, response.StatusCode, strings.TrimSpace(string(raw)))

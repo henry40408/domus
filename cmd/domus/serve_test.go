@@ -38,7 +38,7 @@ func TestASetupCodeIsIssuedOnlyWhileThereIsNoUser(t *testing.T) {
 		t.Fatalf("code = %q", first)
 	}
 	for _, c := range first {
-		if c != '-' && !('0' <= c && c <= '9' || 'A' <= c && c <= 'Z') {
+		if c != '-' && (c < '0' || c > '9') && (c < 'A' || c > 'Z') {
 			t.Fatalf("code = %q has %q", first, c)
 		}
 	}

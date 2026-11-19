@@ -148,7 +148,7 @@ func freePort() (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("probing for a free port: %w", err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	return listener.Addr().(*net.TCPAddr).Port, nil
 }
 

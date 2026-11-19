@@ -49,7 +49,7 @@ func localIP() (netip.Addr, bool) {
 	if err != nil {
 		return netip.Addr{}, false
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	udp, ok := conn.LocalAddr().(*net.UDPAddr)
 	if !ok {
 		return netip.Addr{}, false

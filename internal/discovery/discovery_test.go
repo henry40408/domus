@@ -127,7 +127,7 @@ func TestLocalIpIsFoundWhenTheHostHasARoute(t *testing.T) {
 	if err != nil {
 		t.Skip("no route in this sandbox")
 	}
-	defer probe.Close()
+	defer func() { _ = probe.Close() }()
 	want := probe.LocalAddr().(*net.UDPAddr).IP
 	if want.IsLoopback() || want.IsUnspecified() {
 		t.Skip("the route leaves through loopback")
