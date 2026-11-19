@@ -34,7 +34,7 @@ func (a *App) tokenRoute(method string, handler tokenHandler) http.Handler {
 		allow = "GET,HEAD"
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		wrongMethod := r.Method != method && !(method == http.MethodGet && r.Method == http.MethodHead)
+		wrongMethod := r.Method != method && (method != http.MethodGet || r.Method != http.MethodHead)
 		if wrongMethod {
 			w.Header().Set("Allow", allow)
 		}
