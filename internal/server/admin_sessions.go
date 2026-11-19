@@ -1,12 +1,10 @@
 package server
 
 import (
-	"errors"
 	"net/http"
 	"strconv"
 
 	"github.com/henry40408/domus/internal/auth"
-	"github.com/henry40408/domus/internal/store"
 )
 
 // currentSessionHash is the hash of the caller's session token; guarded has
@@ -33,14 +31,12 @@ func (a *App) revokeSession(w http.ResponseWriter, r *http.Request) {
 	}
 	me := sessionUser(r)
 	if err := a.core.Store().DeleteSessionByID(r.Context(), me.ID, id); err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			a.logger.Warn("deleting a session failed", "error", err)
-		}
+		a.warnUnlessNotFound("deleting a session failed", err)
 		writeMessage(w, http.StatusNotFound, "No such session.")
 		return
 	}
 	a.audit.Info("session revoked", "user", me.Username)
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	writeOK(w)
 }
 
 func (a *App) revokeOtherSessions(w http.ResponseWriter, r *http.Request) {

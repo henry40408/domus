@@ -218,9 +218,7 @@ func (a *App) webhook(w http.ResponseWriter, r *http.Request) {
 	st := a.core.Store()
 	reg, err := st.RegistrationByWebhook(r.Context(), auth.SHA256Hex(r.PathValue("id")))
 	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			a.logger.Warn("webhook lookup failed", "error", err)
-		}
+		a.warnUnlessNotFound("webhook lookup failed", err)
 		w.WriteHeader(http.StatusGone)
 		return
 	}

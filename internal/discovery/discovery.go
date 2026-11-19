@@ -5,6 +5,7 @@ package discovery
 
 import (
 	"context"
+	"encoding/hex"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -90,24 +91,11 @@ func saveAtomically(path, content string) error {
 }
 
 func isUUID(s string) bool {
-	if len(s) != 36 {
+	if len(s) != 36 || s[8] != '-' || s[13] != '-' || s[18] != '-' || s[23] != '-' {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
-		switch {
-		case i == 8 || i == 13 || i == 18 || i == 23:
-			if s[i] != '-' {
-				return false
-			}
-		case !isHexDigit(s[i]):
-			return false
-		}
-	}
-	return true
-}
-
-func isHexDigit(c byte) bool {
-	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
+	_, err := hex.DecodeString(s[:8] + s[9:13] + s[14:18] + s[19:23] + s[24:])
+	return err == nil
 }
 
 // properties are the TXT records Home Assistant publishes; the apps read the

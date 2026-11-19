@@ -82,9 +82,7 @@ func (s *wsSession) lookupUser(ctx context.Context, id int64) *store.User {
 	if err == nil {
 		return &user
 	}
-	if !errors.Is(err, store.ErrNotFound) {
-		s.app.logger.Warn("websocket user lookup failed", "error", err)
-	}
+	s.app.warnUnlessNotFound("websocket user lookup failed", err)
 	return nil
 }
 
@@ -420,33 +418,34 @@ func (s *wsSession) command(ctx context.Context, text string) error {
 	}
 	kind := msg.text("type")
 	var reply any
-	switch {
-	case kind == "ping":
+	switch kind {
+	case "ping":
 		reply = map[string]any{"id": id, "type": "pong"}
-	case kind == "supported_features":
+	case "supported_features":
 		reply = wsResult(id, nil)
-	case kind == "subscribe_events":
+	case "subscribe_events":
 		reply = s.subscribeEvents(id)
-	case kind == "unsubscribe_events":
+	case "unsubscribe_events":
 		reply = s.unsubscribeEvents(id, msg)
-	case kind == "auth/current_user":
+	case "auth/current_user":
 		reply = wsResult(id, s.currentUser())
-	case kind == "get_config":
+	case "get_config":
 		reply = wsResult(id, haConfig())
-	case kind == "get_services" || kind == "get_panels":
+	case "get_services", "get_panels":
 		reply = wsResult(id, map[string]any{})
-	case kind == "get_states":
+	case "get_states":
 		reply = wsResult(id, s.app.visibleStates(ctx, s.scope, nil))
-	case kind == "subscribe_entities":
+	case "subscribe_entities":
 		return s.subscribeEntities(ctx, id, msg)
-	case kind == "config/entity_registry/list_for_display":
+	case "config/entity_registry/list_for_display":
 		reply = s.entityRegistryForDisplay(ctx, id)
-	case kind == "call_service":
+	case "call_service":
 		reply = s.callService(ctx, id, msg)
-	case slices.Contains(wsEmptyLists, kind):
-		reply = wsResult(id, []any{})
 	default:
 		reply = wsFailure(&id, "unknown_command", "Unknown command.")
+		if slices.Contains(wsEmptyLists, kind) {
+			reply = wsResult(id, []any{})
+		}
 	}
 	return s.send(ctx, reply)
 }

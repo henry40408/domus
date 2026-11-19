@@ -85,7 +85,7 @@ func (a *App) putGroup(w http.ResponseWriter, r *http.Request) {
 			a.logger.Warn("setting the group light flag failed", "group", name, "error", err)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	writeOK(w)
 }
 
 // groupRefusal is why a group may not be saved, or empty when it may.
@@ -109,5 +109,5 @@ func (a *App) deleteGroup(w http.ResponseWriter, r *http.Request) {
 		writeMessage(w, http.StatusNotFound, "No such group.")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	writeOK(w)
 }

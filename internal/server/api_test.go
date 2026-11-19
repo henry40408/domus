@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -677,5 +679,17 @@ func TestBearerToken(t *testing.T) {
 		if _, ok := bearerToken(r); ok {
 			t.Errorf("%q: accepted", header)
 		}
+	}
+}
+
+func TestWarnUnlessNotFoundLogsOnlyRealFailures(t *testing.T) {
+	var log logBuffer
+	app := &App{logger: slog.New(slog.NewTextHandler(&log, nil))}
+	app.warnUnlessNotFound("lookup failed", fmt.Errorf("wrapped: %w", store.ErrNotFound))
+	equal(t, log.Len(), 0)
+	app.warnUnlessNotFound("lookup failed", errors.New("disk on fire"))
+	text := log.String()
+	if !strings.Contains(text, "level=WARN") || !strings.Contains(text, `msg="lookup failed"`) || !strings.Contains(text, `error="disk on fire"`) {
+		t.Fatalf("unexpected log line: %s", text)
 	}
 }

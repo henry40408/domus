@@ -151,5 +151,5 @@ func (a *App) revokeToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.audit.Info("token revoked", "user", me.Username, "id", id)
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	writeOK(w)
 }

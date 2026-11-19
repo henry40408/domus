@@ -37,7 +37,7 @@ type Light struct {
 
 // pctToHA converts Hue percent (0-100) to Home Assistant brightness (1-255).
 func pctToHA(pct float64) int {
-	return int(math.Min(math.Max(math.Round(pct/100*255), 1), 255))
+	return int(min(max(math.Round(pct/100*255), 1), 255))
 }
 
 // haToPct converts Home Assistant brightness (0-255) to Hue percent with one

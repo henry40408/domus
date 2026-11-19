@@ -76,6 +76,15 @@ func (a *App) bearerAuth(r *http.Request) (store.TokenAuth, bool) {
 	return a.tokenAuth(r.Context(), token)
 }
 
+// warnUnlessNotFound logs a failed lookup; a missing row is an ordinary
+// answer, not a failure.
+func (a *App) warnUnlessNotFound(msg string, err error) {
+	if errors.Is(err, store.ErrNotFound) {
+		return
+	}
+	a.logger.Warn(msg, "error", err)
+}
+
 // tokenAuth authenticates a raw access token and records the use. A store
 // failure counts as not authenticated.
 func (a *App) tokenAuth(ctx context.Context, token string) (store.TokenAuth, bool) {
@@ -83,9 +92,7 @@ func (a *App) tokenAuth(ctx context.Context, token string) (store.TokenAuth, boo
 	if err == nil {
 		return tokenAuth, true
 	}
-	if !errors.Is(err, store.ErrNotFound) {
-		a.logger.Warn("token lookup failed", "error", err)
-	}
+	a.warnUnlessNotFound("token lookup failed", err)
 	return store.TokenAuth{}, false
 }
 
