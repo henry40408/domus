@@ -136,22 +136,39 @@ func (a *App) visibleStates(ctx context.Context, scope store.Scope, only map[str
 	return out
 }
 
-// serviceError is a failed service call: the HTTP status and message the REST
-// API answers with.
-type serviceError struct {
+// httpError is a refusal or failed call with the HTTP status and message the
+// REST and admin APIs answer with.
+type httpError struct {
 	status  int
 	message string
 }
 
-func badRequest(err error) *serviceError {
-	return &serviceError{status: http.StatusBadRequest, message: err.Error()}
+func (e *httpError) Error() string { return e.message }
+
+func writeHTTPError(w http.ResponseWriter, err error) {
+	failure := httpErrorOf(err)
+	writeMessage(w, failure.status, failure.message)
 }
 
-func callFailed(entityID string) *serviceError {
-	return &serviceError{status: http.StatusBadGateway, message: fmt.Sprintf("Call to %s failed.", entityID)}
+// httpErrorOf reads the status and message of err; an error that is not an
+// httpError answers 500.
+func httpErrorOf(err error) *httpError {
+	var failure *httpError
+	if errors.As(err, &failure) {
+		return failure
+	}
+	return &httpError{status: http.StatusInternalServerError, message: err.Error()}
 }
 
-var errServiceNotFound = &serviceError{status: http.StatusNotFound, message: "Service not found."}
+func badRequest(err error) error {
+	return &httpError{status: http.StatusBadRequest, message: err.Error()}
+}
+
+func callFailed(entityID string) error {
+	return &httpError{status: http.StatusBadGateway, message: fmt.Sprintf("Call to %s failed.", entityID)}
+}
+
+var errServiceNotFound error = &httpError{status: http.StatusNotFound, message: "Service not found."}
 
 func (a *App) lightService(w http.ResponseWriter, r *http.Request, token store.TokenAuth) {
 	body, ok := serviceBody(w, r, token)
@@ -203,16 +220,16 @@ func parseBody(raw []byte) (any, error) {
 	return body, nil
 }
 
-func writeServiceReply(w http.ResponseWriter, changed []core.State, failure *serviceError) {
+func writeServiceReply(w http.ResponseWriter, changed []core.State, failure error) {
 	if failure != nil {
-		writeMessage(w, failure.status, failure.message)
+		writeHTTPError(w, failure)
 		return
 	}
 	writeJSON(w, http.StatusOK, changed)
 }
 
 // runScene runs a scene service and returns the states it changed.
-func (a *App) runScene(ctx context.Context, scope store.Scope, service string, body any) ([]core.State, *serviceError) {
+func (a *App) runScene(ctx context.Context, scope store.Scope, service string, body any) ([]core.State, error) {
 	if service != "turn_on" {
 		return nil, errServiceNotFound
 	}
@@ -248,7 +265,7 @@ type lightJob struct {
 }
 
 // runLight runs a light service and returns the states it changed.
-func (a *App) runLight(ctx context.Context, scope store.Scope, service string, body any) ([]core.State, *serviceError) {
+func (a *App) runLight(ctx context.Context, scope store.Scope, service string, body any) ([]core.State, error) {
 	requested, err := requestedEntities(body)
 	if err != nil {
 		return nil, badRequest(err)
@@ -295,7 +312,7 @@ func (a *App) toggleJobs(ctx context.Context, requested []string, transition *ui
 	return jobs
 }
 
-func (a *App) applyLightJobs(ctx context.Context, scope store.Scope, jobs []lightJob) ([]core.State, *serviceError) {
+func (a *App) applyLightJobs(ctx context.Context, scope store.Scope, jobs []lightJob) ([]core.State, error) {
 	changed := []core.State{}
 	for _, job := range jobs {
 		for _, id := range job.ids {

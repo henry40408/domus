@@ -25,12 +25,6 @@ type LightAction struct {
 	TransitionMS *uint32
 }
 
-// ActionOn is a plain turn_on.
-func ActionOn() LightAction { return LightAction{On: true} }
-
-// ActionOff is a plain turn_off.
-func ActionOff() LightAction { return LightAction{} }
-
 // LightSet is a group of lights an integration can address in one request,
 // such as a Hue room or zone.
 type LightSet struct {

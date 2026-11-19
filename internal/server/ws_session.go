@@ -6,6 +6,7 @@ import (
 	"errors"
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/henry40408/domus/internal/core"
 	"github.com/henry40408/domus/internal/store"
@@ -103,10 +104,8 @@ func wsFailure(id *uint64, code, message string) map[string]any {
 // apps tell a Float from an Integer.
 func floatJSON(f float64) json.RawMessage {
 	text := strconv.FormatFloat(f, 'f', -1, 64)
-	for _, c := range text {
-		if c == '.' {
-			return json.RawMessage(text)
-		}
+	if strings.Contains(text, ".") {
+		return json.RawMessage(text)
 	}
 	return json.RawMessage(text + ".0")
 }
@@ -467,7 +466,7 @@ func (s *wsSession) callService(ctx context.Context, id uint64, msg wsMessage) m
 		body["target"] = target
 	}
 	service := msg.text("service")
-	var failure *serviceError
+	var failure error
 	switch msg.text("domain") {
 	case "light":
 		_, failure = s.app.runLight(ctx, s.scope, service, body)
@@ -479,19 +478,21 @@ func (s *wsSession) callService(ctx context.Context, id uint64, msg wsMessage) m
 	return serviceReply(id, failure)
 }
 
-func serviceReply(id uint64, failure *serviceError) map[string]any {
-	switch {
-	case failure == nil:
+func serviceReply(id uint64, failure error) map[string]any {
+	if failure == nil {
 		return wsResult(id, map[string]any{
 			"context":  map[string]any{"id": "", "parent_id": nil, "user_id": nil},
 			"response": nil,
 		})
-	case failure.status == 404:
+	}
+	httpFailure := httpErrorOf(failure)
+	switch httpFailure.status {
+	case 404:
 		return wsFailure(&id, "not_found", "Service not found.")
-	case failure.status == 400:
-		return wsFailure(&id, "invalid_format", failure.message)
+	case 400:
+		return wsFailure(&id, "invalid_format", httpFailure.message)
 	default:
-		return wsFailure(&id, "home_assistant_error", failure.message)
+		return wsFailure(&id, "home_assistant_error", httpFailure.message)
 	}
 }
 

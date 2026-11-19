@@ -182,7 +182,7 @@ func TestCallLightAppliesOptimisticState(t *testing.T) {
 	s := mustState(t, c, "light.fake1")
 	equal(t, s.State, "on")
 	equal(t, s.Attributes["brightness"], 128)
-	noError(t, c.CallLight(ctx, "light.fake1", ActionOff()))
+	noError(t, c.CallLight(ctx, "light.fake1", LightAction{}))
 	s = mustState(t, c, "light.fake1")
 	equal(t, s.State, "off")
 	if _, ok := s.Attributes["brightness"]; ok {
@@ -193,10 +193,10 @@ func TestCallLightAppliesOptimisticState(t *testing.T) {
 func TestCallLightErrors(t *testing.T) {
 	c := newCore(t)
 	c.SetIntegration("fake", fakeLights{prefix: "light.fake"})
-	if err := c.CallLight(ctx, "light.other", ActionOff()); !errors.Is(err, ErrNoIntegration) {
+	if err := c.CallLight(ctx, "light.other", LightAction{}); !errors.Is(err, ErrNoIntegration) {
 		t.Fatalf("got %v, want ErrNoIntegration", err)
 	}
-	err := c.CallLight(ctx, "light.fake_bad", ActionOff())
+	err := c.CallLight(ctx, "light.fake_bad", LightAction{})
 	if err == nil || err.Error() != "boom" || errors.Is(err, ErrNoIntegration) {
 		t.Fatalf("got %v, want the integration's error", err)
 	}
@@ -237,23 +237,23 @@ func TestGroupLightFansOutToMembers(t *testing.T) {
 	c := groupCore(t, "light.flaky_a", "light.flaky_b")
 	setExposed(t, c, "room", true)
 	id := GroupLightID("room")
-	noError(t, c.CallLight(ctx, id, ActionOn()))
+	noError(t, c.CallLight(ctx, id, LightAction{On: true}))
 	equal(t, mustState(t, c, "light.flaky_a").State, "on")
 	equal(t, mustState(t, c, "light.flaky_b").State, "on")
-	noError(t, c.CallLight(ctx, id, ActionOff()))
+	noError(t, c.CallLight(ctx, id, LightAction{}))
 	equal(t, mustLookup(t, c, id).State, "off")
 }
 
 func TestGroupLightPartialAndTotalFailure(t *testing.T) {
 	c := groupCore(t, "light.flaky_a", "light.flaky_bad")
 	setExposed(t, c, "room", true)
-	noError(t, c.CallLight(ctx, GroupLightID("room"), ActionOn()))
+	noError(t, c.CallLight(ctx, GroupLightID("room"), LightAction{On: true}))
 	equal(t, mustState(t, c, "light.flaky_a").State, "on")
 	equal(t, mustState(t, c, "light.flaky_bad").State, "off")
 
 	c = groupCore(t, "light.flaky_bad")
 	setExposed(t, c, "room", true)
-	err := c.CallLight(ctx, GroupLightID("room"), ActionOff())
+	err := c.CallLight(ctx, GroupLightID("room"), LightAction{})
 	if err == nil || err.Error() != "boom" {
 		t.Fatalf("got %v, want boom", err)
 	}
@@ -261,12 +261,12 @@ func TestGroupLightPartialAndTotalFailure(t *testing.T) {
 
 func TestGroupLightWithoutExposureOrMembers(t *testing.T) {
 	c := groupCore(t, "light.flaky_a")
-	if err := c.CallLight(ctx, GroupLightID("room"), ActionOff()); !errors.Is(err, ErrNoIntegration) {
+	if err := c.CallLight(ctx, GroupLightID("room"), LightAction{}); !errors.Is(err, ErrNoIntegration) {
 		t.Fatalf("got %v, want ErrNoIntegration", err)
 	}
 	groupSet(t, c, "empty")
 	setExposed(t, c, "empty", true)
-	noError(t, c.CallLight(ctx, GroupLightID("empty"), ActionOff()))
+	noError(t, c.CallLight(ctx, GroupLightID("empty"), LightAction{}))
 }
 
 // roomy controls its light.set_* lights as one room; light.set_bad makes the
@@ -316,13 +316,13 @@ func TestLightSetGoesThroughOneRequestAndAppliesOptimistically(t *testing.T) {
 
 	// an unreachable light is left alone
 	c.SetState("light.set_a", "unavailable", nil)
-	noError(t, c.CallLight(ctx, id, ActionOff()))
+	noError(t, c.CallLight(ctx, id, LightAction{}))
 	equal(t, mustState(t, c, "light.set_a").State, "unavailable")
 
 	// a failing room request is the call's error
 	c.SetState("light.set_bad", "off", nil)
 	groupSet(t, c, "g", "light.set_a", "light.set_bad")
-	err := c.CallLight(ctx, id, ActionOff())
+	err := c.CallLight(ctx, id, LightAction{})
 	if err == nil || err.Error() != "room down" {
 		t.Fatalf("got %v, want room down", err)
 	}
@@ -337,7 +337,7 @@ func TestLightsFromDifferentIntegrationsAreNotOneSet(t *testing.T) {
 		"mixed":     {"light.set_a", "light.flaky_a"},
 		"unowned":   {"light.other"},
 	} {
-		handled, err := c.callLightSet(ctx, ids, ActionOn())
+		handled, err := c.callLightSet(ctx, ids, LightAction{On: true})
 		if handled || err != nil {
 			t.Fatalf("%s: handled=%v err=%v", name, handled, err)
 		}
@@ -351,7 +351,7 @@ func TestGroupLightsThatIncludeEachOtherDoNotRecurse(t *testing.T) {
 	groupSet(t, c, "other", "light.flaky_a", a)
 	setExposed(t, c, "room", true)
 	setExposed(t, c, "other", true)
-	noError(t, c.CallLight(ctx, a, ActionOn()))
+	noError(t, c.CallLight(ctx, a, LightAction{On: true}))
 	equal(t, mustLookup(t, c, b).State, "on")
 	equal(t, mustLookup(t, c, "group.room").State, "on")
 }
@@ -470,7 +470,7 @@ func TestNoLockIsHeldDuringAnIntegrationCall(t *testing.T) {
 	c.SetIntegration("slow", slow)
 	c.SetState("light.slow", "off", nil)
 	result := make(chan error, 1)
-	go func() { result <- c.CallLight(ctx, "light.slow", ActionOn()) }()
+	go func() { result <- c.CallLight(ctx, "light.slow", LightAction{On: true}) }()
 	<-slow.entered
 
 	finished := make(chan struct{})
@@ -519,7 +519,7 @@ func TestAllowed(t *testing.T) {
 func TestCallLightsReturnsTheFirstMembersErrorNotTheFirstToFinish(t *testing.T) {
 	c := newCore(t)
 	c.SetIntegration("delayed", delayedFailures{})
-	err := c.CallLights(ctx, []string{"light.d_slow_bad", "light.d_fast_bad"}, ActionOff())
+	err := c.CallLights(ctx, []string{"light.d_slow_bad", "light.d_fast_bad"}, LightAction{})
 	if err == nil || err.Error() != "light.d_slow_bad failed" {
 		t.Fatalf("got %v, want the first member's error", err)
 	}

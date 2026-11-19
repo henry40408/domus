@@ -118,13 +118,6 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	return users, rows.Err()
 }
 
-// AdminCount is the number of admins.
-func (s *Store) AdminCount(ctx context.Context) (int64, error) {
-	var n int64
-	err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM users WHERE is_admin = 1").Scan(&n)
-	return n, err
-}
-
 // SetPassword replaces the user's password hash (ErrNotFound for an unknown
 // user).
 func (s *Store) SetPassword(ctx context.Context, id int64, passwordHash string) error {
@@ -156,15 +149,8 @@ func (s *Store) SetAdmin(ctx context.Context, id int64, isAdmin bool) error {
 // none; the clean-up is in the same transaction, so a token never outlives
 // its owner (it would lose the owner's group limit).
 func (s *Store) DeleteUserKeepingAnAdmin(ctx context.Context, id int64) (DeleteResult, error) {
-	return s.removeUser(ctx, id, true)
-}
-
-func (s *Store) removeUser(ctx context.Context, id int64, keepAnAdmin bool) (DeleteResult, error) {
-	deleteUser := "DELETE FROM users WHERE id = ?1"
-	if keepAnAdmin {
-		deleteUser = `DELETE FROM users WHERE id = ?1
+	const deleteUser = `DELETE FROM users WHERE id = ?1
                AND (is_admin = 0 OR (SELECT COUNT(*) FROM users WHERE is_admin = 1) > 1)`
-	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return DeleteFailed, err

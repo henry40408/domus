@@ -84,7 +84,7 @@ func TestARoomIsDrivenThroughItsGroupedLight(t *testing.T) {
 	}
 
 	// exactly the room's lights: one request to the grouped_light
-	noError(t, env.core.CallLights(ctx, sets[0].EntityIDs, core.ActionOff()))
+	noError(t, env.core.CallLights(ctx, sets[0].EntityIDs, core.LightAction{}))
 	puts := mock.recordedPuts()
 	if len(puts) != 1 || puts[0].ID != "gl-study" {
 		t.Fatalf("got %+v", puts)
@@ -97,7 +97,7 @@ func TestARoomIsDrivenThroughItsGroupedLight(t *testing.T) {
 	// any other combination goes light by light
 	mock.clearPuts()
 	two := []string{"light.hue_aaaa1111", "light.hue_cccc3333"}
-	noError(t, env.core.CallLights(ctx, two, core.ActionOn()))
+	noError(t, env.core.CallLights(ctx, two, core.LightAction{On: true}))
 	if got := len(mock.recordedPuts()); got != 2 {
 		t.Fatalf("got %d puts", got)
 	}
@@ -149,7 +149,7 @@ func TestOddEventsAreIgnoredAndStructureChangesResync(t *testing.T) {
 
 	// no known light matches: no room request
 	for _, ids := range [][]string{{"light.hue_zzzzzzzz"}, nil} {
-		if handled, err := env.hue.CallLightSet(ctx, ids, core.ActionOn()); handled || err != nil {
+		if handled, err := env.hue.CallLightSet(ctx, ids, core.LightAction{On: true}); handled || err != nil {
 			t.Fatalf("got %v %v", handled, err)
 		}
 	}

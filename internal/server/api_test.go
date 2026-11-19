@@ -206,8 +206,8 @@ func TestLightToggleFollowsTheCurrentState(t *testing.T) {
 	status, _ := app.apiPost(t, "/api/services/light/toggle", apiToken, body)
 	equal(t, status, http.StatusOK)
 	equal(t, app.fake.recorded(), []lightCall{
-		{id: "light.hue_a", action: core.ActionOff()},
-		{id: "light.hue_b", action: core.ActionOn()},
+		{id: "light.hue_a", action: core.LightAction{}},
+		{id: "light.hue_b", action: core.LightAction{On: true}},
 	})
 }
 
@@ -299,7 +299,7 @@ func TestTurnOnStringEntityReturnsStateArray(t *testing.T) {
 	equal(t, first["state"], "on")
 	state, _ := app.app.core.GetState("light.hue_a")
 	equal(t, state.State, "on")
-	equal(t, app.fake.recorded()[0], lightCall{id: "light.hue_a", action: core.ActionOn()})
+	equal(t, app.fake.recorded()[0], lightCall{id: "light.hue_a", action: core.LightAction{On: true}})
 }
 
 func TestTargetArrayGroupAndBrightness(t *testing.T) {

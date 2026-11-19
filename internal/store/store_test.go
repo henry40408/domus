@@ -51,6 +51,12 @@ func exec(t *testing.T, s *Store, query string, args ...any) {
 	}
 }
 
+// adminCount is the number of admins.
+func adminCount(t *testing.T, s *Store) int64 {
+	t.Helper()
+	return queryInt(t, s, "SELECT COUNT(*) FROM users WHERE is_admin = 1")
+}
+
 func queryInt(t *testing.T, s *Store, query string, args ...any) int64 {
 	t.Helper()
 	var n int64
@@ -58,11 +64,11 @@ func queryInt(t *testing.T, s *Store, query string, args ...any) int64 {
 	return n
 }
 
-// deleteUser removes the user even when they are the last admin (tests only:
-// the server refuses that, see DeleteUserKeepingAnAdmin).
+// deleteUser reports whether the user was deleted. Callers keep another admin
+// around, or the store refuses.
 func deleteUser(t *testing.T, s *Store, id int64) bool {
 	t.Helper()
-	result, err := s.removeUser(ctx, id, false)
+	result, err := s.DeleteUserKeepingAnAdmin(ctx, id)
 	noError(t, err)
 	return result == UserDeleted
 }
@@ -93,11 +99,11 @@ func TestUserManagement(t *testing.T) {
 	if _, err := s.CreateUser(ctx, "BOB", "x", false); err == nil {
 		t.Fatal("names are case-insensitive")
 	}
-	if n := must(s.AdminCount(ctx)); n != 1 {
+	if n := adminCount(t, s); n != 1 {
 		t.Fatalf("admins = %d", n)
 	}
 	noError(t, s.SetAdmin(ctx, bob, true))
-	if n := must(s.AdminCount(ctx)); n != 2 {
+	if n := adminCount(t, s); n != 2 {
 		t.Fatalf("admins = %d", n)
 	}
 	noError(t, s.SetPassword(ctx, bob, "new"))
@@ -309,7 +315,7 @@ func runTheLastAdminScenario(t *testing.T, s *Store) {
 	if (errs[0] == nil) == (errs[1] == nil) {
 		t.Fatalf("exactly one demotion may succeed: %v", errs)
 	}
-	if n := must(s.AdminCount(ctx)); n != 1 {
+	if n := adminCount(t, s); n != 1 {
 		t.Fatalf("admins = %d", n)
 	}
 	last, demoted := a, b
@@ -319,7 +325,7 @@ func runTheLastAdminScenario(t *testing.T, s *Store) {
 	if err := s.SetAdmin(ctx, last, false); !isNotFound(err) {
 		t.Fatalf("demoting the last admin: %v", err)
 	}
-	if n := must(s.AdminCount(ctx)); n != 1 {
+	if n := adminCount(t, s); n != 1 {
 		t.Fatalf("admins = %d", n)
 	}
 	// demoting someone who is not an admin is harmless
@@ -336,7 +342,7 @@ func runTheLastAdminScenario(t *testing.T, s *Store) {
 	if !slices.Contains(results[:], UserDeleted) || !slices.Contains(results[:], LastAdmin) {
 		t.Fatalf("outcomes = %v, want one Deleted and one LastAdmin", results)
 	}
-	if n := must(s.AdminCount(ctx)); n != 1 {
+	if n := adminCount(t, s); n != 1 {
 		t.Fatalf("admins = %d", n)
 	}
 	if result := must(s.DeleteUserKeepingAnAdmin(ctx, 999)); result != UserNotFound {

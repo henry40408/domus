@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/henry40408/domus/internal/auth"
@@ -39,12 +40,7 @@ var officialClients = [...]client{
 var loginPage []byte
 
 func validClient(clientID, redirectURI string) bool {
-	for _, c := range officialClients {
-		if c.clientID == clientID && c.redirectURI == redirectURI {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(officialClients[:], client{clientID, redirectURI})
 }
 
 // registerOAuth mounts the Home Assistant login flow the Companion apps use.
