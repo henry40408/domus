@@ -68,11 +68,13 @@ func TestRustTokensAuthenticateByTheirPlaintext(t *testing.T) {
 
 func TestRustRegistrationsAreFoundByTheirWebhookId(t *testing.T) {
 	s := openRustCreated(t)
-	first := must(s.RegistrationByWebhook(ctx, auth.SHA256Hex("b56c67a890f195d3518c0318421822fb")))
+	first, err := s.RegistrationByWebhook(ctx, auth.SHA256Hex("b56c67a890f195d3518c0318421822fb"))
+	noError(t, err)
 	if first.ID != 1 || first.UserID != 1 || first.DeviceName != "Pixel" {
 		t.Fatalf("registration = %+v", first)
 	}
-	tablet := must(s.RegistrationByWebhook(ctx, auth.SHA256Hex("cc6650989ed7ded0140fb6e89eb1e5c9")))
+	tablet, err := s.RegistrationByWebhook(ctx, auth.SHA256Hex("cc6650989ed7ded0140fb6e89eb1e5c9"))
+	noError(t, err)
 	if tablet.ID != 3 || tablet.DeviceName != "Tablet" {
 		t.Fatalf("registration = %+v", tablet)
 	}
@@ -84,10 +86,14 @@ func TestRustRegistrationsAreFoundByTheirWebhookId(t *testing.T) {
 func TestRustGroupKeepsItsMemberOrder(t *testing.T) {
 	s := openRustCreated(t)
 	want := []string{"light.hue_a1000003", "light.hue_a1000001", "scene.hue_b2000002", "light.hue_a1000002"}
-	if got := must(s.GroupMembers(ctx, "living")); !reflect.DeepEqual(got, want) {
+	got, err := s.GroupMembers(ctx, "living")
+	noError(t, err)
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("members = %v", got)
 	}
-	if !must(s.GroupExposed(ctx, "living")) {
+	exposed, err := s.GroupExposed(ctx, "living")
+	noError(t, err)
+	if !exposed {
 		t.Fatal("living is exposed as a light")
 	}
 }
