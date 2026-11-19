@@ -18,7 +18,7 @@ func upgradeUnversioned(ctx context.Context, db *sql.DB) error {
 	for _, u := range upgrades {
 		lacks, err := tableLacksColumn(ctx, db, u.table, u.column)
 		if err != nil {
-			return err
+			return fmt.Errorf("check schema of %s: %w", u.table, err)
 		}
 		if !lacks {
 			continue
@@ -49,7 +49,7 @@ func rowExists(ctx context.Context, db *sql.DB, query string, args ...any) (bool
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("check schema: %w", err)
+		return false, err
 	}
 	return true, nil
 }
