@@ -7,6 +7,14 @@ import (
 	"testing"
 )
 
+func TestWriteOKAnswersTheAdminSuccessBody(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeOK(w)
+	equal(t, w.Code, http.StatusOK)
+	equal(t, w.Header().Get("Content-Type"), "application/json")
+	equal(t, w.Body.String(), `{"ok":true}`)
+}
+
 type loginBody struct {
 	Username string `json:"username"`
 	Password string `json:"password"`

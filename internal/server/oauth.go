@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/henry40408/domus/internal/auth"
@@ -39,12 +40,7 @@ var officialClients = [...]client{
 var loginPage []byte
 
 func validClient(clientID, redirectURI string) bool {
-	for _, c := range officialClients {
-		if c.clientID == clientID && c.redirectURI == redirectURI {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(officialClients[:], client{clientID, redirectURI})
 }
 
 // registerOAuth mounts the Home Assistant login flow the Companion apps use.
@@ -180,9 +176,7 @@ func (a *App) refreshAccess(w http.ResponseWriter, r *http.Request, form url.Val
 	clientID := form.Get("client_id")
 	refreshID, userID, err := a.core.Store().RefreshLookup(r.Context(), auth.SHA256Hex(form.Get("refresh_token")), clientID)
 	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			a.logger.Warn("refresh token lookup failed", "error", err)
-		}
+		a.warnUnlessNotFound("refresh token lookup failed", err)
 		oauthError(w, "invalid_grant")
 		return
 	}
@@ -243,9 +237,7 @@ func (a *App) revokeValue(r *http.Request, form url.Values) {
 	if err == nil {
 		return
 	}
-	if !errors.Is(err, store.ErrNotFound) {
-		a.logger.Warn("revoking a refresh token failed", "error", err)
-	}
+	a.warnUnlessNotFound("revoking a refresh token failed", err)
 	if err := st.AccessRevoke(r.Context(), hash); err != nil && !errors.Is(err, store.ErrNotFound) {
 		a.logger.Warn("revoking an access token failed", "error", err)
 	}

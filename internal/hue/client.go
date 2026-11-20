@@ -7,6 +7,7 @@ package hue
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -34,19 +35,12 @@ type Timing struct {
 	ReconnectDelay time.Duration
 }
 
-func orDefault(value, fallback time.Duration) time.Duration {
-	if value == 0 {
-		return fallback
-	}
-	return value
-}
-
 func (t Timing) withDefaults() Timing {
 	return Timing{
-		HTTPTimeout:    orDefault(t.HTTPTimeout, 10*time.Second),
-		ConnectTimeout: orDefault(t.ConnectTimeout, 10*time.Second),
-		StreamIdle:     orDefault(t.StreamIdle, 120*time.Second),
-		ReconnectDelay: orDefault(t.ReconnectDelay, 5*time.Second),
+		HTTPTimeout:    cmp.Or(t.HTTPTimeout, 10*time.Second),
+		ConnectTimeout: cmp.Or(t.ConnectTimeout, 10*time.Second),
+		StreamIdle:     cmp.Or(t.StreamIdle, 120*time.Second),
+		ReconnectDelay: cmp.Or(t.ReconnectDelay, 5*time.Second),
 	}
 }
 
@@ -85,13 +79,10 @@ type Client struct {
 // logger means slog.Default().
 func NewClient(base, key string, timing Timing, logger *slog.Logger) *Client {
 	timing = timing.withDefaults()
-	if logger == nil {
-		logger = slog.Default()
-	}
 	return &Client{
 		base:   strings.TrimRight(base, "/"),
 		key:    key,
-		logger: logger,
+		logger: cmp.Or(logger, slog.Default()),
 		http:   newBridgeHTTP(timing.HTTPTimeout, timing.ConnectTimeout),
 		sse:    newBridgeHTTP(0, timing.ConnectTimeout),
 	}

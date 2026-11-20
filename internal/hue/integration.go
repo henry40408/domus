@@ -1,11 +1,11 @@
 package hue
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"maps"
 	"slices"
 	"sync"
 
@@ -55,14 +55,10 @@ type IntegrationConfig struct {
 
 // NewIntegration is an integration that has not synced yet.
 func NewIntegration(config IntegrationConfig) *Integration {
-	logger := config.Logger
-	if logger == nil {
-		logger = slog.Default()
-	}
 	return &Integration{
 		client: config.Client,
 		core:   config.Core,
-		logger: logger,
+		logger: cmp.Or(config.Logger, slog.Default()),
 		timing: config.Timing.withDefaults(),
 		in:     emptyKnown(),
 	}
@@ -149,7 +145,7 @@ func roomsWithLights(rooms []Room, lights []Light) []roomLights {
 }
 
 func (h *Integration) replaceLights(lights []Light) {
-	old := maps.Clone(h.in.byEntity)
+	old := h.in.byEntity
 	h.in.lights = map[string]*Light{}
 	h.in.byEntity = map[string]string{}
 	for _, light := range lights {
@@ -182,7 +178,7 @@ func (h *Integration) deviceReachable(device string) bool {
 // activation time, so an existing state survives a resync; new scenes start as
 // "unknown".
 func (h *Integration) replaceScenes(scenes []Scene) {
-	old := maps.Clone(h.in.sceneByEntity)
+	old := h.in.sceneByEntity
 	h.in.scenes = map[string]*Scene{}
 	h.in.sceneByEntity = map[string]string{}
 	for _, scene := range scenes {

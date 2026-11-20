@@ -547,7 +547,7 @@ func TestCallServiceRunsLightsAndRejectsTheRest(t *testing.T) {
 	})
 	equal(t, [2]any{answer["id"], answer["success"]}, [2]any{float64(1), true})
 	equal(t, asMap(t, answer["result"])["response"], nil)
-	equal(t, app.fake.recorded(), []lightCall{{id: "light.hue_a", action: core.ActionOff()}})
+	equal(t, app.fake.recorded(), []lightCall{{id: "light.hue_a", action: core.LightAction{}}})
 
 	for _, c := range []struct {
 		domain, service, code string

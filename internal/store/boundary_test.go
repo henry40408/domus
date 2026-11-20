@@ -8,7 +8,8 @@ import (
 
 func TestCreatingASessionKeepsTheOnesThatAreStillActive(t *testing.T) {
 	s := openMemory(t)
-	id := must(s.CreateUser(ctx, "u", "h", false))
+	id, err := s.CreateUser(ctx, "u", "h", false)
+	noError(t, err)
 	noError(t, s.CreateSession(ctx, "first", id, ""))
 	noError(t, s.CreateSession(ctx, "second", id, ""))
 	if rows := queryInt(t, s, "SELECT COUNT(*) FROM sessions"); rows != 2 {
@@ -26,13 +27,14 @@ func newDeviceRegistration(userID int64, n int, deviceID *string) NewRegistratio
 
 func TestTheRegistrationLimitIsExactlyTwenty(t *testing.T) {
 	s := openMemory(t)
-	id := must(s.CreateUser(ctx, "u", "h", false))
+	id, err := s.CreateUser(ctx, "u", "h", false)
+	noError(t, err)
 	for n := 0; n < maxRegistrationsPerUser; n++ {
 		if _, err := s.RegistrationCreate(ctx, newDeviceRegistration(id, n, nil)); err != nil {
 			t.Fatalf("registration %d of %d refused: %v", n+1, maxRegistrationsPerUser, err)
 		}
 	}
-	_, err := s.RegistrationCreate(ctx, newDeviceRegistration(id, 99, nil))
+	_, err = s.RegistrationCreate(ctx, newDeviceRegistration(id, 99, nil))
 	if !errors.Is(err, ErrTooManyRegistrations) {
 		t.Fatalf("the next one: %v, want ErrTooManyRegistrations", err)
 	}
@@ -40,9 +42,12 @@ func TestTheRegistrationLimitIsExactlyTwenty(t *testing.T) {
 
 func TestRegistrationsWithoutADeviceIdNeverReplaceEachOther(t *testing.T) {
 	s := openMemory(t)
-	id := must(s.CreateUser(ctx, "u", "h", false))
-	must(s.RegistrationCreate(ctx, newDeviceRegistration(id, 1, nil)))
-	must(s.RegistrationCreate(ctx, newDeviceRegistration(id, 2, nil)))
+	id, err := s.CreateUser(ctx, "u", "h", false)
+	noError(t, err)
+	_, err = s.RegistrationCreate(ctx, newDeviceRegistration(id, 1, nil))
+	noError(t, err)
+	_, err = s.RegistrationCreate(ctx, newDeviceRegistration(id, 2, nil))
+	noError(t, err)
 	if rows := queryInt(t, s, "SELECT COUNT(*) FROM registrations"); rows != 2 {
 		t.Fatalf("registrations = %d, want 2", rows)
 	}
@@ -50,10 +55,13 @@ func TestRegistrationsWithoutADeviceIdNeverReplaceEachOther(t *testing.T) {
 
 func TestARegistrationWithTheSameDeviceIdReplacesTheOldOne(t *testing.T) {
 	s := openMemory(t)
-	id := must(s.CreateUser(ctx, "u", "h", false))
+	id, err := s.CreateUser(ctx, "u", "h", false)
+	noError(t, err)
 	device := "device-1"
-	first := must(s.RegistrationCreate(ctx, newDeviceRegistration(id, 1, &device)))
-	second := must(s.RegistrationCreate(ctx, newDeviceRegistration(id, 2, &device)))
+	first, err := s.RegistrationCreate(ctx, newDeviceRegistration(id, 1, &device))
+	noError(t, err)
+	second, err := s.RegistrationCreate(ctx, newDeviceRegistration(id, 2, &device))
+	noError(t, err)
 	if first != second {
 		t.Fatalf("ids %d and %d, the registration is replaced in place", first, second)
 	}

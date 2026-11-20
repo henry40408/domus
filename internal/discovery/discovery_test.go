@@ -148,6 +148,17 @@ func TestIsUuidAcceptsOnlyTheDashed36CharacterForm(t *testing.T) {
 		"0123abcd-4567-89ef-ABCD-0123456789a",  // 35 chars
 		"0123abcd-4567-89ef-ABCD-0123456789ag", // not hex
 		"0123abcd_4567-89ef-ABCD-0123456789ab", // wrong separator
+		"0123abcd-4567_89ef-ABCD-0123456789ab",
+		"0123abcd-4567-89ef_ABCD-0123456789ab",
+		"0123abcd-4567-89ef-ABCD_0123456789ab",
+		"0123abcd-4567-89ef-ABCD-0123456789a-", // dash in a hex place
+		"-123abcd-4567-89ef-ABCD-0123456789ab",
+		"g123abcd-4567-89ef-ABCD-0123456789ab", // not hex at the first place
+		"0123abcd-4567-89ef-ABCD-0123456789a/",
+		"0123abcd-4567-89ef-ABCD-0123456789a:",
+		"0123abcd-4567-89ef-ABCD-0123456789a`",
+		"0123abcd-4567-89ef-ABCD-0123456789a@",
+		"0123abcd-4567-89ef-ABCD-0123456789aG",
 	} {
 		if isUUID(bad) {
 			t.Errorf("%q accepted", bad)

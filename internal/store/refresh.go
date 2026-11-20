@@ -47,52 +47,40 @@ func (s *Store) RefreshLookup(ctx context.Context, tokenHash, clientID string) (
 // refreshes the later one wins).
 func (s *Store) CreateAppToken(ctx context.Context, token NewAppToken) error {
 	now := s.now()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	res, err := tx.ExecContext(ctx,
-		`INSERT INTO tokens (name, token_hash, created, user_id, read_only, expires, refresh_id)
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO tokens (name, token_hash, created, user_id, read_only, expires, refresh_id)
              VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)`,
-		token.Name, token.TokenHash, now, token.UserID, token.Expires, token.RefreshID)
-	if err != nil {
+			token.Name, token.TokenHash, now, token.UserID, token.Expires, token.RefreshID)
+		if err != nil {
+			return err
+		}
+		// Same transaction and connection as the INSERT, so this is the new row.
+		if _, err := tx.ExecContext(ctx,
+			"DELETE FROM tokens WHERE refresh_id = ?1 AND id < last_insert_rowid()", token.RefreshID); err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, "UPDATE refresh_tokens SET last_used = ?2 WHERE id = ?1",
+			token.RefreshID, now)
 		return err
-	}
-	inserted, err := res.LastInsertId()
-	if err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, "DELETE FROM tokens WHERE refresh_id = ?1 AND id < ?2",
-		token.RefreshID, inserted); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, "UPDATE refresh_tokens SET last_used = ?2 WHERE id = ?1",
-		token.RefreshID, now); err != nil {
-		return err
-	}
-	return tx.Commit()
+	})
 }
 
 // refreshDelete ends a refresh token and every access token, session and
 // registration minted from it.
 func (s *Store) refreshDelete(ctx context.Context, refreshID int64) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	for _, statement := range []string{
-		"DELETE FROM sessions WHERE refresh_id = ?1",
-		"DELETE FROM tokens WHERE refresh_id = ?1",
-		"DELETE FROM registrations WHERE refresh_id = ?1",
-		"DELETE FROM refresh_tokens WHERE id = ?1",
-	} {
-		if _, err := tx.ExecContext(ctx, statement, refreshID); err != nil {
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		err := execAll(ctx, tx, []string{
+			"DELETE FROM sessions WHERE refresh_id = ?1",
+			"DELETE FROM tokens WHERE refresh_id = ?1",
+			"DELETE FROM registrations WHERE refresh_id = ?1",
+			"DELETE FROM refresh_tokens WHERE id = ?1",
+		}, refreshID)
+		if err != nil {
 			return fmt.Errorf("end app login: %w", err)
 		}
-	}
-	return tx.Commit()
+		return nil
+	})
 }
 
 // RefreshRevoke revokes a refresh token (and its access tokens) by its hash.
@@ -127,20 +115,16 @@ func (s *Store) AccessRevoke(ctx context.Context, accessHash string) error {
 // DeleteUserRefreshTokens ends all of a user's app logins (after a password
 // change).
 func (s *Store) DeleteUserRefreshTokens(ctx context.Context, userID int64) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	for _, statement := range []string{
-		"DELETE FROM sessions WHERE refresh_id IN (SELECT id FROM refresh_tokens WHERE user_id = ?1)",
-		"DELETE FROM registrations WHERE refresh_id IN (SELECT id FROM refresh_tokens WHERE user_id = ?1)",
-		"DELETE FROM tokens WHERE refresh_id IN (SELECT id FROM refresh_tokens WHERE user_id = ?1)",
-		"DELETE FROM refresh_tokens WHERE user_id = ?1",
-	} {
-		if _, err := tx.ExecContext(ctx, statement, userID); err != nil {
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		err := execAll(ctx, tx, []string{
+			"DELETE FROM sessions WHERE refresh_id IN (SELECT id FROM refresh_tokens WHERE user_id = ?1)",
+			"DELETE FROM registrations WHERE refresh_id IN (SELECT id FROM refresh_tokens WHERE user_id = ?1)",
+			"DELETE FROM tokens WHERE refresh_id IN (SELECT id FROM refresh_tokens WHERE user_id = ?1)",
+			"DELETE FROM refresh_tokens WHERE user_id = ?1",
+		}, userID)
+		if err != nil {
 			return fmt.Errorf("end app logins: %w", err)
 		}
-	}
-	return tx.Commit()
+		return nil
+	})
 }

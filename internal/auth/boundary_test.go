@@ -14,12 +14,3 @@ func TestTheThrottleKeyKeepsExactlyTheLimitOfRunes(t *testing.T) {
 		t.Errorf("a name over the limit was not cut: %q", got)
 	}
 }
-
-func TestLowerASCIIHandlesTheEdgesOfTheLetterRange(t *testing.T) {
-	tests := map[byte]byte{'@': '@', 'A': 'a', 'Z': 'z', '[': '['}
-	for in, want := range tests {
-		if got := lowerASCII(in); got != want {
-			t.Errorf("lowerASCII(%q) = %q, want %q", in, got, want)
-		}
-	}
-}

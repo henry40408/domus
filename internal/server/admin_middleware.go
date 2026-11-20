@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"strings"
 
@@ -160,9 +159,7 @@ func (a *App) currentUser(r *http.Request) (store.User, bool) {
 	if err == nil {
 		return user, true
 	}
-	if !errors.Is(err, store.ErrNotFound) {
-		a.logger.Warn("session lookup failed", "error", err)
-	}
+	a.warnUnlessNotFound("session lookup failed", err)
 	return store.User{}, false
 }
 

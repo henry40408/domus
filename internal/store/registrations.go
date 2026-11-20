@@ -69,16 +69,16 @@ func scanRegistration(row rowScanner) (Registration, error) {
 // (its old webhook id stops working) instead of adding another one.
 // ErrTooManyRegistrations when the user has no room left.
 func (s *Store) RegistrationCreate(ctx context.Context, reg NewRegistration) (int64, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	var id int64
+	err := s.inTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		id, err = createRegistration(ctx, tx, reg, s.now())
+		return err
+	})
 	if err != nil {
 		return 0, err
 	}
-	defer func() { _ = tx.Rollback() }()
-	id, err := createRegistration(ctx, tx, reg, s.now())
-	if err != nil {
-		return 0, err
-	}
-	return id, tx.Commit()
+	return id, nil
 }
 
 func createRegistration(ctx context.Context, tx *sql.Tx, reg NewRegistration, now int64) (int64, error) {
@@ -161,21 +161,8 @@ func (s *Store) RegistrationUpdate(ctx context.Context, id int64, f Registration
 // ListRegistrations lists all registrations, or only those of userID when
 // given.
 func (s *Store) ListRegistrations(ctx context.Context, userID *int64) ([]Registration, error) {
-	rows, err := s.db.QueryContext(ctx,
+	return queryAll(ctx, s.db, scanRegistration,
 		registrationSelect("WHERE ?1 IS NULL OR r.user_id = ?1 ORDER BY r.id"), userID)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var registrations []Registration
-	for rows.Next() {
-		reg, err := scanRegistration(rows)
-		if err != nil {
-			return nil, err
-		}
-		registrations = append(registrations, reg)
-	}
-	return registrations, rows.Err()
 }
 
 // DeleteRegistration removes a registration so its webhook stops working;

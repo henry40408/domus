@@ -61,11 +61,9 @@ func (c *Core) callEach(ctx context.Context, members []string, action LightActio
 	errs := make([]error, len(members))
 	var wg sync.WaitGroup
 	for i, member := range members {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			errs[i] = c.callRealLight(ctx, member, action)
-		}()
+		})
 	}
 	wg.Wait()
 	return errs

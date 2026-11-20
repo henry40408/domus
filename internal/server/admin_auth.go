@@ -130,17 +130,9 @@ func (a *App) checkSetupCode(w http.ResponseWriter, supplied string) bool {
 }
 
 // plainSetupCode ignores dashes, which are only there for readability
-// (A1B2C-D3E4F), and ASCII case. strings.ToUpper would fold non-ASCII letters
-// such as U+017F onto S, which the Rust server did not.
+// (A1B2C-D3E4F), and case.
 func plainSetupCode(code string) string {
-	return strings.Map(upperASCII, strings.ReplaceAll(strings.TrimSpace(code), "-", ""))
-}
-
-func upperASCII(r rune) rune {
-	if r >= 'a' && r <= 'z' {
-		return r - 'a' + 'A'
-	}
-	return r
+	return strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(code), "-", ""))
 }
 
 func (a *App) spendSetupCode() {
@@ -180,9 +172,7 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 func (a *App) verifyLogin(r *http.Request, name, password string) (store.User, bool) {
 	user, hash, err := a.core.Store().UserLogin(r.Context(), name)
 	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			a.logger.Warn("login lookup failed", "error", err)
-		}
+		a.warnUnlessNotFound("login lookup failed", err)
 		auth.VerifyDummy(password)
 		return store.User{}, false
 	}
@@ -211,19 +201,20 @@ func (a *App) startSession(w http.ResponseWriter, r *http.Request, userID int64)
 // session is neither. The session ends together with the app login.
 func (a *App) sessionFromToken(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	invalidToken := func() { writeMessage(w, http.StatusUnauthorized, "Invalid token.") }
 	userID, refreshID, ok := a.appLoginOf(r)
 	if !ok {
-		writeMessage(w, http.StatusUnauthorized, "Invalid token.")
+		invalidToken()
 		return
 	}
 	st := a.core.Store()
 	user, err := st.UserByID(ctx, userID)
 	if err != nil {
-		writeMessage(w, http.StatusUnauthorized, "Invalid token.")
+		invalidToken()
 		return
 	}
 	if live, err := st.RefreshExists(ctx, refreshID); err != nil || !live {
-		writeMessage(w, http.StatusUnauthorized, "Invalid token.")
+		invalidToken()
 		return
 	}
 	session := auth.RandomHex(32)
@@ -246,9 +237,7 @@ func (a *App) appLoginOf(r *http.Request) (userID, refreshID int64, ok bool) {
 	}
 	view, err := a.core.Store().TokenView(r.Context(), auth.SHA256Hex(token))
 	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			a.logger.Warn("token lookup failed", "error", err)
-		}
+		a.warnUnlessNotFound("token lookup failed", err)
 		return 0, 0, false
 	}
 	if view.RefreshID == nil || view.UserID == nil {
@@ -277,7 +266,7 @@ func (a *App) reauth(w http.ResponseWriter, r *http.Request) {
 			a.logger.Warn("elevating the session failed", "error", err)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	writeOK(w)
 }
 
 // passwordCheck is a password to verify, with what to answer and audit when it

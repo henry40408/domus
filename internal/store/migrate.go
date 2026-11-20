@@ -1,6 +1,8 @@
 package store
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha512"
 	"database/sql"
@@ -8,7 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"sort"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -57,7 +60,7 @@ func loadMigrations(fsys fs.FS, dir string) ([]migration, error) {
 			migrations = append(migrations, m)
 		}
 	}
-	sort.Slice(migrations, func(i, j int) bool { return migrations[i].version < migrations[j].version })
+	slices.SortFunc(migrations, func(a, b migration) int { return cmp.Compare(a.version, b.version) })
 	return migrations, nil
 }
 
@@ -103,7 +106,7 @@ func migrate(ctx context.Context, db *sql.DB, migrations []migration) error {
 	}
 	for _, m := range migrations {
 		checksum, done := applied[m.version]
-		if done && string(checksum) != string(m.checksum) {
+		if done && !bytes.Equal(checksum, m.checksum) {
 			return fmt.Errorf("migration %d was previously applied but has been modified", m.version)
 		}
 		if done {
@@ -152,12 +155,7 @@ func rejectMissing(applied map[int64][]byte, migrations []migration) error {
 	for _, m := range migrations {
 		known[m.version] = true
 	}
-	versions := make([]int64, 0, len(applied))
-	for version := range applied {
-		versions = append(versions, version)
-	}
-	sort.Slice(versions, func(i, j int) bool { return versions[i] < versions[j] })
-	for _, version := range versions {
+	for _, version := range slices.Sorted(maps.Keys(applied)) {
 		if !known[version] {
 			return fmt.Errorf("migration %d was previously applied but is missing in the resolved migrations", version)
 		}

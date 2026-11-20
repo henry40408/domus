@@ -54,5 +54,5 @@ func (a *App) pairHue(w http.ResponseWriter, r *http.Request) {
 	}
 	// The pairing is stored; the first sync finishes even if the browser leaves.
 	a.hue.StartSynced(context.WithoutCancel(r.Context()), base, key)
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	writeOK(w)
 }

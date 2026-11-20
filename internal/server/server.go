@@ -2,6 +2,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"log/slog"
 	"sync"
@@ -56,18 +57,10 @@ const (
 )
 
 func (t Timing) withDefaults() Timing {
-	if t.EventsRecheck <= 0 {
-		t.EventsRecheck = defaultEventsRecheck
-	}
-	if t.EventsKeepAlive <= 0 {
-		t.EventsKeepAlive = defaultEventsKeepAlive
-	}
-	if t.WebsocketAuth <= 0 {
-		t.WebsocketAuth = defaultWebsocketAuth
-	}
-	if t.WebsocketRecheck <= 0 {
-		t.WebsocketRecheck = defaultWebsocketRecheck
-	}
+	t.EventsRecheck = cmp.Or(t.EventsRecheck, defaultEventsRecheck)
+	t.EventsKeepAlive = cmp.Or(t.EventsKeepAlive, defaultEventsKeepAlive)
+	t.WebsocketAuth = cmp.Or(t.WebsocketAuth, defaultWebsocketAuth)
+	t.WebsocketRecheck = cmp.Or(t.WebsocketRecheck, defaultWebsocketRecheck)
 	return t
 }
 

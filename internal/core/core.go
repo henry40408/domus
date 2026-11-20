@@ -1,6 +1,7 @@
 package core
 
 import (
+	"cmp"
 	"log/slog"
 	"maps"
 	"reflect"
@@ -30,12 +31,9 @@ type Core struct {
 
 // New is an empty core. A nil logger means slog.Default().
 func New(st *store.Store, logger *slog.Logger) *Core {
-	if logger == nil {
-		logger = slog.Default()
-	}
 	return &Core{
 		store:        st,
-		logger:       logger,
+		logger:       cmp.Or(logger, slog.Default()),
 		hub:          NewHub(),
 		now:          time.Now,
 		states:       map[string]State{},

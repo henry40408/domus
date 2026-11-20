@@ -99,7 +99,7 @@ func (a *App) testDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	refusal, err := a.runTest(r, body, ids)
 	if refusal != nil {
-		refusal.write(w)
+		writeMessage(w, refusal.status, refusal.message)
 		return
 	}
 	a.answerTest(w, r, ids[0], err)
@@ -107,13 +107,13 @@ func (a *App) testDevice(w http.ResponseWriter, r *http.Request) {
 
 // runTest drives the entities. The refusal is a bad request; err is the
 // outcome of the call itself.
-func (a *App) runTest(r *http.Request, body any, ids []string) (refusal *apiError, err error) {
+func (a *App) runTest(r *http.Request, body any, ids []string) (refusal *httpError, err error) {
 	ctx, first := r.Context(), ids[0]
 	if strings.HasPrefix(first, "scene.") {
 		return nil, a.core.ActivateScene(ctx, first)
 	}
 	if !allLights(ids) {
-		return &apiError{http.StatusBadRequest, "Only lights and scenes can be tested."}, nil
+		return &httpError{http.StatusBadRequest, "Only lights and scenes can be tested."}, nil
 	}
 	service := "turn_on"
 	if on, ok := field(body, "on"); ok && on == false {
@@ -121,7 +121,7 @@ func (a *App) runTest(r *http.Request, body any, ids []string) (refusal *apiErro
 	}
 	action, paramErr := lightAction(service, body)
 	if paramErr != nil {
-		return &apiError{http.StatusBadRequest, paramErr.Error()}, nil
+		return &httpError{http.StatusBadRequest, paramErr.Error()}, nil
 	}
 	if len(ids) == 1 {
 		return nil, a.core.CallLight(ctx, first, *action)

@@ -19,14 +19,6 @@ const (
 	tokenRandBytes = 16
 )
 
-// apiError is a refusal with the status and message to answer.
-type apiError struct {
-	status  int
-	message string
-}
-
-func (e *apiError) write(w http.ResponseWriter) { writeMessage(w, e.status, e.message) }
-
 // tokenOwner limits what a caller sees: admins see and manage every token,
 // everyone else only their own. Nil means everyone's.
 func tokenOwner(me store.User) *int64 {
@@ -40,9 +32,6 @@ func (a *App) listTokens(w http.ResponseWriter, r *http.Request) {
 	tokens, err := a.core.Store().ListTokens(r.Context(), tokenOwner(sessionUser(r)))
 	if err != nil {
 		a.logger.Warn("listing tokens failed", "error", err)
-	}
-	if tokens == nil {
-		tokens = []store.TokenInfo{}
 	}
 	writeJSON(w, http.StatusOK, tokens)
 }
@@ -71,12 +60,12 @@ func (a *App) validateScope(r *http.Request, groups []string) (store.Scope, stri
 
 // tokenScope is the groups a new token is limited to; nil means everything
 // its owner may use.
-func (a *App) tokenScope(r *http.Request, owner store.User, requested *[]string) (store.Scope, *apiError) {
+func (a *App) tokenScope(r *http.Request, owner store.User, requested *[]string) (store.Scope, error) {
 	var groups store.Scope
 	if requested != nil {
 		valid, problem := a.validateScope(r, *requested)
 		if problem != "" {
-			return nil, &apiError{http.StatusBadRequest, problem}
+			return nil, &httpError{http.StatusBadRequest, problem}
 		}
 		groups = valid
 	}
@@ -89,19 +78,19 @@ func (a *App) tokenScope(r *http.Request, owner store.User, requested *[]string)
 	}
 	for _, group := range groups {
 		if !slices.Contains(owner.Scope, group) {
-			return nil, &apiError{http.StatusForbidden, fmt.Sprintf("Your account may not use the group %s.", group)}
+			return nil, &httpError{http.StatusForbidden, fmt.Sprintf("Your account may not use the group %s.", group)}
 		}
 	}
 	return groups, nil
 }
 
 // tokenExpiry is the Unix time a new token stops working; nil is never.
-func (a *App) tokenExpiry(days *int64) (*int64, *apiError) {
+func (a *App) tokenExpiry(days *int64) (*int64, error) {
 	if days == nil {
 		return nil, nil
 	}
 	if *days < 1 || *days > maxExpiryDays {
-		return nil, &apiError{http.StatusBadRequest, "Expiry must be 1 to 3650 days."}
+		return nil, &httpError{http.StatusBadRequest, "Expiry must be 1 to 3650 days."}
 	}
 	expires := a.now().Unix() + *days*secondsPerDay
 	return &expires, nil
@@ -126,12 +115,12 @@ func (a *App) createToken(w http.ResponseWriter, r *http.Request) {
 	me := sessionUser(r)
 	scope, refusal := a.tokenScope(r, me, body.Scope)
 	if refusal != nil {
-		refusal.write(w)
+		writeHTTPError(w, refusal)
 		return
 	}
 	expires, refusal := a.tokenExpiry(body.ExpiresDays)
 	if refusal != nil {
-		refusal.write(w)
+		writeHTTPError(w, refusal)
 		return
 	}
 	// 128 bits of entropy; the prefix makes the token recognisable to people
@@ -162,5 +151,5 @@ func (a *App) revokeToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.audit.Info("token revoked", "user", me.Username, "id", id)
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	writeOK(w)
 }

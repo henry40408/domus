@@ -23,14 +23,6 @@ func scopeOf(groups ...string) Scope {
 	return append(Scope{}, groups...)
 }
 
-// must returns the value or panics, which fails the test with a stack trace.
-func must[T any](value T, err error) T {
-	if err != nil {
-		panic(err)
-	}
-	return value
-}
-
 func noError(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
@@ -51,6 +43,12 @@ func exec(t *testing.T, s *Store, query string, args ...any) {
 	}
 }
 
+// adminCount is the number of admins.
+func adminCount(t *testing.T, s *Store) int64 {
+	t.Helper()
+	return queryInt(t, s, "SELECT COUNT(*) FROM users WHERE is_admin = 1")
+}
+
 func queryInt(t *testing.T, s *Store, query string, args ...any) int64 {
 	t.Helper()
 	var n int64
@@ -58,21 +56,24 @@ func queryInt(t *testing.T, s *Store, query string, args ...any) int64 {
 	return n
 }
 
-// deleteUser removes the user even when they are the last admin (tests only:
-// the server refuses that, see DeleteUserKeepingAnAdmin).
+// deleteUser reports whether the user was deleted. Callers keep another admin
+// around, or the store refuses.
 func deleteUser(t *testing.T, s *Store, id int64) bool {
 	t.Helper()
-	result, err := s.removeUser(ctx, id, false)
+	result, err := s.DeleteUserKeepingAnAdmin(ctx, id)
 	noError(t, err)
 	return result == UserDeleted
 }
 
 func TestFirstAdminOnlyWhileNoUserExists(t *testing.T) {
 	s := openMemory(t)
-	if n := must(s.UserCount(ctx)); n != 0 {
+	n, err := s.UserCount(ctx)
+	noError(t, err)
+	if n != 0 {
 		t.Fatalf("user count = %d", n)
 	}
-	id := must(s.CreateFirstAdmin(ctx, "Root", "a"))
+	id, err := s.CreateFirstAdmin(ctx, "Root", "a")
+	noError(t, err)
 	if _, err := s.CreateFirstAdmin(ctx, "other", "b"); !errors.Is(err, ErrAlreadySetUp) {
 		t.Fatalf("second first admin: %v", err)
 	}
@@ -88,28 +89,35 @@ func TestFirstAdminOnlyWhileNoUserExists(t *testing.T) {
 
 func TestUserManagement(t *testing.T) {
 	s := openMemory(t)
-	admin := must(s.CreateFirstAdmin(ctx, "admin", "a"))
-	bob := must(s.CreateUser(ctx, "bob", "b", false))
+	admin, err := s.CreateFirstAdmin(ctx, "admin", "a")
+	noError(t, err)
+	bob, err := s.CreateUser(ctx, "bob", "b", false)
+	noError(t, err)
 	if _, err := s.CreateUser(ctx, "BOB", "x", false); err == nil {
 		t.Fatal("names are case-insensitive")
 	}
-	if n := must(s.AdminCount(ctx)); n != 1 {
+	if n := adminCount(t, s); n != 1 {
 		t.Fatalf("admins = %d", n)
 	}
 	noError(t, s.SetAdmin(ctx, bob, true))
-	if n := must(s.AdminCount(ctx)); n != 2 {
+	if n := adminCount(t, s); n != 2 {
 		t.Fatalf("admins = %d", n)
 	}
 	noError(t, s.SetPassword(ctx, bob, "new"))
-	if hash := must(s.UserHash(ctx, bob)); hash != "new" {
+	hash, err := s.UserHash(ctx, bob)
+	noError(t, err)
+	if hash != "new" {
 		t.Fatalf("hash = %q", hash)
 	}
-	if n := len(must(s.ListUsers(ctx))); n != 2 {
+	users, err := s.ListUsers(ctx)
+	noError(t, err)
+	if n := len(users); n != 2 {
 		t.Fatalf("users = %d", n)
 	}
 
 	noError(t, s.CreateSession(ctx, "sb", bob, ""))
-	must(s.CreateToken(ctx, plainToken(bob, "watch", "hb")))
+	_, err = s.CreateToken(ctx, plainToken(bob, "watch", "hb"))
+	noError(t, err)
 	if !deleteUser(t, s, bob) {
 		t.Fatal("delete failed")
 	}
@@ -122,34 +130,50 @@ func TestUserManagement(t *testing.T) {
 	if _, err := s.TokenAuth(ctx, "hb"); !isNotFound(err) {
 		t.Fatalf("tokens go with the user: %v", err)
 	}
-	if users := must(s.ListUsers(ctx)); users[0].ID != admin {
+	users, err = s.ListUsers(ctx)
+	noError(t, err)
+	if users[0].ID != admin {
 		t.Fatalf("users = %+v", users)
 	}
 }
 
 func TestTokenLifecycle(t *testing.T) {
 	s := openMemory(t)
-	a := must(s.CreateUser(ctx, "a", "x", false))
-	b := must(s.CreateUser(ctx, "b", "x", false))
-	id := must(s.CreateToken(ctx, plainToken(a, "watch", "h1")))
-	must(s.CreateToken(ctx, plainToken(b, "other", "h3")))
-	if got := must(s.ListTokens(ctx, &a))[0].LastUsed; got != nil {
+	a, err := s.CreateUser(ctx, "a", "x", false)
+	noError(t, err)
+	b, err := s.CreateUser(ctx, "b", "x", false)
+	noError(t, err)
+	id, err := s.CreateToken(ctx, plainToken(a, "watch", "h1"))
+	noError(t, err)
+	_, err = s.CreateToken(ctx, plainToken(b, "other", "h3"))
+	noError(t, err)
+	tokens, err := s.ListTokens(ctx, &a)
+	noError(t, err)
+	if got := tokens[0].LastUsed; got != nil {
 		t.Fatalf("last_used = %v before any use", *got)
 	}
-	must(s.TokenAuth(ctx, "h1"))
-	if got := must(s.ListTokens(ctx, &a))[0].LastUsed; got == nil {
+	_, err = s.TokenAuth(ctx, "h1")
+	noError(t, err)
+	tokens, err = s.ListTokens(ctx, &a)
+	noError(t, err)
+	if got := tokens[0].LastUsed; got == nil {
 		t.Fatal("use not recorded")
 	}
 	if _, err := s.TokenAuth(ctx, "h2"); !isNotFound(err) {
 		t.Fatalf("unknown token: %v", err)
 	}
-	if n := len(must(s.ListTokens(ctx, &a))); n != 1 {
+	tokens, err = s.ListTokens(ctx, &a)
+	noError(t, err)
+	if n := len(tokens); n != 1 {
 		t.Fatalf("a's tokens = %d", n)
 	}
-	if name := must(s.ListTokens(ctx, &a))[0].Name; name != "watch" {
+	tokens, err = s.ListTokens(ctx, &a)
+	noError(t, err)
+	if name := tokens[0].Name; name != "watch" {
 		t.Fatalf("name = %q", name)
 	}
-	all := must(s.ListTokens(ctx, nil))
+	all, err := s.ListTokens(ctx, nil)
+	noError(t, err)
 	if len(all) != 2 || all[1].Username == nil || *all[1].Username != "b" {
 		t.Fatalf("all tokens = %+v", all)
 	}
@@ -167,10 +191,12 @@ func TestTokenLifecycle(t *testing.T) {
 
 func TestTokenScopeRoundtrip(t *testing.T) {
 	s := openMemory(t)
-	must(s.CreateToken(ctx, plainToken(1, "open", "h-open")))
+	_, err := s.CreateToken(ctx, plainToken(1, "open", "h-open"))
+	noError(t, err)
 	scoped := plainToken(1, "scoped", "h-scoped")
 	scoped.Scope = scopeOf("a", "b")
-	must(s.CreateToken(ctx, scoped))
+	_, err = s.CreateToken(ctx, scoped)
+	noError(t, err)
 	scopeOfToken := func(hash string) (Scope, error) {
 		auth, err := s.TokenAuth(ctx, hash)
 		return auth.Scope, err
@@ -184,7 +210,8 @@ func TestTokenScopeRoundtrip(t *testing.T) {
 	if _, err := scopeOfToken("nope"); !isNotFound(err) {
 		t.Fatalf("unknown token: %v", err)
 	}
-	list := must(s.ListTokens(ctx, nil))
+	list, err := s.ListTokens(ctx, nil)
+	noError(t, err)
 	if list[0].Scope != nil || !reflect.DeepEqual(list[1].Scope, scopeOf("a", "b")) {
 		t.Fatalf("list scopes = %#v %#v", list[0].Scope, list[1].Scope)
 	}
@@ -217,28 +244,37 @@ func TestScopesIntersect(t *testing.T) {
 func TestReadOnlyExpiryAndUserScopeShapeAToken(t *testing.T) {
 	s := openMemory(t)
 	now := nowSecs()
-	u := must(s.CreateUser(ctx, "u", "h", false))
+	u, err := s.CreateUser(ctx, "u", "h", false)
+	noError(t, err)
 	ro := plainToken(u, "ro", "h-ro")
 	ro.ReadOnly = true
-	must(s.CreateToken(ctx, ro))
+	_, err = s.CreateToken(ctx, ro)
+	noError(t, err)
 	live := plainToken(u, "live", "h-live")
 	live.Scope = scopeOf("a", "b")
 	live.Expires = ptr(now + 100)
-	must(s.CreateToken(ctx, live))
+	_, err = s.CreateToken(ctx, live)
+	noError(t, err)
 	dead := plainToken(u, "dead", "h-dead")
 	dead.Expires = ptr(now - 1)
-	must(s.CreateToken(ctx, dead))
+	_, err = s.CreateToken(ctx, dead)
+	noError(t, err)
 
-	if !must(s.TokenAuth(ctx, "h-ro")).ReadOnly {
+	token, err := s.TokenAuth(ctx, "h-ro")
+	noError(t, err)
+	if !token.ReadOnly {
 		t.Fatal("h-ro must be read-only")
 	}
-	if must(s.TokenAuth(ctx, "h-live")).ReadOnly {
+	token, err = s.TokenAuth(ctx, "h-live")
+	noError(t, err)
+	if token.ReadOnly {
 		t.Fatal("h-live must not be read-only")
 	}
 	if _, err := s.TokenAuth(ctx, "h-dead"); !isNotFound(err) {
 		t.Fatalf("expired token: %v", err)
 	}
-	list := must(s.ListTokens(ctx, nil))
+	list, err := s.ListTokens(ctx, nil)
+	noError(t, err)
 	if list[1].Expires == nil || *list[1].Expires != now+100 {
 		t.Fatalf("expires = %v", list[1].Expires)
 	}
@@ -248,23 +284,34 @@ func TestReadOnlyExpiryAndUserScopeShapeAToken(t *testing.T) {
 
 	// shrinking the owner's groups shrinks the token with it
 	noError(t, s.SetUserScope(ctx, u, scopeOf("b")))
-	if got := must(s.TokenAuth(ctx, "h-live")).Scope; !reflect.DeepEqual(got, scopeOf("b")) {
+	token, err = s.TokenAuth(ctx, "h-live")
+	noError(t, err)
+	if got := token.Scope; !reflect.DeepEqual(got, scopeOf("b")) {
 		t.Fatalf("live scope = %#v", got)
 	}
-	if got := must(s.TokenAuth(ctx, "h-ro")).Scope; !reflect.DeepEqual(got, scopeOf("b")) {
+	token, err = s.TokenAuth(ctx, "h-ro")
+	noError(t, err)
+	if got := token.Scope; !reflect.DeepEqual(got, scopeOf("b")) {
 		t.Fatalf("ro scope = %#v", got)
 	}
 	noError(t, s.SetUserScope(ctx, u, nil))
-	if got := must(s.TokenAuth(ctx, "h-live")).Scope; !reflect.DeepEqual(got, scopeOf("a", "b")) {
+	token, err = s.TokenAuth(ctx, "h-live")
+	noError(t, err)
+	if got := token.Scope; !reflect.DeepEqual(got, scopeOf("a", "b")) {
 		t.Fatalf("live scope after unrestricting = %#v", got)
 	}
-	if got := must(s.ListUsers(ctx))[0].Scope; got != nil {
+	users, err := s.ListUsers(ctx)
+	noError(t, err)
+	if got := users[0].Scope; got != nil {
 		t.Fatalf("user scope = %#v", got)
 	}
 
 	// creating a token tidies expired ones away
-	must(s.CreateToken(ctx, plainToken(u, "new", "h-new")))
-	if n := len(must(s.ListTokens(ctx, nil))); n != 3 {
+	_, err = s.CreateToken(ctx, plainToken(u, "new", "h-new"))
+	noError(t, err)
+	tokens, err := s.ListTokens(ctx, nil)
+	noError(t, err)
+	if n := len(tokens); n != 3 {
 		t.Fatalf("tokens = %d, want 3", n)
 	}
 }
@@ -301,15 +348,17 @@ func TestTheLastAdminSurvivesOnAFileDatabase(t *testing.T) {
 
 func runTheLastAdminScenario(t *testing.T, s *Store) {
 	t.Helper()
-	a := must(s.CreateUser(ctx, "a", "h", true))
-	b := must(s.CreateUser(ctx, "b", "h", true))
+	a, err := s.CreateUser(ctx, "a", "h", true)
+	noError(t, err)
+	b, err := s.CreateUser(ctx, "b", "h", true)
+	noError(t, err)
 
 	// two admins demoting each other: exactly one demotion goes through
 	errs := concurrently(func() error { return s.SetAdmin(ctx, a, false) }, func() error { return s.SetAdmin(ctx, b, false) })
 	if (errs[0] == nil) == (errs[1] == nil) {
 		t.Fatalf("exactly one demotion may succeed: %v", errs)
 	}
-	if n := must(s.AdminCount(ctx)); n != 1 {
+	if n := adminCount(t, s); n != 1 {
 		t.Fatalf("admins = %d", n)
 	}
 	last, demoted := a, b
@@ -319,7 +368,7 @@ func runTheLastAdminScenario(t *testing.T, s *Store) {
 	if err := s.SetAdmin(ctx, last, false); !isNotFound(err) {
 		t.Fatalf("demoting the last admin: %v", err)
 	}
-	if n := must(s.AdminCount(ctx)); n != 1 {
+	if n := adminCount(t, s); n != 1 {
 		t.Fatalf("admins = %d", n)
 	}
 	// demoting someone who is not an admin is harmless
@@ -336,17 +385,22 @@ func runTheLastAdminScenario(t *testing.T, s *Store) {
 	if !slices.Contains(results[:], UserDeleted) || !slices.Contains(results[:], LastAdmin) {
 		t.Fatalf("outcomes = %v, want one Deleted and one LastAdmin", results)
 	}
-	if n := must(s.AdminCount(ctx)); n != 1 {
+	if n := adminCount(t, s); n != 1 {
 		t.Fatalf("admins = %d", n)
 	}
-	if result := must(s.DeleteUserKeepingAnAdmin(ctx, 999)); result != UserNotFound {
+	result, err := s.DeleteUserKeepingAnAdmin(ctx, 999)
+	noError(t, err)
+	if result != UserNotFound {
 		t.Fatalf("unknown user: %v", result)
 	}
 
 	// regular users are always deletable, and their data goes with them
-	c := must(s.CreateUser(ctx, "c", "h", false))
+	c, err := s.CreateUser(ctx, "c", "h", false)
+	noError(t, err)
 	noError(t, s.CreateSession(ctx, "sc", c, ""))
-	if result := must(s.DeleteUserKeepingAnAdmin(ctx, c)); result != UserDeleted {
+	result, err = s.DeleteUserKeepingAnAdmin(ctx, c)
+	noError(t, err)
+	if result != UserDeleted {
 		t.Fatalf("regular user: %v", result)
 	}
 	if _, err := s.SessionUser(ctx, "sc"); !isNotFound(err) {
@@ -377,15 +431,22 @@ func concurrently(first, second func() error) [2]error {
 
 func TestAppSessionsFollowTheirRefreshToken(t *testing.T) {
 	s := openMemory(t)
-	id := must(s.CreateUser(ctx, "u", "h", false))
-	refresh := must(s.RefreshCreate(ctx, id, "client", "r1"))
+	id, err := s.CreateUser(ctx, "u", "h", false)
+	noError(t, err)
+	refresh, err := s.RefreshCreate(ctx, id, "client", "r1")
+	noError(t, err)
 	noError(t, s.CreateAppSession(ctx, NewAppLoginSession{TokenHash: "a", UserID: id, RefreshID: refresh, UserAgent: "ua"}))
-	must(s.SessionUser(ctx, "a"))
-	if !must(s.SessionNeedsReauth(ctx, "a")) {
+	_, err = s.SessionUser(ctx, "a")
+	noError(t, err)
+	needsReauth, err := s.SessionNeedsReauth(ctx, "a")
+	noError(t, err)
+	if !needsReauth {
 		t.Fatal("a fresh app session needs a password re-entry")
 	}
 	noError(t, s.SessionElevate(ctx, "a"))
-	if must(s.SessionNeedsReauth(ctx, "a")) {
+	needsReauth, err = s.SessionNeedsReauth(ctx, "a")
+	noError(t, err)
+	if needsReauth {
 		t.Fatal("an elevated session needs no re-entry")
 	}
 
@@ -394,8 +455,11 @@ func TestAppSessionsFollowTheirRefreshToken(t *testing.T) {
 	if _, err := s.SessionUser(ctx, "a"); !isNotFound(err) {
 		t.Fatalf("replaced session: %v", err)
 	}
-	must(s.SessionUser(ctx, "b"))
-	if n := len(must(s.ListSessions(ctx, id, "b"))); n != 1 {
+	_, err = s.SessionUser(ctx, "b")
+	noError(t, err)
+	sessions, err := s.ListSessions(ctx, id, "b")
+	noError(t, err)
+	if n := len(sessions); n != 1 {
 		t.Fatalf("sessions = %d", n)
 	}
 
@@ -412,25 +476,33 @@ func TestAppSessionsFollowTheirRefreshToken(t *testing.T) {
 	if _, err := s.SessionUser(ctx, "b"); !isNotFound(err) {
 		t.Fatalf("session without its login: %v", err)
 	}
-	if valid := must(s.SessionValid(ctx, "b")); valid {
+	valid, err := s.SessionValid(ctx, "b")
+	noError(t, err)
+	if valid {
 		t.Fatal("session without its login is valid")
 	}
-	if n := len(must(s.ListSessions(ctx, id, "b"))); n != 0 {
+	sessions, err = s.ListSessions(ctx, id, "b")
+	noError(t, err)
+	if n := len(sessions); n != 0 {
 		t.Fatalf("sessions = %d", n)
 	}
 
 	// password sessions never need a re-entry
 	noError(t, s.CreateSession(ctx, "p", id, "ua"))
-	if must(s.SessionNeedsReauth(ctx, "p")) {
+	needsReauth, err = s.SessionNeedsReauth(ctx, "p")
+	noError(t, err)
+	if needsReauth {
 		t.Fatal("password sessions never need a re-entry")
 	}
 }
 
 func TestIdleSessionsExpireAndActivityIsThrottled(t *testing.T) {
 	s := openMemory(t)
-	id := must(s.CreateUser(ctx, "u", "h", false))
+	id, err := s.CreateUser(ctx, "u", "h", false)
+	noError(t, err)
 	noError(t, s.CreateSession(ctx, "a", id, strings.Repeat("x", 500)))
-	list := must(s.ListSessions(ctx, id, "a"))
+	list, err := s.ListSessions(ctx, id, "a")
+	noError(t, err)
 	if len(list) != 1 || !list[0].Current {
 		t.Fatalf("sessions = %+v", list)
 	}
@@ -439,24 +511,33 @@ func TestIdleSessionsExpireAndActivityIsThrottled(t *testing.T) {
 	}
 
 	setSeen := func(secsAgo int64) { exec(t, s, "UPDATE sessions SET last_seen = ?1", nowSecs()-secsAgo) }
-	seen := func() int64 { return must(s.ListSessions(ctx, id, "a"))[0].LastSeen }
+	seen := func() int64 {
+		t.Helper()
+		sessions, err := s.ListSessions(ctx, id, "a")
+		noError(t, err)
+		return sessions[0].LastSeen
+	}
 
 	// a recent request does not write again
 	setSeen(10)
 	before := seen()
-	must(s.SessionUser(ctx, "a"))
+	_, err = s.SessionUser(ctx, "a")
+	noError(t, err)
 	if seen() != before {
 		t.Fatal("a recent request rewrote last_seen")
 	}
 	// after a minute it is refreshed
 	setSeen(120)
-	must(s.SessionUser(ctx, "a"))
+	_, err = s.SessionUser(ctx, "a")
+	noError(t, err)
 	if seen() < nowSecs()-1 {
 		t.Fatal("last_seen was not refreshed")
 	}
 	// checking validity never counts as activity
 	setSeen(120)
-	if !must(s.SessionValid(ctx, "a")) {
+	valid, err := s.SessionValid(ctx, "a")
+	noError(t, err)
+	if !valid {
 		t.Fatal("session should be valid")
 	}
 	if seen() > nowSecs()-119 {
@@ -468,26 +549,35 @@ func TestIdleSessionsExpireAndActivityIsThrottled(t *testing.T) {
 	if _, err := s.SessionUser(ctx, "a"); !isNotFound(err) {
 		t.Fatalf("idle session: %v", err)
 	}
-	if must(s.SessionValid(ctx, "a")) {
+	valid, err = s.SessionValid(ctx, "a")
+	noError(t, err)
+	if valid {
 		t.Fatal("idle session is valid")
 	}
-	if n := len(must(s.ListSessions(ctx, id, "a"))); n != 0 {
+	sessions, err := s.ListSessions(ctx, id, "a")
+	noError(t, err)
+	if n := len(sessions); n != 0 {
 		t.Fatalf("idle session listed: %d", n)
 	}
 	noError(t, s.CreateSession(ctx, "b", id, ""))
-	if n := len(must(s.ListSessions(ctx, id, "b"))); n != 1 {
+	sessions, err = s.ListSessions(ctx, id, "b")
+	noError(t, err)
+	if n := len(sessions); n != 1 {
 		t.Fatalf("sessions = %d, want 1", n)
 	}
 }
 
 func TestSessionLifecycle(t *testing.T) {
 	s := openMemory(t)
-	id := must(s.CreateUser(ctx, "u", "h", false))
+	id, err := s.CreateUser(ctx, "u", "h", false)
+	noError(t, err)
 	if _, err := s.SessionUser(ctx, "x"); !isNotFound(err) {
 		t.Fatalf("unknown session: %v", err)
 	}
 	noError(t, s.CreateSession(ctx, "x", id, ""))
-	if user := must(s.SessionUser(ctx, "x")); user.Username != "u" {
+	user, err := s.SessionUser(ctx, "x")
+	noError(t, err)
+	if user.Username != "u" {
 		t.Fatalf("user = %+v", user)
 	}
 	noError(t, s.DeleteSession(ctx, "x"))
@@ -503,7 +593,12 @@ func TestSessionLifecycle(t *testing.T) {
 
 func TestGroupsKeepOrderAndDedupe(t *testing.T) {
 	s := openMemory(t)
-	exists := func(name string) bool { return must(s.GroupExists(ctx, name)) }
+	exists := func(name string) bool {
+		t.Helper()
+		got, err := s.GroupExists(ctx, name)
+		noError(t, err)
+		return got
+	}
 	exposed := func(name string) bool {
 		got, err := s.GroupExposed(ctx, name)
 		if err != nil && !isNotFound(err) {
@@ -511,7 +606,12 @@ func TestGroupsKeepOrderAndDedupe(t *testing.T) {
 		}
 		return got
 	}
-	members := func(name string) []string { return must(s.GroupMembers(ctx, name)) }
+	members := func(name string) []string {
+		t.Helper()
+		got, err := s.GroupMembers(ctx, name)
+		noError(t, err)
+		return got
+	}
 	if exists("garmin") {
 		t.Fatal("group exists before it is created")
 	}
@@ -526,7 +626,9 @@ func TestGroupsKeepOrderAndDedupe(t *testing.T) {
 	if got := members("garmin"); !reflect.DeepEqual(got, []string{"light.c"}) {
 		t.Fatalf("members = %v", got)
 	}
-	if got := must(s.GroupNames(ctx)); !reflect.DeepEqual(got, []string{"garmin"}) {
+	got, err := s.GroupNames(ctx)
+	noError(t, err)
+	if !reflect.DeepEqual(got, []string{"garmin"}) {
 		t.Fatalf("names = %v", got)
 	}
 	if exposed("garmin") {
@@ -536,7 +638,9 @@ func TestGroupsKeepOrderAndDedupe(t *testing.T) {
 	if !exposed("garmin") {
 		t.Fatal("group should be exposed")
 	}
-	if got := must(s.ExposedGroupNames(ctx)); !reflect.DeepEqual(got, []string{"garmin"}) {
+	got, err = s.ExposedGroupNames(ctx)
+	noError(t, err)
+	if !reflect.DeepEqual(got, []string{"garmin"}) {
 		t.Fatalf("exposed = %v", got)
 	}
 	noError(t, s.GroupSet(ctx, "garmin", []string{"light.d"}))
@@ -571,11 +675,15 @@ func TestHueBridgeRoundtrip(t *testing.T) {
 	}
 	bridge := HueBridge{IP: "192.168.1.2", Key: "k"}
 	noError(t, s.HueSet(ctx, bridge))
-	if got := must(s.HueGet(ctx)); got != bridge {
+	got, err := s.HueGet(ctx)
+	noError(t, err)
+	if got != bridge {
 		t.Fatalf("bridge = %+v", got)
 	}
 	noError(t, s.HueSet(ctx, HueBridge{IP: "10.0.0.9", Key: "k2"}))
-	if got := must(s.HueGet(ctx)); got.IP != "10.0.0.9" {
+	got, err = s.HueGet(ctx)
+	noError(t, err)
+	if got.IP != "10.0.0.9" {
 		t.Fatalf("bridge was not replaced: %+v", got)
 	}
 }
@@ -589,10 +697,14 @@ func TestLegacyGroupsTableIsMigrated(t *testing.T) {
 	s, err := initStore(ctx, db)
 	noError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
-	if !must(s.GroupExists(ctx, "old")) {
+	exists, err := s.GroupExists(ctx, "old")
+	noError(t, err)
+	if !exists {
 		t.Fatal("old group lost")
 	}
-	if must(s.GroupExposed(ctx, "old")) {
+	exposed, err := s.GroupExposed(ctx, "old")
+	noError(t, err)
+	if exposed {
 		t.Fatal("an old group is not exposed")
 	}
 	noError(t, s.GroupSetExposed(ctx, "old", true))
@@ -627,17 +739,26 @@ func TestV010DatabaseKeepsItsData(t *testing.T) {
 		t.Fatalf("admin = %+v hash = %q", admin, hash)
 	}
 	one := int64(1)
-	if n := len(must(s.ListTokens(ctx, &one))); n != 1 {
+	tokens, err := s.ListTokens(ctx, &one)
+	noError(t, err)
+	if n := len(tokens); n != 1 {
 		t.Fatalf("token now belongs to the admin: %d", n)
 	}
-	must(s.TokenAuth(ctx, "th"))
-	if got := must(s.HueGet(ctx)).IP; got != "10.0.0.2" {
+	_, err = s.TokenAuth(ctx, "th")
+	noError(t, err)
+	bridge, err := s.HueGet(ctx)
+	noError(t, err)
+	if got := bridge.IP; got != "10.0.0.2" {
 		t.Fatalf("hue ip = %q", got)
 	}
-	if !must(s.GroupExposed(ctx, "garmin")) {
+	exposed, err := s.GroupExposed(ctx, "garmin")
+	noError(t, err)
+	if !exposed {
 		t.Fatal("garmin lost its flag")
 	}
-	if got := must(s.GroupMembers(ctx, "garmin")); !reflect.DeepEqual(got, []string{"light.a"}) {
+	got, err := s.GroupMembers(ctx, "garmin")
+	noError(t, err)
+	if !reflect.DeepEqual(got, []string{"light.a"}) {
 		t.Fatalf("members = %v", got)
 	}
 }
@@ -646,21 +767,28 @@ func TestFileDatabaseReopensWithoutRerunningMigrations(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "domus.db")
 	s, err := Open(ctx, path)
 	noError(t, err)
-	must(s.CreateFirstAdmin(ctx, "root", "a"))
+	_, err = s.CreateFirstAdmin(ctx, "root", "a")
+	noError(t, err)
 	noError(t, s.Close())
 	s, err = Open(ctx, path)
 	noError(t, err)
 	defer func() { _ = s.Close() }()
-	if hash := must(s.UserHash(ctx, 1)); hash != "a" {
+	hash, err := s.UserHash(ctx, 1)
+	noError(t, err)
+	if hash != "a" {
 		t.Fatalf("hash = %q", hash)
 	}
 }
 
 func TestUserCountCountsUsers(t *testing.T) {
 	s := openMemory(t)
-	must(s.CreateFirstAdmin(ctx, "a", "h"))
-	must(s.CreateUser(ctx, "b", "h", false))
-	if n := must(s.UserCount(ctx)); n != 2 {
+	_, err := s.CreateFirstAdmin(ctx, "a", "h")
+	noError(t, err)
+	_, err = s.CreateUser(ctx, "b", "h", false)
+	noError(t, err)
+	n, err := s.UserCount(ctx)
+	noError(t, err)
+	if n != 2 {
 		t.Fatalf("users = %d", n)
 	}
 }
@@ -695,7 +823,8 @@ func TestTheDocumentedLifetimesHold(t *testing.T) {
 
 func TestANewSessionExpiresAfterItsLifetimeAndSweepsIdleOnes(t *testing.T) {
 	s := openMemory(t)
-	id := must(s.CreateUser(ctx, "u", "h", false))
+	id, err := s.CreateUser(ctx, "u", "h", false)
+	noError(t, err)
 	noError(t, s.CreateSession(ctx, "old", id, ""))
 	exec(t, s, "UPDATE sessions SET last_seen = ?1 WHERE token_hash = 'old'", nowSecs()-SessionIdleSecs-5)
 
@@ -715,7 +844,8 @@ func TestANewSessionExpiresAfterItsLifetimeAndSweepsIdleOnes(t *testing.T) {
 
 func TestElevationLastsTheReauthPeriod(t *testing.T) {
 	s := openMemory(t)
-	id := must(s.CreateUser(ctx, "u", "h", false))
+	id, err := s.CreateUser(ctx, "u", "h", false)
+	noError(t, err)
 	noError(t, s.CreateSession(ctx, "a", id, ""))
 	before := nowSecs()
 	noError(t, s.SessionElevate(ctx, "a"))
@@ -729,8 +859,10 @@ func TestElevationLastsTheReauthPeriod(t *testing.T) {
 
 func TestTokenUseIsRecordedAtMostOnceAMinute(t *testing.T) {
 	s := openMemory(t)
-	id := must(s.CreateUser(ctx, "u", "h", false))
-	must(s.CreateToken(ctx, plainToken(id, "t", "h")))
+	id, err := s.CreateUser(ctx, "u", "h", false)
+	noError(t, err)
+	_, err = s.CreateToken(ctx, plainToken(id, "t", "h"))
+	noError(t, err)
 	lastUsed := func() *int64 {
 		var got *int64
 		noError(t, s.db.QueryRowContext(ctx, "SELECT last_used FROM tokens").Scan(&got))
@@ -741,20 +873,23 @@ func TestTokenUseIsRecordedAtMostOnceAMinute(t *testing.T) {
 	if lastUsed() != nil {
 		t.Fatal("last_used set before any use")
 	}
-	must(s.TokenAuth(ctx, "h"))
+	_, err = s.TokenAuth(ctx, "h")
+	noError(t, err)
 	if got := lastUsed(); got == nil || *got < nowSecs()-1 {
 		t.Fatalf("last_used = %v", got)
 	}
 
 	setLastUsed(10)
 	recent := *lastUsed()
-	must(s.TokenAuth(ctx, "h"))
+	_, err = s.TokenAuth(ctx, "h")
+	noError(t, err)
 	if got := *lastUsed(); got != recent {
 		t.Fatalf("a recent use was rewritten: %d != %d", got, recent)
 	}
 
 	setLastUsed(120)
-	must(s.TokenAuth(ctx, "h"))
+	_, err = s.TokenAuth(ctx, "h")
+	noError(t, err)
 	if got := *lastUsed(); got < nowSecs()-1 {
 		t.Fatalf("an old use was not refreshed: %d", got)
 	}
@@ -762,9 +897,12 @@ func TestTokenUseIsRecordedAtMostOnceAMinute(t *testing.T) {
 
 func TestRefreshTokensIdleForNinetyDaysStopWorkingAndAreSwept(t *testing.T) {
 	s := openMemory(t)
-	id := must(s.CreateUser(ctx, "u", "h", false))
-	stale := must(s.RefreshCreate(ctx, id, "c", "stale"))
-	live := must(s.RefreshCreate(ctx, id, "c", "live"))
+	id, err := s.CreateUser(ctx, "u", "h", false)
+	noError(t, err)
+	stale, err := s.RefreshCreate(ctx, id, "c", "stale")
+	noError(t, err)
+	live, err := s.RefreshCreate(ctx, id, "c", "live")
+	noError(t, err)
 	if _, _, err := s.RefreshLookup(ctx, "stale", "c"); err != nil {
 		t.Fatalf("creating another one keeps the live ones: %v", err)
 	}
@@ -782,7 +920,8 @@ func TestRefreshTokensIdleForNinetyDaysStopWorkingAndAreSwept(t *testing.T) {
 	}
 
 	// the next login sweeps the stale one, and the access token minted from it
-	must(s.RefreshCreate(ctx, id, "c", "another"))
+	_, err = s.RefreshCreate(ctx, id, "c", "another")
+	noError(t, err)
 	if rows := queryInt(t, s, "SELECT COUNT(*) FROM refresh_tokens"); rows != 2 {
 		t.Fatalf("refresh rows = %d", rows)
 	}
@@ -791,17 +930,126 @@ func TestRefreshTokensIdleForNinetyDaysStopWorkingAndAreSwept(t *testing.T) {
 	}
 }
 
+func TestInTxCommitsOnSuccessAndRollsBackOnFailure(t *testing.T) {
+	s := openMemory(t)
+	insertUser := func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "INSERT INTO users (username, password_hash, created) VALUES ('tx-user', 'h', 0)")
+		return err
+	}
+	errBoom := errors.New("boom")
+
+	err := s.inTx(ctx, func(tx *sql.Tx) error {
+		if err := insertUser(tx); err != nil {
+			return err
+		}
+		return errBoom
+	})
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("inTx error = %v, want the callback's error", err)
+	}
+	if n := queryInt(t, s, "SELECT COUNT(*) FROM users WHERE username = 'tx-user'"); n != 0 {
+		t.Fatalf("users after rollback = %d", n)
+	}
+
+	noError(t, s.inTx(ctx, insertUser))
+	if n := queryInt(t, s, "SELECT COUNT(*) FROM users WHERE username = 'tx-user'"); n != 1 {
+		t.Fatalf("users after commit = %d", n)
+	}
+}
+
+func TestInTxReportsAFailedBegin(t *testing.T) {
+	s := openMemory(t)
+	noError(t, s.Close())
+	called := false
+	err := s.inTx(ctx, func(*sql.Tx) error {
+		called = true
+		return nil
+	})
+	if err == nil {
+		t.Fatal("inTx on a closed database succeeded")
+	}
+	if called {
+		t.Fatal("inTx ran the callback without a transaction")
+	}
+}
+
+func TestCreateAppTokenRollsBackWhenAStatementFails(t *testing.T) {
+	cases := []struct{ name, trigger string }{
+		{"insert", "BEFORE INSERT ON tokens"},
+		{"delete of the older token", "BEFORE DELETE ON tokens"},
+		{"refresh token update", "BEFORE UPDATE ON refresh_tokens"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := openMemory(t)
+			id, err := s.CreateUser(ctx, "u", "h", false)
+			noError(t, err)
+			refresh, err := s.RefreshCreate(ctx, id, "c", "refresh")
+			noError(t, err)
+			noError(t, s.CreateAppToken(ctx, NewAppToken{UserID: id, Name: "app", TokenHash: "old", Expires: nowSecs() + 60, RefreshID: refresh}))
+			exec(t, s, "UPDATE refresh_tokens SET last_used = 1")
+			exec(t, s, "CREATE TRIGGER fail "+c.trigger+" BEGIN SELECT RAISE(ABORT, 'forced'); END")
+
+			err = s.CreateAppToken(ctx, NewAppToken{UserID: id, Name: "app", TokenHash: "new", Expires: nowSecs() + 60, RefreshID: refresh})
+			if err == nil {
+				t.Fatal("CreateAppToken succeeded")
+			}
+			if n := queryInt(t, s, "SELECT COUNT(*) FROM tokens WHERE token_hash = 'old'"); n != 1 {
+				t.Fatalf("old token rows = %d, want 1", n)
+			}
+			if n := queryInt(t, s, "SELECT COUNT(*) FROM tokens WHERE token_hash = 'new'"); n != 0 {
+				t.Fatalf("new token rows = %d, want 0", n)
+			}
+			if n := queryInt(t, s, "SELECT last_used FROM refresh_tokens"); n != 1 {
+				t.Fatalf("last_used = %d, want it untouched", n)
+			}
+		})
+	}
+}
+
+func TestEndingAppLoginsRollsBackWhenAStatementFails(t *testing.T) {
+	ends := map[string]func(*Store, int64, int64) error{
+		"one login": func(s *Store, _, refresh int64) error { return s.refreshDelete(ctx, refresh) },
+		"all of a user's logins": func(s *Store, user, _ int64) error {
+			return s.DeleteUserRefreshTokens(ctx, user)
+		},
+	}
+	for name, end := range ends {
+		t.Run(name, func(t *testing.T) {
+			s := openMemory(t)
+			id, err := s.CreateUser(ctx, "u", "h", false)
+			noError(t, err)
+			refresh, err := s.RefreshCreate(ctx, id, "c", "refresh")
+			noError(t, err)
+			noError(t, s.CreateAppToken(ctx, NewAppToken{UserID: id, Name: "app", TokenHash: "access", Expires: nowSecs() + 60, RefreshID: refresh}))
+			exec(t, s, "CREATE TRIGGER fail BEFORE DELETE ON refresh_tokens BEGIN SELECT RAISE(ABORT, 'forced'); END")
+
+			if err := end(s, id, refresh); err == nil {
+				t.Fatal("ending the login succeeded")
+			}
+			if n := queryInt(t, s, "SELECT COUNT(*) FROM tokens"); n != 1 {
+				t.Fatalf("access tokens = %d, the earlier delete must roll back", n)
+			}
+			if n := queryInt(t, s, "SELECT COUNT(*) FROM refresh_tokens"); n != 1 {
+				t.Fatalf("refresh tokens = %d, want 1", n)
+			}
+		})
+	}
+}
+
 func TestAWebhookMarksTheRegistrationSeenAtMostOnceAMinute(t *testing.T) {
 	s := openMemory(t)
-	id := must(s.CreateUser(ctx, "u", "h", false))
-	reg := must(s.RegistrationCreate(ctx, NewRegistration{
+	id, err := s.CreateUser(ctx, "u", "h", false)
+	noError(t, err)
+	reg, err := s.RegistrationCreate(ctx, NewRegistration{
 		UserID:      id,
 		WebhookHash: "hook",
 		Fields: RegistrationFields{
 			AppID: "app", AppName: "App", AppVersion: "1", DeviceName: "phone",
 			Manufacturer: "m", Model: "x", OSName: "os",
 		},
-	}))
+	})
+	noError(t, err)
 	lastSeen := func() *int64 {
 		var got *int64
 		noError(t, s.db.QueryRowContext(ctx, "SELECT last_seen FROM registrations WHERE id = ?1", reg).Scan(&got))
@@ -812,20 +1060,23 @@ func TestAWebhookMarksTheRegistrationSeenAtMostOnceAMinute(t *testing.T) {
 	if lastSeen() != nil {
 		t.Fatal("last_seen set before any call")
 	}
-	must(s.RegistrationByWebhook(ctx, "hook"))
+	_, err = s.RegistrationByWebhook(ctx, "hook")
+	noError(t, err)
 	if lastSeen() == nil {
 		t.Fatal("the first call marks it seen")
 	}
 
 	recent := nowSecs() - 30
 	setLastSeen(recent)
-	must(s.RegistrationByWebhook(ctx, "hook"))
+	_, err = s.RegistrationByWebhook(ctx, "hook")
+	noError(t, err)
 	if got := *lastSeen(); got != recent {
 		t.Fatalf("seen 30 s ago must be left alone: %d != %d", got, recent)
 	}
 
 	setLastSeen(nowSecs() - 120)
-	must(s.RegistrationByWebhook(ctx, "hook"))
+	_, err = s.RegistrationByWebhook(ctx, "hook")
+	noError(t, err)
 	if got := *lastSeen(); got < nowSecs()-5 {
 		t.Fatalf("seen 2 min ago must be refreshed: %d", got)
 	}

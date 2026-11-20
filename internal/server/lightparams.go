@@ -33,12 +33,6 @@ func field(body any, key string) (any, bool) {
 	return value, present
 }
 
-// number is Value::as_f64: only JSON numbers count.
-func number(v any) (float64, bool) {
-	n, ok := v.(float64)
-	return n, ok
-}
-
 // requestedEntities collects entity ids from entity_id (string or array) and
 // target.entity_id.
 func requestedEntities(body any) ([]string, error) {
@@ -94,18 +88,18 @@ func removeEmpty(ids []string) []string {
 }
 
 func clampedByte(v float64) uint8 {
-	return uint8(math.Min(math.Max(math.Round(v), 0), 255))
+	return uint8(min(max(math.Round(v), 0), 255))
 }
 
 func requestedBrightness(body any) *uint8 {
 	if b, ok := field(body, "brightness"); ok {
-		if n, isNumber := number(b); isNumber {
+		if n, isNumber := b.(float64); isNumber {
 			v := clampedByte(n)
 			return &v
 		}
 	}
 	if p, ok := field(body, "brightness_pct"); ok {
-		if n, isNumber := number(p); isNumber {
+		if n, isNumber := p.(float64); isNumber {
 			v := clampedByte(n / 100 * 255)
 			return &v
 		}
@@ -120,11 +114,11 @@ func requestedTransition(body any) (*uint32, error) {
 	if !present || value == nil {
 		return nil, nil
 	}
-	seconds, ok := number(value)
+	seconds, ok := value.(float64)
 	if !ok || seconds < 0 {
 		return nil, requestError("transition must be a non-negative number of seconds.")
 	}
-	ms := uint32(math.Round(math.Min(seconds*1000, maxTransitionMS)))
+	ms := uint32(math.Round(min(seconds*1000, maxTransitionMS)))
 	return &ms, nil
 }
 
@@ -133,13 +127,13 @@ func numberPair(v any) (a, b float64, ok bool) {
 	if !isArray || len(pair) != 2 {
 		return 0, 0, false
 	}
-	a, okA := number(pair[0])
-	b, okB := number(pair[1])
+	a, okA := pair[0].(float64)
+	b, okB := pair[1].(float64)
 	return a, b, okA && okB
 }
 
 func mirek(m float64) *uint16 {
-	v := uint16(math.Round(math.Min(math.Max(m, minMirek), maxMirek)))
+	v := uint16(math.Round(min(max(m, minMirek), maxMirek)))
 	return &v
 }
 
@@ -149,7 +143,7 @@ func inUnitRange(v float64) bool { return v >= 0 && v <= 1 }
 // Assistant accepts several spellings; the first one present wins.
 func requestedColor(body any) (colorTemp *uint16, xy *core.XY, err error) {
 	if v, ok := field(body, "color_temp"); ok {
-		m, isNumber := number(v)
+		m, isNumber := v.(float64)
 		if !isNumber || m <= 0 {
 			return nil, nil, requestError("color_temp must be mireds.")
 		}
@@ -160,7 +154,7 @@ func requestedColor(body any) (colorTemp *uint16, xy *core.XY, err error) {
 		if !ok {
 			continue
 		}
-		k, isNumber := number(v)
+		k, isNumber := v.(float64)
 		if !isNumber || k <= 0 {
 			return nil, nil, requestError("Kelvin must be a positive number.")
 		}
@@ -199,7 +193,7 @@ func rgbChannels(v any) ([3]float64, bool) {
 		return channels, false
 	}
 	for i, item := range items {
-		n, isNumber := number(item)
+		n, isNumber := item.(float64)
 		if !isNumber || n < 0 || n > 255 {
 			return channels, false
 		}

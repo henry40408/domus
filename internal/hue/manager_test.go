@@ -115,7 +115,7 @@ func TestResetWaitsForTheTaskAndLeavesNoHueState(t *testing.T) {
 	if ids := c.EntityIDsWithPrefix(entityPrefix); len(ids) != 0 {
 		t.Fatalf("got %v", ids)
 	}
-	if err := c.CallLight(ctx, "light.hue_aaaaaaaa", core.ActionOn()); err == nil {
+	if err := c.CallLight(ctx, "light.hue_aaaaaaaa", core.LightAction{On: true}); err == nil {
 		t.Fatal("the integration must be gone")
 	}
 }

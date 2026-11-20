@@ -17,7 +17,7 @@ func rgbToXY(r, g, b float64) (x, y float64) {
 }
 
 func linearChannel(c float64) float64 {
-	c = math.Min(math.Max(c/255, 0), 1)
+	c = min(max(c/255, 0), 1)
 	if c > 0.04045 {
 		return math.Pow((c+0.055)/1.055, 2.4)
 	}
@@ -29,7 +29,7 @@ func round4(v float64) float64 { return math.Round(v*10_000) / 10_000 }
 // hsToRGB converts Home Assistant's hs_color (hue 0-360, saturation 0-100) at
 // full value to sRGB.
 func hsToRGB(h, s float64) (r, g, b float64) {
-	c := math.Min(math.Max(s/100, 0), 1)
+	c := min(max(s/100, 0), 1)
 	sector := remEuclid(h, 360) / 60
 	x := c * (1 - math.Abs(math.Mod(sector, 2)-1))
 	m := 1 - c

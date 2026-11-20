@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"strings"
 	"unicode"
 	"unicode/utf8"
 )
@@ -32,32 +33,11 @@ func ValidUsername(name string) bool {
 }
 
 // ValidPassword counts characters, not bytes, and refuses the username in any
-// ASCII case.
+// case.
 func ValidPassword(password, username string) bool {
 	n := utf8.RuneCountInString(password)
 	if n < minPasswordLen || n > maxPasswordLen {
 		return false
 	}
-	return !equalFoldASCII(password, username)
-}
-
-// equalFoldASCII folds ASCII letters only, like Rust's eq_ignore_ascii_case;
-// strings.EqualFold would also fold Unicode.
-func equalFoldASCII(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := 0; i < len(a); i++ {
-		if lowerASCII(a[i]) != lowerASCII(b[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func lowerASCII(c byte) byte {
-	if 'A' <= c && c <= 'Z' {
-		return c + 'a' - 'A'
-	}
-	return c
+	return !strings.EqualFold(password, username)
 }

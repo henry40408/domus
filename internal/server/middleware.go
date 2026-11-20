@@ -16,7 +16,7 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")
-		if strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		if secureRequest(r) {
 			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		}
 		if !isNoStorePath(r.URL.Path) {

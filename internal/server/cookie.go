@@ -39,7 +39,7 @@ func sessionCookie(value string, maxAge int64, secure bool) string {
 // writeSessionCookie answers {"ok":true} and sets the session cookie.
 func writeSessionCookie(w http.ResponseWriter, r *http.Request, value string, maxAge int64) {
 	w.Header().Set("Set-Cookie", sessionCookie(value, maxAge, secureRequest(r)))
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	writeOK(w)
 }
 
 func userAgent(r *http.Request) string {

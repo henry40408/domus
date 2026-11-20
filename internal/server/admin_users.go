@@ -14,9 +14,6 @@ func (a *App) listUsers(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		a.logger.Warn("listing users failed", "error", err)
 	}
-	if users == nil {
-		users = []store.User{}
-	}
 	writeJSON(w, http.StatusOK, users)
 }
 
@@ -97,7 +94,7 @@ func (a *App) updateUser(w http.ResponseWriter, r *http.Request) {
 	if body.Password != nil && !a.resetPassword(w, r, userEdit{me, target}, *body.Password) {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	writeOK(w)
 }
 
 func (a *App) findUser(r *http.Request, id int64) (store.User, bool) {
@@ -208,7 +205,7 @@ func (a *App) deleteUser(w http.ResponseWriter, r *http.Request) {
 	switch result {
 	case store.UserDeleted:
 		a.audit.Info("user deleted", "by", me.Username, "id", id)
-		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		writeOK(w)
 	case store.LastAdmin:
 		writeMessage(w, http.StatusBadRequest, "Keep at least one admin.")
 	case store.UserNotFound:

@@ -30,6 +30,11 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_, _ = w.Write(bytes.TrimSuffix(buf.Bytes(), []byte("\n")))
 }
 
+// writeOK writes the admin API's success body, {"ok":true}.
+func writeOK(w http.ResponseWriter) {
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
 // writeMessage writes the admin API's error body, {"message": ...}.
 func writeMessage(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"message": message})
