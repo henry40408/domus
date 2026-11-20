@@ -130,17 +130,9 @@ func (a *App) checkSetupCode(w http.ResponseWriter, supplied string) bool {
 }
 
 // plainSetupCode ignores dashes, which are only there for readability
-// (A1B2C-D3E4F), and ASCII case. strings.ToUpper would fold non-ASCII letters
-// such as U+017F onto S, which the Rust server did not.
+// (A1B2C-D3E4F), and case.
 func plainSetupCode(code string) string {
-	return strings.Map(upperASCII, strings.ReplaceAll(strings.TrimSpace(code), "-", ""))
-}
-
-func upperASCII(r rune) rune {
-	if r >= 'a' && r <= 'z' {
-		return r - 'a' + 'A'
-	}
-	return r
+	return strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(code), "-", ""))
 }
 
 func (a *App) spendSetupCode() {

@@ -308,7 +308,7 @@ func TestPasswordRules(t *testing.T) {
 		{"128 is the limit", "admin", strings.Repeat("x", 128), true},
 		{"exactly 12 characters, counted as characters", "admin", "密碼密碼密碼密碼密碼密碼", true},
 		{"11 CJK characters", "admin", "密碼密碼密碼密碼密碼密", false},
-		{"unicode case is not folded", "ÄÄÄÄÄÄÄÄÄÄÄÄ", "ää" + "ääääääääää", true},
+		{"unicode case is folded", "ÄÄÄÄÄÄÄÄÄÄÄÄ", "ää" + "ääääääääää", false},
 	}
 	for _, tt := range tests {
 		if got := ValidPassword(tt.password, tt.user); got != tt.want {

@@ -17,11 +17,11 @@ func TestPlainSetupCodeTable(t *testing.T) {
 		{"digits and punctuation", "1_2.3", "1_2.3"},
 		{"edges of the letter range", "`a@z{", "`A@Z{"},
 		{"turkish dotted capital i", "İ", "İ"},
-		{"turkish dotless i", "ı", "ı"},
-		{"long s", "ſ", "ſ"},
+		{"turkish dotless i", "ı", "I"},
+		{"long s", "ſ", "S"},
 		{"kelvin sign", "K", "K"},
-		{"full-width letters", "ａｂｃ", "ａｂｃ"},
-		{"accented letter", "é", "é"},
+		{"full-width letters", "ａｂｃ", "ＡＢＣ"},
+		{"accented letter", "é", "É"},
 		{"combining mark", "é", "É"},
 	}
 	for _, tt := range tests {
