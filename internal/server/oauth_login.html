@@ -2,20 +2,38 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>domus</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <main class="auth">
-<h2>domus</h2>
-<p class="sub">Sign in to connect this app.</p>
+<div class="auth-card">
+<svg class="facade" viewBox="0 0 132 96" aria-hidden="true">
+<g fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round">
+<path d="M8 44L66 6l58 38"/>
+<path d="M18 40v50h96V40"/>
+<path d="M2 90h128"/>
+<path d="M58 90V64h16v26"/>
+</g>
+<rect class="win win-user" x="28" y="52" width="16" height="16" rx="1.5" stroke-width="2"/>
+<rect class="win win-pass" x="88" y="52" width="16" height="16" rx="1.5" stroke-width="2"/>
+</svg>
+<h1>domus</h1>
+<p class="muted">Sign in to connect this app.</p>
 <form id="login" autocomplete="on">
-<p><input type="text" id="username" placeholder="Username" autocomplete="username" autocapitalize="none" required></p>
-<p><input type="password" id="password" placeholder="Password" autocomplete="current-password" required></p>
-<p class="err" id="error" role="alert"></p>
-<p><button class="primary" type="submit">Sign in</button></p>
+<div class="field">
+<label for="username">Username</label>
+<input type="text" id="username" placeholder=" " autocomplete="username" autocapitalize="none" required>
+</div>
+<div class="field">
+<label for="password">Password</label>
+<input type="password" id="password" placeholder=" " autocomplete="current-password" required>
+</div>
+<p class="field-err" id="error" role="alert"></p>
+<button class="btn btn-primary" type="submit">Sign in</button>
 </form>
+</div>
 </main>
 <script src="/auth/login.js"></script>
 </body>

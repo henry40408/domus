@@ -6,7 +6,7 @@ import (
 )
 
 // App is the domus single-page app in a browser. The page has no test ids, so
-// controls are found by their placeholder or label.
+// controls are found by their label or text.
 type App struct {
 	Browser *Browser
 	server  *Server
@@ -22,15 +22,20 @@ func (a *App) Open(path string) error {
 	return a.Browser.Goto(a.server.BaseURL + path)
 }
 
-// Fill types into the input whose placeholder starts with prefix, once the
+// Fill types into the input whose <label> reads labelText exactly, once the
 // page has rendered it.
-func (a *App) Fill(placeholderPrefix, text string) error {
-	selector := fmt.Sprintf("input[placeholder^=%s]", jsLiteral(placeholderPrefix))
+func (a *App) Fill(labelText, text string) error {
 	var field *Element
-	err := Eventually("the field "+placeholderPrefix, func() (bool, error) {
-		var err error
-		field, err = a.Browser.Optional(selector)
-		return field != nil, err
+	err := Eventually("the field "+labelText, func() (bool, error) {
+		object, err := objectFrom(a.Browser, nil, `function(labelText) {
+			const label = [...this.querySelectorAll("label")].find((l) => l.textContent.trim() === labelText);
+			return label?.control ?? null;
+		}`, labelText)
+		if err != nil {
+			return false, err
+		}
+		field = wrap(a.Browser, object, "the field "+labelText)
+		return field != nil, nil
 	})
 	if err != nil {
 		return err
@@ -118,10 +123,10 @@ func (a *App) WaitForToast(text string) error {
 // fails when the page has no such light.
 func (a *App) SwitchIsOn(lightName string) (bool, error) {
 	state, err := Eval[string](a.Browser, `(() => {
-		const row = [...document.querySelectorAll("li.light")].find(
-			(li) => li.querySelector(".name")?.textContent === `+jsLiteral(lightName)+`);
+		const row = [...document.querySelectorAll("li.lamp")].find(
+			(li) => li.querySelector(".lamp-name")?.textContent === `+jsLiteral(lightName)+`);
 		if (!row) { return "missing"; }
-		return row.querySelector("button.switch").classList.contains("on") ? "on" : "off";
+		return row.querySelector("button.switch").getAttribute("aria-checked") === "true" ? "on" : "off";
 	})()`)
 	if err != nil {
 		return false, err
@@ -132,18 +137,16 @@ func (a *App) SwitchIsOn(lightName string) (bool, error) {
 	return state == "on", nil
 }
 
-// ClickSwitch flips the on/off switch of the named light in the Dashboard and
-// waits until it shows the opposite state.
+// ClickSwitch flips the on/off switch of the named light and waits until it
+// shows the opposite state.
 func (a *App) ClickSwitch(lightName string) error {
 	before, err := a.SwitchIsOn(lightName)
 	if err != nil {
 		return err
 	}
 	return clickUntil(a.Browser, clickSpec{
-		what: "the switch of " + lightName,
-		locate: func() (*Element, error) {
-			return a.Browser.Query(fmt.Sprintf("li.light:nth-child(%d) button.switch", a.lightPosition(lightName)))
-		},
+		what:   "the switch of " + lightName,
+		locate: func() (*Element, error) { return a.lightSwitch(lightName) },
 		tookEffect: func() (bool, error) {
 			now, err := a.SwitchIsOn(lightName)
 			return now != before, err
@@ -151,10 +154,20 @@ func (a *App) ClickSwitch(lightName string) error {
 	})
 }
 
-func (a *App) lightPosition(lightName string) int {
-	position, _ := Eval[int](a.Browser, `[...document.querySelectorAll("li.light")].findIndex(
-		(li) => li.querySelector(".name")?.textContent === `+jsLiteral(lightName)+`) + 1`)
-	return position
+// lightSwitch finds the on/off switch in the row of the named light.
+func (a *App) lightSwitch(lightName string) (*Element, error) {
+	object, err := objectFrom(a.Browser, nil, `function(name) {
+		const row = [...this.querySelectorAll("li.lamp")].find((li) => li.querySelector(".lamp-name")?.textContent === name);
+		return row?.querySelector("button.switch") ?? null;
+	}`, lightName)
+	if err != nil {
+		return nil, err
+	}
+	toggle := wrap(a.Browser, object, "the switch of "+lightName)
+	if toggle == nil {
+		return nil, fmt.Errorf("the page lists no light named %q", lightName)
+	}
+	return toggle, nil
 }
 
 // CheckByLabel ticks the checkbox of the label that reads text.

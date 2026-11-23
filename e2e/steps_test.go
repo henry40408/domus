@@ -89,10 +89,10 @@ func (w *world) createAdmin(username, password string) error {
 	if err != nil {
 		return err
 	}
-	for placeholder, text := range map[string]string{
+	for label, text := range map[string]string{
 		"Username": username, "Password": password, "Setup code": w.server.SetupCode,
 	} {
-		if err := app.Fill(placeholder, text); err != nil {
+		if err := app.Fill(label, text); err != nil {
 			return err
 		}
 	}
@@ -149,7 +149,7 @@ func (w *world) seeDashboardFor(username string) error {
 		return err
 	}
 	return harness.EventuallyEq("the signed-in user", username, func() (string, error) {
-		return app.Text(".account .who")
+		return app.Text(".side-foot .who-name")
 	})
 }
 
@@ -184,7 +184,7 @@ func (w *world) goToTab(name string) error {
 	if err != nil {
 		return err
 	}
-	return app.Click(harness.Control{Selector: "nav a.tab", Text: name, TookEffect: func() (bool, error) {
+	return app.Click(harness.Control{Selector: "nav.side a", Text: name, TookEffect: func() (bool, error) {
 		hash, err := app.Hash()
 		return hash == "#"+strings.ToLower(name), err
 	}})
@@ -241,7 +241,7 @@ func (w *world) groupListShows(name string, members int) error {
 		return err
 	}
 	return harness.EventuallyEq("the group list entry", fmt.Sprintf("%s %d", name, members), func() (string, error) {
-		entry, err := app.Text(".glist button.active")
+		entry, err := app.Text(".glist button[aria-current=true]")
 		return strings.Join(strings.Fields(entry), " "), err
 	})
 }
@@ -281,7 +281,7 @@ func (w *world) createToken(name string) error {
 		return err
 	}
 	return app.Click(harness.Control{Selector: "button", Text: "Create token", TookEffect: func() (bool, error) {
-		return app.Exists("code.tok")
+		return app.Exists(".fresh code")
 	}})
 }
 
@@ -290,7 +290,7 @@ func (w *world) newToken(app *harness.App) (string, error) {
 	var token string
 	err := harness.Eventually("the new token", func() (bool, error) {
 		var err error
-		token, err = app.Text("code.tok")
+		token, err = app.Text(".fresh code")
 		return token != "", err
 	})
 	return token, err
