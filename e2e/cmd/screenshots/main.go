@@ -23,10 +23,10 @@ const (
 	groupName = "Garmin"
 )
 
-// shot is one screen: file stem, route, heading to wait for, viewport size.
+// shot is one screen: file stem, route, navigation tab to wait for, viewport size.
 type shot struct {
-	stem, route, heading string
-	width, height        int64
+	stem, route, tab string
+	width, height    int64
 }
 
 var shots = []shot{
@@ -168,10 +168,10 @@ func screenshot(app *harness.App, s shot) ([]byte, error) {
 	if err := app.Open("/" + s.route); err != nil {
 		return nil, err
 	}
-	// Going to the URL already shown only changes the hash, so wait for this
-	// view's own heading.
-	if err := harness.EventuallyEq("the heading", s.heading, func() (string, error) {
-		return app.Text("main > h2")
+	// Going to the URL already shown only changes the hash, so wait for the
+	// navigation to mark this view as the current one.
+	if err := harness.EventuallyEq("the current tab", s.tab, func() (string, error) {
+		return app.Text("nav.side a[aria-current=page]")
 	}); err != nil {
 		return nil, err
 	}
