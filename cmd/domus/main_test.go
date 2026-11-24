@@ -16,14 +16,14 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/henry40408/domus/internal/auth"
+	"github.com/henry40408/domus/internal/store"
 )
 
 // logWait bounds a wedged binary rather than pacing the tests, which finish in
 // milliseconds; generous so a loaded machine never reaches it.
 const logWait = 30 * time.Second
-
-// rustCreatedDB is the database the Rust server wrote (see its README.txt).
-const rustCreatedDB = "../../internal/store/testdata/rust-created.db"
 
 var domusBinary string
 
@@ -376,30 +376,34 @@ func TestTheDataDirIsOwnerOnlyAndTheDatabaseToo(t *testing.T) {
 	assertMode(t, filepath.Join(dir, "domus.db"), 0o600)
 }
 
-// The database the Rust server wrote opens as it is: the admin logs in with
-// the password Rust hashed, and no setup code is asked for.
-func TestARustCreatedDatabaseAcceptsItsOwnLogins(t *testing.T) {
-	env := serverEnv(t)
-	dir := strings.TrimPrefix(env[1], "DOMUS_DATA_DIR=")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+// seedAdminDatabase leaves the data directory a previous run would have left:
+// a database with one admin.
+func seedAdminDatabase(t *testing.T, dataDir, password string) {
+	t.Helper()
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(rustCreatedDB)
+	st, err := store.Open(context.Background(), filepath.Join(dataDir, "domus.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "domus.db"), raw, 0o600); err != nil {
+	if _, err := st.CreateFirstAdmin(context.Background(), "admin", auth.HashPassword(password)); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A database that already has users opens as it is: the admin logs in with
+// their password, and no setup code is asked for.
+func TestADatabaseWithUsersIssuesNoSetupCodeAndAcceptsTheirLogin(t *testing.T) {
+	env := serverEnv(t)
+	seedAdminDatabase(t, strings.TrimPrefix(env[1], "DOMUS_DATA_DIR="), "seeded-admin-password")
 
 	server := startServer(t, env)
 	addr := server.waitListening(t)
-	for _, line := range server.errs {
-		if strings.Contains(line, "Setup code") {
-			t.Fatalf("a setup code was issued for a database with users: %s", line)
-		}
-	}
-	body := `{"username":"admin","password":"Fixture-Admin-Pass-1"}`
+	body := `{"username":"admin","password":"seeded-admin-password"}`
 	resp, err := http.Post("http://"+addr+"/api/domus/login", "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -409,12 +413,18 @@ func TestARustCreatedDatabaseAcceptsItsOwnLogins(t *testing.T) {
 		t.Fatalf("login: status %d", resp.StatusCode)
 	}
 	status, text := get(t, "http://"+addr+"/api/domus/status")
-	if status != 200 || !strings.Contains(text, `"setup_done":true`) {
+	if status != 200 || !strings.Contains(text, `"setup_done":true`) || !strings.Contains(text, `"setup_code_required":false`) {
 		t.Fatalf("status %d, body %s", status, text)
 	}
 	server.terminate(t)
 	if exit := server.finish(t); exit != 0 {
 		t.Fatalf("exit %d", exit)
+	}
+	// Only after finish has read all of stderr is "no line" worth anything.
+	for _, line := range server.errs {
+		if strings.Contains(line, "Setup code") {
+			t.Fatalf("a setup code was issued for a database with users: %s", line)
+		}
 	}
 }
 

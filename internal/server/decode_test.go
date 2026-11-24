@@ -60,7 +60,7 @@ func TestDecodeJSONRejectionsMatchAxum(t *testing.T) {
 	}
 }
 
-func TestDecodeJSONRejectionTextsAreTheRustOnes(t *testing.T) {
+func TestADecodeJSONRejectionIsAPlainTextAxumMessage(t *testing.T) {
 	rec := httptest.NewRecorder()
 	decodeJSON(rec, jsonRequest("text/plain", `{}`), &loginBody{})
 	if got, want := bodyString(rec), "Expected request with `Content-Type: application/json`"; got != want {

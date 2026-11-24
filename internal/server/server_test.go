@@ -44,16 +44,18 @@ func TestHealthIsPublicUncachedAndFollowsTheDatabase(t *testing.T) {
 }
 
 func TestSecurityHeadersOnEveryResponse(t *testing.T) {
+	const policy = "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 	app := newTestApp(t)
-	for _, path := range []string{"/", "/nope", "/api/domus/status", "/api/states/light.x", "/health"} {
+	for _, path := range []string{
+		"/", "/nope", "/health", "/api/domus/status", "/api/domus/nope", "/api/states", "/api/websocket",
+		"/auth/authorize?client_id=x&redirect_uri=y",
+	} {
 		h := app.get(t, path).Header()
-		if !strings.Contains(h.Get("Content-Security-Policy"), "frame-ancestors 'none'") {
-			t.Errorf("%s: CSP %q", path, h.Get("Content-Security-Policy"))
-		}
 		for name, want := range map[string]string{
-			"X-Content-Type-Options": "nosniff",
-			"X-Frame-Options":        "DENY",
-			"Referrer-Policy":        "no-referrer",
+			"Content-Security-Policy": policy,
+			"X-Content-Type-Options":  "nosniff",
+			"X-Frame-Options":         "DENY",
+			"Referrer-Policy":         "no-referrer",
 		} {
 			if got := h.Get(name); got != want {
 				t.Errorf("%s: %s = %q, want %q", path, name, got, want)
@@ -75,14 +77,14 @@ func TestNoStoreOnlyForAdminApiAndHstsOnlyBehindHttps(t *testing.T) {
 		t.Errorf("page: %q", got)
 	}
 	secure := app.do(t, request{path: "/", headers: map[string]string{"X-Forwarded-Proto": "HTTPS"}})
-	if got := secure.Header().Get("Strict-Transport-Security"); !strings.HasPrefix(got, "max-age=") {
+	if got := secure.Header().Get("Strict-Transport-Security"); got != "max-age=31536000; includeSubDomains" {
 		t.Errorf("HSTS: %q", got)
 	}
 }
 
 func TestNoStoreWinsOverTheHandlersCacheControl(t *testing.T) {
 	// /auth/login.js is a static file the handler marks no-cache; the path
-	// rule must override it (golden static_auth_login_js).
+	// rule must override it.
 	app := newTestApp(t)
 	if got := app.get(t, "/auth/login.js").Header().Get("Cache-Control"); got != "no-store" {
 		t.Errorf("got %q", got)

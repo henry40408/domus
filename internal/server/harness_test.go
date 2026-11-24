@@ -2,14 +2,11 @@ package server
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -18,9 +15,8 @@ import (
 	"github.com/henry40408/domus/internal/store"
 )
 
-// goldenVersion is the version the Rust goldens were normalised to, so a test
-// app that reports it stamps the same bytes the goldens hash.
-const goldenVersion = "<VERSION>"
+// testVersion is the version a test app reports and stamps into the page.
+const testVersion = "0.0.0-test"
 
 // testApp is an App on an in-memory database.
 type testApp struct {
@@ -31,7 +27,7 @@ type testApp struct {
 
 func newTestApp(t *testing.T) *testApp {
 	t.Helper()
-	return newTestAppWithVersion(t, goldenVersion)
+	return newTestAppWithVersion(t, testVersion)
 }
 
 func newTestAppWithVersion(t *testing.T, version string) *testApp {
@@ -48,7 +44,7 @@ func newTestAppWith(t *testing.T, tweak func(cfg *Config)) *testApp {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	c := core.New(st, nil)
-	cfg := Config{Core: c, Hue: hue.NewManager(c, hue.Timing{}, nil), Version: goldenVersion}
+	cfg := Config{Core: c, Hue: hue.NewManager(c, hue.Timing{}, nil), Version: testVersion}
 	tweak(&cfg)
 	app := New(cfg)
 	return &testApp{app: app, store: st, handler: app.Handler()}
@@ -84,83 +80,96 @@ func (a *testApp) get(t *testing.T, path string) *httptest.ResponseRecorder {
 	return a.do(t, request{path: path})
 }
 
-// golden is one response captured from the Rust server (testdata/README).
-type golden struct {
-	Request struct {
-		Method  string            `json:"method"`
-		Path    string            `json:"path"`
-		Headers map[string]string `json:"headers"`
-		// Body is a JSON body, BodyText any other; golden checks that need a
-		// body send it themselves.
-		Body     json.RawMessage   `json:"body"`
-		BodyText *string           `json:"body_text"`
-		Form     map[string]string `json:"form"`
-	} `json:"request"`
-	Response goldenResponse `json:"response"`
+// reply is the response a request must get. Only the fields that are set are
+// checked, except the body: it is compared as parsed JSON when json is set and
+// byte for byte otherwise, so an empty text asserts an empty body.
+type reply struct {
+	status       int
+	contentType  string
+	cacheControl string
+	headers      map[string]string // other headers, compared exactly
+	json         string
+	text         string
 }
 
-type goldenResponse struct {
-	Status     int               `json:"status"`
-	Headers    map[string]string `json:"headers"`
-	Body       json.RawMessage   `json:"body"`
-	BodyText   *string           `json:"body_text"`
-	BodyEmpty  bool              `json:"body_empty"`
-	BodySHA256 string            `json:"body_sha256"`
-	BodyLength *int              `json:"body_length"`
+// exchange is a named request with the response it must get.
+type exchange struct {
+	name    string
+	request request
+	reply   reply
 }
 
-func loadGolden(t *testing.T, name string) golden {
+const (
+	jsonType = "application/json"
+	textType = "text/plain; charset=utf-8"
+	noStore  = "no-store"
+)
+
+// expect sends req and compares the response with want. Placeholders (see
+// normalizeText) in header values and JSON bodies stand for random values.
+func (a *testApp) expect(t *testing.T, req request, want reply) *httptest.ResponseRecorder {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("testdata", "rust", name+".json"))
-	if err != nil {
-		t.Fatal(err)
+	rec := a.do(t, req)
+	if rec.Code != want.status {
+		t.Errorf("status %d, want %d (body %s)", rec.Code, want.status, rec.Body)
 	}
-	var g golden
-	if err := json.Unmarshal(raw, &g); err != nil {
-		t.Fatalf("%s: %v", name, err)
+	headers := map[string]string{"Content-Type": want.contentType, "Cache-Control": want.cacheControl}
+	for name, value := range want.headers {
+		headers[name] = value
 	}
-	return g
+	for name, value := range headers {
+		if value == "" {
+			continue
+		}
+		if got := normalizeText(rec.Header().Get(name)); got != value {
+			t.Errorf("header %s = %q, want %q", name, got, value)
+		}
+	}
+	if want.json != "" {
+		if !jsonEqual(t, []byte(normalizeText(rec.Body.String())), []byte(want.json)) {
+			t.Errorf("body %s, want %s", rec.Body, want.json)
+		}
+		return rec
+	}
+	if rec.Body.String() != want.text {
+		t.Errorf("body %q, want %q", rec.Body, want.text)
+	}
+	return rec
 }
 
-// checkGolden sends the golden's request and compares status, the headers the
-// golden lists, and the body.
-func (a *testApp) checkGolden(t *testing.T, name string) {
+// expectEach runs every exchange on its own fresh app.
+func expectEach(t *testing.T, cases []exchange) {
 	t.Helper()
-	g := loadGolden(t, name)
-	rec := a.do(t, request{method: g.Request.Method, path: g.Request.Path, headers: g.Request.Headers})
-	want := g.Response
-	if rec.Code != want.Status {
-		t.Errorf("%s: status %d, want %d", name, rec.Code, want.Status)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) { newTestApp(t).expect(t, c.request, c.reply) })
 	}
-	for header, value := range want.Headers {
-		if got := rec.Header().Get(header); got != value {
-			t.Errorf("%s: header %s = %q, want %q", name, header, got, value)
-		}
-	}
-	checkGoldenBody(t, name, rec.Body.Bytes(), want)
 }
 
-func checkGoldenBody(t *testing.T, name string, got []byte, want goldenResponse) {
+// expectInOrder runs the steps on this app one after the other, so a step sees
+// what the earlier ones changed.
+func (a *testApp) expectInOrder(t *testing.T, steps []exchange) {
 	t.Helper()
-	switch {
-	case want.BodyEmpty:
-		if len(got) != 0 {
-			t.Errorf("%s: body %q, want empty", name, got)
-		}
-	case want.BodySHA256 != "":
-		sum := sha256.Sum256(got)
-		if hex.EncodeToString(sum[:]) != want.BodySHA256 || len(got) != *want.BodyLength {
-			t.Errorf("%s: body differs from the Rust one (%d bytes, want %d)", name, len(got), *want.BodyLength)
-		}
-	case want.BodyText != nil:
-		if string(got) != *want.BodyText {
-			t.Errorf("%s: body %q, want %q", name, got, *want.BodyText)
-		}
-	case want.Body != nil:
-		if !jsonEqual(t, got, want.Body) {
-			t.Errorf("%s: body %s, want %s", name, got, want.Body)
-		}
+	for _, step := range steps {
+		t.Run(step.name, func(t *testing.T) { a.expect(t, step.request, step.reply) })
 	}
+}
+
+// placeholders stand for values that differ on every run.
+var placeholders = []struct {
+	pattern *regexp.Regexp
+	to      string
+}{
+	{regexp.MustCompile(`(^|[^0-9a-f])[0-9a-f]{64}($|[^0-9a-f])`), "${1}<HEX64>${2}"}, // session cookie
+	{regexp.MustCompile(`(^|[^0-9a-f])[0-9a-f]{32}($|[^0-9a-f])`), "${1}<HEX32>${2}"}, // OAuth code
+}
+
+// normalizeText replaces a run of exactly 64 or 32 hex digits by <HEX64> or
+// <HEX32>.
+func normalizeText(text string) string {
+	for _, rule := range placeholders {
+		text = rule.pattern.ReplaceAllString(text, rule.to)
+	}
+	return text
 }
 
 func jsonEqual(t *testing.T, a, b []byte) bool {

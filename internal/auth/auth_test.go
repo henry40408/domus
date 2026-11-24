@@ -1,9 +1,7 @@
 package auth
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -83,28 +81,25 @@ func TestStoredFormatIsSaltDollarHash(t *testing.T) {
 	}
 }
 
+// rustPasswordVectors were hashed by the Rust server (setup and user creation).
+// Passwords already stored by it must keep working, so these hashes must
+// verify as they are.
+var rustPasswordVectors = []struct{ user, password, stored string }{
+	{"admin", "Fixture-Admin-Pass-1",
+		"c40e0b650c7a212dde44df13478d4cfa$d8ca40ea44dfd54dec27d08cf166fefd8a7b1d14d0c8b5a7f71180789b008253"},
+	{"alice", "愛麗絲的密碼是很長很長的字串",
+		"08a28f512bddc85c9008a6271b1fc92c$f15f3efe5c5ff87b3993ccef28bd6e63df77abb8dd9248aaa2c28d0a32f12a0e"},
+	{"bob", "bob$pass word!2026 ✓",
+		"6bdcd8ab9c67e7325ec96a90597954b5$c3b62ec8076d11a6ea980265bd9dac8c9241967cc378f55c258b6d94680bfc71"},
+}
+
 func TestPasswordsMadeByTheRustServerVerify(t *testing.T) {
-	raw, err := os.ReadFile("testdata/password_vectors.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var vectors []struct {
-		User     string `json:"user"`
-		Password string `json:"password"`
-		Stored   string `json:"stored"`
-	}
-	if err := json.Unmarshal(raw, &vectors); err != nil {
-		t.Fatal(err)
-	}
-	if len(vectors) < 3 {
-		t.Fatalf("expected at least 3 vectors, got %d", len(vectors))
-	}
-	for _, v := range vectors {
-		if !VerifyPassword(v.Password, v.Stored) {
-			t.Errorf("%s: Rust hash does not verify", v.User)
+	for _, v := range rustPasswordVectors {
+		if !VerifyPassword(v.password, v.stored) {
+			t.Errorf("%s: Rust hash does not verify", v.user)
 		}
-		if VerifyPassword(v.Password+"x", v.Stored) {
-			t.Errorf("%s: wrong password accepted", v.User)
+		if VerifyPassword(v.password+"x", v.stored) {
+			t.Errorf("%s: wrong password accepted", v.user)
 		}
 	}
 }

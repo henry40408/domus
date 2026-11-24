@@ -5,11 +5,28 @@ import (
 	"testing"
 )
 
-func TestHealthMatchesTheRustResponses(t *testing.T) {
-	app := newTestApp(t)
-	for _, name := range []string{"health_ok", "health_https_forwarded", "health_post_405"} {
-		t.Run(name, func(t *testing.T) { app.checkGolden(t, name) })
-	}
+func TestHealthAnswersWithTheVersionAndRefusesOtherMethods(t *testing.T) {
+	healthy := `{"status":"ok","version":"` + testVersion + `"}`
+	expectEach(t, []exchange{
+		{
+			name:    "a plain request",
+			request: request{path: "/health"},
+			reply:   reply{status: 200, contentType: jsonType, cacheControl: noStore, json: healthy},
+		},
+		{
+			name:    "behind an https proxy the answer adds HSTS",
+			request: request{path: "/health", headers: map[string]string{"X-Forwarded-Proto": "https"}},
+			reply: reply{
+				status: 200, contentType: jsonType, cacheControl: noStore, json: healthy,
+				headers: map[string]string{"Strict-Transport-Security": "max-age=31536000; includeSubDomains"},
+			},
+		},
+		{
+			name:    "a POST is refused with the allowed methods",
+			request: request{method: http.MethodPost, path: "/health"},
+			reply:   reply{status: 405, cacheControl: noStore, headers: map[string]string{"Allow": "GET,HEAD"}},
+		},
+	})
 }
 
 func TestAWrongMethodOnAKnownPathIsMethodNotAllowed(t *testing.T) {
