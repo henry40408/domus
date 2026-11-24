@@ -36,7 +36,7 @@ func newDamageableApp(t *testing.T) *damagedApp {
 	logs := &logBuffer{}
 	logger := slog.New(slog.NewTextHandler(logs, nil))
 	c := core.New(st, logger)
-	app := New(Config{Core: c, Hue: hue.NewManager(c, hue.Timing{}, nil), Version: goldenVersion, Logger: logger})
+	app := New(Config{Core: c, Hue: hue.NewManager(c, hue.Timing{}, nil), Version: testVersion, Logger: logger})
 	return &damagedApp{testApp: &testApp{app: app, store: st, handler: app.Handler()}, logs: logs, raw: raw}
 }
 

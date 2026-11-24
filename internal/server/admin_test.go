@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -102,13 +101,7 @@ func (a *testApp) alive(t *testing.T, cookie string) bool {
 }
 
 func TestStatusBeforeSetupReportsNothingDone(t *testing.T) {
-	app := newTestApp(t)
-	code, body := app.adminJSON(t, http.MethodGet, "/api/domus/status", "", "")
-	equal(t, code, 200)
-	equal(t, body, map[string]any{
-		"setup_done": false, "setup_code_required": false, "logged_in": false,
-		"user": nil, "hue_paired": false, "version": goldenVersion,
-	})
+	newTestApp(t).expect(t, request{path: statusPath}, adminReply(200, anonymousStatus(false, false)))
 }
 
 func TestSetupRefusesABadUsernameAndAShortPassword(t *testing.T) {
@@ -765,92 +758,230 @@ func TestFromTokenIsNotThrottledOrCounted(t *testing.T) {
 	}
 }
 
-var hex64 = regexp.MustCompile(`[0-9a-f]{64}`)
+const (
+	loginPath  = "/api/domus/login"
+	setupPath  = "/api/domus/setup"
+	statusPath = "/api/domus/status"
 
-// replayGolden sends the golden's request, including its body, and compares
-// the status, the headers it lists and a JSON body. A plain-text rejection
-// compares by status only, because Go's parser words its errors differently.
-// replacements are old, new pairs applied to the body first.
-func (a *testApp) replayGolden(t *testing.T, name string, replacements ...string) *httptest.ResponseRecorder {
-	t.Helper()
-	g := loadGolden(t, name)
-	body := ""
-	switch {
-	case g.Request.Body != nil:
-		var compact bytes.Buffer
-		noError(t, json.Compact(&compact, g.Request.Body))
-		body = compact.String()
-	case g.Request.BodyText != nil:
-		body = *g.Request.BodyText
-	}
-	body = strings.NewReplacer(replacements...).Replace(body)
-	rec := a.do(t, request{method: g.Request.Method, path: g.Request.Path, headers: g.Request.Headers, body: body})
-	want := g.Response
-	if rec.Code != want.Status {
-		t.Errorf("%s: status %d, want %d", name, rec.Code, want.Status)
-	}
-	for header, value := range want.Headers {
-		if strings.Contains(value, "<") {
-			continue // a placeholder for a random or timing value
-		}
-		if got := rec.Header().Get(header); got != value {
-			t.Errorf("%s: header %s = %q, want %q", name, header, got, value)
-		}
-	}
-	if want.BodyEmpty && rec.Body.Len() != 0 {
-		t.Errorf("%s: body %q, want empty", name, rec.Body)
-	}
-	if want.Body != nil && !strings.Contains(string(want.Body), "<") && !jsonEqual(t, rec.Body.Bytes(), want.Body) {
-		t.Errorf("%s: body %s, want %s", name, rec.Body, want.Body)
-	}
-	if want.BodyText != nil && strings.HasPrefix(*want.BodyText, "Expected request") && rec.Body.String() != *want.BodyText {
-		t.Errorf("%s: body %q, want %q", name, rec.Body, *want.BodyText)
-	}
-	return rec
+	wrongLogin       = `{"message":"Wrong username or password."}`
+	loginNeeded      = `{"message":"Login required."}`
+	crossSiteRefused = `{"message":"Cross-site request refused."}`
+	badPassword      = `{"message":"Password must be 12 to 128 characters and must not be the username."}`
+	wrongSetupCode   = `{"message":"Wrong setup code. Find it in the domus log."}`
+
+	// newSession is the cookie of a password login; the value is random.
+	newSession = "domus_session=<HEX64>; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800"
+)
+
+// adminReply is a JSON answer of the admin API; none of them may be stored.
+func adminReply(status int, body string) reply {
+	return reply{status: status, contentType: jsonType, cacheControl: noStore, json: body}
 }
 
-func TestStatelessAdminGoldens(t *testing.T) {
-	for _, name := range []string{
-		"admin_status_before_setup",
-		"admin_login_get_405",
-		"admin_login_bad_json_400",
-		"admin_login_wrong_content_type_415",
-		"admin_login_cross_site_origin_403",
-		"admin_login_origin_null_403",
-		"admin_login_sec_fetch_cross_site_403",
-		"admin_login_same_origin_header_ok_401",
-		"admin_login_before_setup_401",
-		"admin_login_unknown_user_401",
-		"admin_unknown_route_404",
-	} {
-		t.Run(name, func(t *testing.T) { newTestApp(t).replayGolden(t, name) })
+func adminPost(path, body string) request {
+	return request{
+		method: http.MethodPost, path: path, body: body,
+		headers: map[string]string{"Content-Type": "application/json"},
 	}
 }
 
-// The setup goldens were captured with a setup code; <SETUP_CODE> stands for
-// it. The golden admin_setup_bad_username_400 is left out: it carries an older
-// username hint than the Rust source (docs: domus-go-deviations.md).
-func TestSetupGoldens(t *testing.T) {
-	app := newCodeApp(t)
-	app.replayGolden(t, "admin_status_before_setup_code_required")
-	for _, name := range []string{"admin_setup_short_password_400", "admin_setup_password_equals_username_400"} {
-		app.replayGolden(t, name, "<SETUP_CODE>", "abc123")
+// withHeaders is req with more request headers.
+func withHeaders(req request, more map[string]string) request {
+	headers := map[string]string{}
+	for name, value := range req.headers {
+		headers[name] = value
 	}
-	for _, name := range []string{"admin_setup_no_code_403", "admin_setup_wrong_code_403"} {
-		app.replayGolden(t, name)
+	for name, value := range more {
+		headers[name] = value
 	}
+	req.headers = headers
+	return req
 }
 
-func TestLoginGoldensAfterSetup(t *testing.T) {
-	app := newTestApp(t)
-	body := `{"username":"admin","password":"Fixture-Admin-Pass-1"}`
-	equal(t, app.adminStatus(t, http.MethodPost, "/api/domus/setup", "", body), 200)
-	for _, name := range []string{"admin_login_ok_https", "admin_login_ok_upper_case_username"} {
-		rec := app.replayGolden(t, name)
-		if cookie := rec.Header().Get("Set-Cookie"); !hex64.MatchString(cookie) {
-			t.Errorf("%s: the cookie does not carry 64 hex digits: %q", name, cookie)
-		}
+func TestTheAdminAPIRefusesBadRequestsBeforeAnyLogin(t *testing.T) {
+	login := adminPost(loginPath, `{"username":"x","password":"y"}`)
+	expectEach(t, []exchange{
+		{
+			name:    "a login before the first admin exists is a wrong login",
+			request: login,
+			reply:   adminReply(401, wrongLogin),
+		},
+		{
+			name:    "a login of an unknown user is a wrong login",
+			request: adminPost(loginPath, `{"username":"ghost","password":"wrong password!"}`),
+			reply:   adminReply(401, wrongLogin),
+		},
+		{
+			name:    "a JSON body needs the JSON content type",
+			request: withHeaders(login, map[string]string{"Content-Type": "text/plain"}),
+			reply: reply{
+				status: 415, contentType: textType, cacheControl: noStore,
+				text: "Expected request with `Content-Type: application/json`",
+			},
+		},
+		{
+			name:    "a GET on the login route is refused with the allowed method",
+			request: request{path: loginPath},
+			reply:   reply{status: 405, cacheControl: noStore, headers: map[string]string{"Allow": "POST"}},
+		},
+		{
+			name:    "a request from another origin is refused",
+			request: withHeaders(login, map[string]string{"Origin": "http://evil.example"}),
+			reply:   adminReply(403, crossSiteRefused),
+		},
+		{
+			name:    "a request with the origin null is refused",
+			request: withHeaders(login, map[string]string{"Origin": "null"}),
+			reply:   adminReply(403, crossSiteRefused),
+		},
+		{
+			name:    "a request that fetch metadata calls cross-site is refused",
+			request: withHeaders(login, map[string]string{"Sec-Fetch-Site": "cross-site"}),
+			reply:   adminReply(403, crossSiteRefused),
+		},
+		{
+			name: "a request from the same origin gets as far as the login",
+			request: withHeaders(login, map[string]string{
+				"Host": "127.0.0.1:8123", "Origin": "http://127.0.0.1:8123", "Sec-Fetch-Site": "same-origin",
+			}),
+			reply: adminReply(401, wrongLogin),
+		},
+		{
+			name:    "an unknown admin route is an empty 404",
+			request: request{path: "/api/domus/nope"},
+			reply:   reply{status: 404, cacheControl: noStore},
+		},
+	})
+}
+
+// The wording of the parser's message is not compared: Go words it differently
+// from the Rust server (a known, accepted difference), the status matches.
+func TestALoginBodyThatIsNotJSONIsAPlainTextBadRequest(t *testing.T) {
+	rec := newTestApp(t).do(t, adminPost(loginPath, "{nope"))
+	equal(t, rec.Code, 400)
+	equal(t, rec.Header().Get("Content-Type"), textType)
+	equal(t, rec.Header().Get("Cache-Control"), noStore)
+}
+
+func TestProtectedRoutesAskAnonymousVisitorsToLogInBeforeAndAfterSetup(t *testing.T) {
+	cases := []exchange{
+		{name: "the lights", request: request{path: "/api/domus/lights"}, reply: adminReply(401, loginNeeded)},
+		{
+			name: "a group update",
+			request: request{
+				method: http.MethodPut, path: "/api/domus/groups/x", body: `{"members":[]}`,
+				headers: map[string]string{"Content-Type": "application/json"},
+			},
+			reply: adminReply(401, loginNeeded),
+		},
+		{
+			name:    "a token creation",
+			request: adminPost("/api/domus/tokens", `{"name":"x"}`),
+			reply:   adminReply(401, loginNeeded),
+		},
+		{
+			name:    "a password check for sensitive actions",
+			request: adminPost("/api/domus/session/reauth", `{"password":"correct horse"}`),
+			reply:   adminReply(401, loginNeeded),
+		},
+		{
+			name:    "a session from an app token without the token",
+			request: request{method: http.MethodPost, path: "/api/domus/session/from-token"},
+			reply:   adminReply(401, `{"message":"Invalid token."}`),
+		},
 	}
-	app.replayGolden(t, "admin_login_wrong_password_401")
-	app.replayGolden(t, "admin_setup_again_409")
+	t.Run("before setup", func(t *testing.T) { newTestApp(t).expectInOrder(t, cases) })
+	t.Run("after setup", func(t *testing.T) {
+		app := newTestApp(t)
+		app.setupAdmin(t)
+		app.expectInOrder(t, cases)
+	})
+}
+
+// anonymousStatus is the status a visitor without a session gets.
+func anonymousStatus(setupDone, codeRequired bool) string {
+	return fmt.Sprintf(
+		`{"hue_paired":false,"logged_in":false,"setup_code_required":%t,"setup_done":%t,"user":null,"version":%q}`,
+		codeRequired, setupDone, testVersion)
+}
+
+// The steps run in order: the setup changes what the later ones see. The code
+// is sent in lower case and without the dash.
+func TestTheFirstAdminIsSetUpWithTheCodeAndThenLogsIn(t *testing.T) {
+	app := newTestAppWith(t, func(cfg *Config) { cfg.SetupCode = "CD42Y-6YC3Y" })
+	setup := func(body string) request { return adminPost(setupPath, body) }
+	app.expectInOrder(t, []exchange{
+		{
+			name:    "the status asks for the setup code",
+			request: request{path: statusPath},
+			reply:   adminReply(200, anonymousStatus(false, true)),
+		},
+		{
+			name:    "a setup without the code is refused",
+			request: setup(adminBody),
+			reply:   adminReply(403, wrongSetupCode),
+		},
+		{
+			name:    "a setup with a wrong code is refused",
+			request: setup(`{"username":"admin","password":"correct horse","setup_code":"nope"}`),
+			reply:   adminReply(403, wrongSetupCode),
+		},
+		{
+			name:    "a short password is refused once the code is right",
+			request: setup(`{"username":"admin","password":"short","setup_code":"cd42y6yc3y"}`),
+			reply:   adminReply(400, badPassword),
+		},
+		{
+			name:    "a password that equals the username in any case is refused",
+			request: setup(`{"username":"Hunter2-Hunter2","password":"hunter2-hunter2","setup_code":"cd42y6yc3y"}`),
+			reply:   adminReply(400, badPassword),
+		},
+		{
+			name:    "the right code creates the admin and starts a session",
+			request: setup(`{"username":"admin","password":"correct horse","setup_code":"cd42y6yc3y"}`),
+			reply: reply{
+				status: 200, contentType: jsonType, cacheControl: noStore, json: `{"ok":true}`,
+				headers: map[string]string{"Set-Cookie": newSession},
+			},
+		},
+		{
+			name:    "the status stops asking for the code",
+			request: request{path: statusPath},
+			reply:   adminReply(200, anonymousStatus(true, false)),
+		},
+		{
+			name:    "a second setup is refused",
+			request: setup(`{"username":"admin","password":"correct horse","setup_code":"cd42y6yc3y"}`),
+			reply:   adminReply(409, `{"message":"Already set up."}`),
+		},
+		{
+			name:    "a wrong password is refused",
+			request: adminPost(loginPath, `{"username":"admin","password":"wrong password!"}`),
+			reply:   adminReply(401, wrongLogin),
+		},
+		{
+			name:    "an unknown user is refused the same way",
+			request: adminPost(loginPath, `{"username":"mallory ","password":"wrong password!"}`),
+			reply:   adminReply(401, wrongLogin),
+		},
+		{
+			name:    "behind an https proxy the cookie is Secure and the answer carries HSTS",
+			request: withHeaders(adminPost(loginPath, adminBody), map[string]string{"X-Forwarded-Proto": "https"}),
+			reply: reply{
+				status: 200, contentType: jsonType, cacheControl: noStore, json: `{"ok":true}`,
+				headers: map[string]string{
+					"Set-Cookie":                newSession + "; Secure",
+					"Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+				},
+			},
+		},
+		{
+			name:    "the username is trimmed and not case sensitive",
+			request: adminPost(loginPath, `{"username":" ADMIN ","password":"correct horse"}`),
+			reply: reply{
+				status: 200, contentType: jsonType, cacheControl: noStore, json: `{"ok":true}`,
+				headers: map[string]string{"Set-Cookie": newSession},
+			},
+		},
+	})
 }

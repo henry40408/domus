@@ -4,7 +4,7 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
 
 ## Overview
 
-domus is a lightweight Home Assistant API-compatible server for Philips Hue lights (Go, standard library `net/http`, pure-Go SQLite). It serves the REST subset hasscontrol (a Garmin widget) needs, enough of OAuth login, `mobile_app` and the WebSocket API for the official Companion apps, and its own admin page. It was rewritten from Rust; the Rust server's behaviour is the specification, pinned by golden files (see Tests).
+domus is a lightweight Home Assistant API-compatible server for Philips Hue lights (Go, standard library `net/http`, pure-Go SQLite). It serves the REST subset hasscontrol (a Garmin widget) needs, enough of OAuth login, `mobile_app` and the WebSocket API for the official Companion apps, and its own admin page. It was rewritten from Rust; the Rust server's behaviour is the specification, pinned by the expected values in the tests (see Tests).
 
 ## Commands
 
@@ -40,7 +40,7 @@ Gherkin scenarios (`e2e/features/*.feature`) run through godog and drive `bin/do
 
 ### Tests
 
-- `internal/server/testdata/rust/*.json` are 275 golden responses captured from the last Rust server; `rust-order.txt` is the replay order. `parity_test.go` replays the 67 whose request has no normalised placeholder against a fresh app; the others are covered by the per-area handler tests. `internal/store/testdata/` holds databases created by the Rust server (see its `README.txt`); the store must open them unchanged.
+- There are no `testdata/` directories: every expected value is written in the test that uses it. The status, headers and bodies the Rust server answered are pinned by the cases in `internal/server/*_test.go` (helpers `expect`, `expectEach`, `expectInOrder` in `harness_test.go`; random values appear as `<HEX64>` and `<HEX32>`). A database the Rust server wrote must still open unchanged: `internal/store/migrate_test.go` pins sqlx's eight `_sqlx_migrations` rows (`sqlxMigrations`) and builds a v0.1.0 database from inline SQL, and `internal/auth/auth_test.go` holds the Argon2 hashes Rust wrote (`rustPasswordVectors`).
 - `cmd/domus/main_test.go` builds the binary once in `TestMain` and `exec`s it. Read the listening address from the log line `listening on http://<addr>` (slog quotes the message).
 - Known, accepted differences from Rust: JSON parser error wording (statuses match), WebSocket close code 1000 instead of 1005, JSON object keys that `encoding/json` matches case-insensitively with the last duplicate key winning, and a form body with invalid percent-encoding answered 422 where Rust answered 400 `invalid_grant`. The last two only affect the caller's own request, and the official apps encode correctly.
 
@@ -66,7 +66,7 @@ Thin binary (`cmd/domus`) over internal packages, so tests build the handler dir
 
 `Handler` (`internal/server/routes.go`) registers `GET /health`, the HA REST API (`/api/states`, `/api/services/...`, bearer token), the admin API under `/api/domus/*` (session cookie), OAuth under `/auth/*`, `mobile_app` and `GET /api/websocket`, then a fallback serving the embedded page. The fallback answers 405 plus `Allow` for a path other methods serve, like axum did. Everything sits behind `securityHeaders`.
 
-Admin routes are declared once in `adminRoutes` with a requirement mask (`needSession`, `needAdmin`, `needRecentAuth`); they are mounted method-less so the same-origin check and the session checks run before the method is judged, which the goldens pin. `needRecentAuth` applies to sessions that came from an app token. Token routes check the token before the method.
+Admin routes are declared once in `adminRoutes` with a requirement mask (`needSession`, `needAdmin`, `needRecentAuth`); they are mounted method-less so the same-origin check and the session checks run before the method is judged, which the tests pin. `needRecentAuth` applies to sessions that came from an app token. Token routes check the token before the method.
 
 ### Security design
 
@@ -96,5 +96,5 @@ The version is never stored in a manifest: `internal/version.Version()` returns 
 - `ensureNoLegacyEnvVars` (`cmd/domus/env.go`) fails startup on retired names. Update `legacyEnvVars` (and `liveEnvVars`) whenever an environment variable is added, renamed or removed: a silently ignored variable is worse than a startup failure.
 - Logs go to stdout (slog text); stderr carries the setup code and fatal errors.
 - `http.Server.WriteTimeout` stays 0: `/api/domus/events` (SSE) and the WebSocket are long-lived.
-- Keep API error texts and statuses compatible with the goldens when touching handlers; change a golden only on purpose and say why.
+- Keep API error texts and statuses compatible with the Rust server (the expected values in the tests) when touching handlers; change an expected value only on purpose and say why.
 - The Docker image runs as root so a bind-mounted `/data` stays writable.

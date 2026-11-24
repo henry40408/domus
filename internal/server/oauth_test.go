@@ -1,6 +1,8 @@
 package server
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -541,4 +543,123 @@ func TestOAuthEndpointsRejectWrongMethodsAndBodies(t *testing.T) {
 	equal(t, status, 200)
 	status, _ = app.tokenForm(t, "action=revoke")
 	equal(t, status, 200)
+}
+
+func formPost(path, body string) request {
+	return request{
+		method: http.MethodPost, path: path, body: body,
+		headers: map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
+	}
+}
+
+// loginPageSHA256 is the hash of the page the Rust server sent. The served page
+// is compared with the embedded file below, so without this pin an edit of the
+// file would pass unnoticed.
+const loginPageSHA256 = "a52b75820d7d0c31700ce4ecd6840d3abf57892ff23451d5106fc64d21dad6e2"
+
+func TestTheEmbeddedLoginPageIsTheOneTheRustServerSent(t *testing.T) {
+	sum := sha256.Sum256(loginPage)
+	equal(t, hex.EncodeToString(sum[:]), loginPageSHA256)
+}
+
+func TestTheAuthorizePageIsServedOnlyToTheOfficialClients(t *testing.T) {
+	page := reply{status: 200, contentType: "text/html; charset=utf-8", cacheControl: noStore, text: string(loginPage)}
+	refused := reply{status: 400, contentType: textType, cacheControl: noStore, text: "Unknown client or redirect URI."}
+	expectEach(t, []exchange{
+		{
+			name: "the iOS app",
+			request: request{path: "/auth/authorize?client_id=https%3A%2F%2Fhome-assistant.io%2FiOS" +
+				"&redirect_uri=homeassistant%3A%2F%2Fauth-callback"},
+			reply: page,
+		},
+		{
+			name: "the Android debug build",
+			request: request{path: "/auth/authorize?client_id=https%3A%2F%2Fhome-assistant.io%2Fandroid%2Fdev-auth" +
+				"&redirect_uri=homeassistant-dev%3A%2F%2Fauth-callback"},
+			reply: page,
+		},
+		{name: "an unknown client", request: request{path: "/auth/authorize?client_id=x&redirect_uri=y"}, reply: refused},
+		{name: "no parameters", request: request{path: "/auth/authorize"}, reply: refused},
+		{
+			name: "a release client with the debug redirect",
+			request: request{path: "/auth/authorize?client_id=https%3A%2F%2Fhome-assistant.io%2FiOS" +
+				"&redirect_uri=homeassistant-dev%3A%2F%2Fauth-callback"},
+			reply: refused,
+		},
+		{
+			name:    "a POST is refused with the allowed methods",
+			request: request{method: http.MethodPost, path: "/auth/authorize"},
+			reply:   reply{status: 405, cacheControl: noStore, headers: map[string]string{"Allow": "GET,HEAD"}},
+		},
+	})
+}
+
+func TestTheLoginFlowAnswersACodeOrAnError(t *testing.T) {
+	login := func(username, clientID, redirectURI string) request {
+		return adminPost("/auth/login_flow", fmt.Sprintf(
+			`{"username":%q,"password":%q,"client_id":%q,"redirect_uri":%q}`,
+			username, oauthPassword, clientID, redirectURI))
+	}
+	t.Run("the right password gets a one-time code", func(t *testing.T) {
+		newOAuthApp(t).expect(t, login("admin", iosClient, appRedirect), adminReply(200, `{"code":"<HEX32>"}`))
+	})
+	expectEach(t, []exchange{
+		{
+			name:    "an unknown client",
+			request: login("x", "bad", "bad"),
+			reply:   adminReply(400, `{"error":"invalid_request"}`),
+		},
+		{
+			name:    "an unknown user",
+			request: login("nobody", iosClient, appRedirect),
+			reply:   adminReply(401, wrongLogin),
+		},
+		{
+			name:    "a form body instead of JSON",
+			request: formPost("/auth/login_flow", "username=x"),
+			reply: reply{
+				status: 415, contentType: textType, cacheControl: noStore,
+				text: "Expected request with `Content-Type: application/json`",
+			},
+		},
+	})
+}
+
+func TestTheTokenEndpointRefusesIncompleteGrantsAndAnswersRevokesWithNothing(t *testing.T) {
+	const grantFor = "client_id=https%3A%2F%2Fhome-assistant.io%2FiOS&grant_type="
+	invalid := adminReply(400, `{"error":"invalid_request"}`)
+	revoked := reply{status: 200, cacheControl: noStore}
+	expectEach(t, []exchange{
+		{name: "no grant type", request: formPost("/auth/token", ""), reply: invalid},
+		{
+			name:    "an unsupported grant type",
+			request: formPost("/auth/token", "grant_type=password"),
+			reply:   adminReply(400, `{"error":"unsupported_grant_type"}`),
+		},
+		{
+			name:    "a code grant without the code",
+			request: formPost("/auth/token", grantFor+"authorization_code"),
+			reply:   invalid,
+		},
+		{
+			name:    "a refresh grant without the refresh token",
+			request: formPost("/auth/token", grantFor+"refresh_token"),
+			reply:   invalid,
+		},
+		{
+			name:    "a JSON body instead of a form",
+			request: adminPost("/auth/token", `{"grant_type":"x"}`),
+			reply: reply{
+				status: 415, contentType: textType, cacheControl: noStore,
+				text: "Form requests must have `Content-Type: application/x-www-form-urlencoded`",
+			},
+		},
+		{
+			name:    "the iOS revoke of an unknown token",
+			request: formPost("/auth/token", "action=revoke&token=nothing"),
+			reply:   revoked,
+		},
+		{name: "a revoke of an unknown token", request: formPost("/auth/revoke", "token=nothing"), reply: revoked},
+		{name: "a revoke without a token", request: formPost("/auth/revoke", ""), reply: revoked},
+	})
 }

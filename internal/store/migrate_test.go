@@ -3,12 +3,14 @@ package store
 import (
 	"context"
 	"database/sql"
-	"os"
+	"encoding/hex"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/henry40408/domus/internal/auth"
 )
 
 // migrationRow is a _sqlx_migrations row without installed_on and
@@ -41,30 +43,55 @@ func readMigrationRows(t *testing.T, db *sql.DB) []migrationRow {
 	return result
 }
 
-// rawRows reads the migration rows of a database file without the store.
-func rawRows(t *testing.T, path string) []migrationRow {
-	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = db.Close() }()
-	return readMigrationRows(t, db)
+// sqlxMigrations are the rows sqlx wrote for the eight migrations (the
+// checksum is the SHA-384 of the file). A database made by the Rust server
+// carries them, and the Rust server refuses a database whose rows differ, so
+// they must never change.
+var sqlxMigrations = []struct {
+	version     int64
+	description string
+	checksum    string
+}{
+	{1, "init",
+		"f1c1edc563f1af8136b3c41943f87342cc33c9906900271c579096cc0a11ed4d85ec55860164b1e34747ec2013066af0"},
+	{2, "token scope",
+		"396b2d6c782a42eb87a834750cff99ff600317d85e499db7feeb975fb953dbc8b1e3c96031488cafe7e3f870dcdd2900"},
+	{3, "users",
+		"56e4e6ecfac3a5f43026eea2a1314aaa0e19aef6b3f2e9a11f5cdc42de664f368bd1bb5bc0189298295aa947f41ef988"},
+	{4, "least privilege",
+		"300723a68449afbe90b7ea1fc93c8e3d8328fb1c0477da99aff62e9db6c8cd9306ddb0bf02aa106d4f9edf0781ed72ca"},
+	{5, "session meta",
+		"e5a75dd116428e79d514574a51df5acb898b7fc9496fe549abe0d668a3e1667b9041b9e964b0dba3fb1b99e05c0571cb"},
+	{6, "refresh tokens",
+		"42a7bc12b708eaa5cd6ca686e78e5bd8ebe794b1451b40d46e7ac62e83090c20c15a7be190a05f82c6255cdcb081fdfa"},
+	{7, "registrations",
+		"415b6945ee8c2faa09c673df53f6cf42e916a0f71ea3aea00cbee7e7fdc7bbde8965da20d7b2b48f574a5a97e4073df2"},
+	{8, "app sessions",
+		"e790fa3a766a010e9d9fbac4affd3741854bc3c2b046ef1884e9c323781e70ed622ae08a03272d3d00ce762e699f3a61"},
 }
 
-// copyFixture copies a committed database into a temp dir; the fixtures are
-// never opened in place.
-func copyFixture(t *testing.T, name string) string {
+func sqlxMigrationRows(t *testing.T) []migrationRow {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join("testdata", name))
-	if err != nil {
-		t.Fatal(err)
+	rows := make([]migrationRow, 0, len(sqlxMigrations))
+	for _, m := range sqlxMigrations {
+		checksum, err := hex.DecodeString(m.checksum)
+		noError(t, err)
+		rows = append(rows, migrationRow{Version: m.version, Description: m.description, Success: true, Checksum: checksum})
 	}
-	path := filepath.Join(t.TempDir(), "domus.db")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
+	return rows
+}
+
+// bookkeeping is every column of _sqlx_migrations, one string per row.
+func bookkeeping(t *testing.T, s *Store) []string {
+	t.Helper()
+	rows, err := queryAll(ctx, s.db, func(row rowScanner) (string, error) {
+		var line string
+		return line, row.Scan(&line)
+	}, `SELECT version || '|' || description || '|' || success || '|' || hex(checksum) || '|' ||
+	           installed_on || '|' || execution_time
+	    FROM _sqlx_migrations ORDER BY version`)
+	noError(t, err)
+	return rows
 }
 
 func openMemory(t *testing.T) *Store {
@@ -77,113 +104,159 @@ func openMemory(t *testing.T) *Store {
 	return s
 }
 
-func TestNewDatabaseRecordsTheEightMigrationsWithRustChecksums(t *testing.T) {
-	s := openMemory(t)
-	got := readMigrationRows(t, s.db)
-	want := rawRows(t, copyFixture(t, "rust-created.db"))
-	if len(got) != 8 {
-		t.Fatalf("got %d migrations, want 8", len(got))
-	}
+func TestANewDatabaseRecordsTheEightMigrationsWithSqlxChecksums(t *testing.T) {
+	got := readMigrationRows(t, openMemory(t).db)
+	want := sqlxMigrationRows(t)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("rows differ from the ones sqlx wrote\n got %v\nwant %v", got, want)
 	}
 }
 
-func TestRustCreatedDatabaseOpensWithoutChangingItsMigrations(t *testing.T) {
-	path := copyFixture(t, "rust-created.db")
-	before := rawRows(t, path)
-	s, err := Open(context.Background(), path)
-	if err != nil {
-		t.Fatal(err)
+// sqlx stamps every row with the time it ran and how long it took; a database
+// it migrated keeps those columns, and reopening it must not rewrite any.
+func TestReopeningADatabaseMigratedBySqlxKeepsEveryBookkeepingColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "domus.db")
+	s, err := Open(ctx, path)
+	noError(t, err)
+	_, err = s.CreateFirstAdmin(ctx, "root", "hash")
+	noError(t, err)
+	exec(t, s, "UPDATE _sqlx_migrations SET installed_on = '2026-11-17 06:01:43', execution_time = 1000 + version")
+	before := bookkeeping(t, s)
+	noError(t, s.Close())
+
+	s, err = Open(ctx, path)
+	noError(t, err)
+	defer func() { _ = s.Close() }()
+	if after := bookkeeping(t, s); !reflect.DeepEqual(before, after) {
+		t.Fatalf("bookkeeping rewritten\nbefore %s\n after %s", before, after)
 	}
-	var users int64
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM users").Scan(&users); err != nil {
-		t.Fatal(err)
+	if got := readMigrationRows(t, s.db); !reflect.DeepEqual(got, sqlxMigrationRows(t)) {
+		t.Fatalf("rows differ from the ones sqlx wrote: %v", got)
 	}
-	if users != 4 {
-		t.Fatalf("users = %d, want 4", users)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if after := rawRows(t, path); !reflect.DeepEqual(before, after) {
-		t.Fatalf("migrations changed\nbefore %v\n after %v", before, after)
+	users, err := s.UserCount(ctx)
+	noError(t, err)
+	if users != 1 {
+		t.Fatalf("users = %d, want 1", users)
 	}
 }
 
-func TestRustCreatedExecutionTimesSurviveReopen(t *testing.T) {
-	path := copyFixture(t, "rust-created.db")
-	times := func() string {
-		db, err := sql.Open("sqlite", "file:"+path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer func() { _ = db.Close() }()
-		var got string
-		rows, err := db.Query("SELECT installed_on || ':' || execution_time FROM _sqlx_migrations ORDER BY version")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer func() { _ = rows.Close() }()
-		for rows.Next() {
-			var one string
-			if err := rows.Scan(&one); err != nil {
-				t.Fatal(err)
-			}
-			got += one + ";"
-		}
-		return got
+// v010Script is the database the v0.1.0 release made: no users table, no
+// _sqlx_migrations, and tokens and groups without the columns added later.
+const v010Script = `
+CREATE TABLE owner (id INTEGER PRIMARY KEY CHECK (id = 1), password_hash TEXT NOT NULL);
+CREATE TABLE sessions (token_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
+CREATE TABLE tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    created INTEGER NOT NULL
+);
+CREATE TABLE hue (id INTEGER PRIMARY KEY CHECK (id = 1), ip TEXT NOT NULL, app_key TEXT NOT NULL);
+CREATE TABLE groups (name TEXT PRIMARY KEY);
+CREATE TABLE group_members (
+    group_name TEXT NOT NULL REFERENCES groups(name) ON DELETE CASCADE,
+    entity_id TEXT NOT NULL,
+    pos INTEGER NOT NULL,
+    PRIMARY KEY (group_name, entity_id)
+);
+INSERT INTO owner VALUES (1, 'v010-owner-hash');
+INSERT INTO sessions VALUES ('v010-session', 4102444800);
+INSERT INTO hue VALUES (1, '10.0.0.2', 'v010-app-key');
+INSERT INTO groups VALUES ('garmin'), ('old');
+INSERT INTO group_members VALUES
+    ('garmin', 'light.hue_a1000002', 0), ('garmin', 'scene.hue_b2000001', 1),
+    ('garmin', 'light.hue_a1000001', 2), ('old', 'light.hue_a1000003', 0);`
+
+var v010Tokens = []struct{ name, plaintext string }{
+	{"watch", "domus_v010fixturetoken000000000000"},
+	{"phone", "domus_v010fixtureother0000000000000"},
+}
+
+// createV010Database writes the v0.1.0 database (journal mode delete, as
+// then) and returns its path.
+func createV010Database(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "domus.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	noError(t, err)
+	defer func() { _ = db.Close() }()
+	_, err = db.Exec(v010Script)
+	noError(t, err)
+	for _, token := range v010Tokens {
+		_, err = db.Exec("INSERT INTO tokens (name, token_hash, created) VALUES (?1, ?2, 1700000000)",
+			token.name, auth.SHA256Hex(token.plaintext))
+		noError(t, err)
 	}
-	before := times()
-	s, err := Open(context.Background(), path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = s.Close()
-	if after := times(); before != after {
-		t.Fatalf("bookkeeping rewritten\nbefore %s\n after %s", before, after)
-	}
+	return path
 }
 
 func TestV010DatabaseIsUpgradedAndKeepsItsData(t *testing.T) {
-	path := copyFixture(t, "v0.1.0.db")
-	s, err := Open(context.Background(), path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	before := nowSecs()
+	s, err := Open(ctx, createV010Database(t))
+	noError(t, err)
 	defer func() { _ = s.Close() }()
-	if n := len(readMigrationRows(t, s.db)); n != 8 {
-		t.Fatalf("migrations = %d, want 8", n)
+
+	if got := readMigrationRows(t, s.db); !reflect.DeepEqual(got, sqlxMigrationRows(t)) {
+		t.Fatalf("migrations = %v, want the eight sqlx rows", got)
 	}
-	count := func(query string) int64 {
-		var n int64
-		if err := s.db.QueryRow(query).Scan(&n); err != nil {
-			t.Fatal(err)
+	assertV010OwnerBecameAdmin(t, s, before)
+	assertV010TokensStillAuthenticate(t, s)
+	if n := queryInt(t, s, "SELECT COUNT(*) FROM sessions"); n != 0 {
+		t.Fatalf("sessions = %d, want them emptied so everyone logs in with a username", n)
+	}
+	assertV010BridgeAndGroups(t, s)
+}
+
+func assertV010OwnerBecameAdmin(t *testing.T, s *Store, notBefore int64) {
+	t.Helper()
+	admin, hash, err := s.UserLogin(ctx, "admin")
+	noError(t, err)
+	if admin.ID != 1 || !admin.IsAdmin || hash != "v010-owner-hash" {
+		t.Fatalf("admin = %+v hash = %q", admin, hash)
+	}
+	if admin.Created < notBefore || admin.Created > nowSecs() {
+		t.Fatalf("created = %d, want the time of the migration", admin.Created)
+	}
+}
+
+func assertV010TokensStillAuthenticate(t *testing.T, s *Store) {
+	t.Helper()
+	for _, token := range v010Tokens {
+		got, err := s.TokenAuth(ctx, auth.SHA256Hex(token.plaintext))
+		noError(t, err)
+		if got.UserID == nil || *got.UserID != 1 || got.ReadOnly || got.Scope != nil {
+			t.Errorf("token %s = %+v, want an unrestricted token of user 1", token.name, got)
 		}
-		return n
 	}
-	checks := map[string]int64{
-		"SELECT COUNT(*) FROM users WHERE id = 1 AND username = 'admin' AND is_admin = 1": 1,
-		"SELECT COUNT(*) FROM tokens WHERE user_id = 1":                                   2,
-		"SELECT COUNT(*) FROM sessions":                                                   0,
-		"SELECT COUNT(*) FROM hue WHERE ip = '10.0.0.2'":                                  1,
-		"SELECT COUNT(*) FROM groups WHERE expose_light = 0":                              2,
-		"SELECT COUNT(*) FROM group_members":                                              4,
+}
+
+func assertV010BridgeAndGroups(t *testing.T, s *Store) {
+	t.Helper()
+	bridge, err := s.HueGet(ctx)
+	noError(t, err)
+	if bridge != (HueBridge{IP: "10.0.0.2", Key: "v010-app-key"}) {
+		t.Fatalf("bridge = %+v", bridge)
 	}
-	for query, want := range checks {
-		if got := count(query); got != want {
-			t.Errorf("%s = %d, want %d", query, got, want)
+	names, err := s.GroupNames(ctx)
+	noError(t, err)
+	if want := []string{"garmin", "old"}; !reflect.DeepEqual(names, want) {
+		t.Fatalf("groups = %v, want %v", names, want)
+	}
+	exposed, err := s.ExposedGroupNames(ctx)
+	noError(t, err)
+	if len(exposed) != 0 {
+		t.Fatalf("exposed groups = %v, want none", exposed)
+	}
+	members := map[string][]string{
+		"garmin": {"light.hue_a1000002", "scene.hue_b2000001", "light.hue_a1000001"},
+		"old":    {"light.hue_a1000003"},
+	}
+	for group, want := range members {
+		got, err := s.GroupMembers(ctx, group)
+		noError(t, err)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s members = %v, want %v", group, got, want)
 		}
-	}
-	var members string
-	err = s.db.QueryRow(
-		"SELECT group_concat(entity_id) FROM (SELECT entity_id FROM group_members WHERE group_name = 'garmin' ORDER BY pos)").
-		Scan(&members)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := "light.hue_a1000002,scene.hue_b2000001,light.hue_a1000001"; members != want {
-		t.Fatalf("garmin members = %s, want %s", members, want)
 	}
 }
 

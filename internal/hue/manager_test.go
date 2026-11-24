@@ -1,8 +1,12 @@
 package hue
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -189,6 +193,49 @@ func TestTheStreamReconnectsAndResyncsEveryTime(t *testing.T) {
 	}
 	if state, _ := c.GetState("light.hue_aaaaaaaa"); state.State != "on" {
 		t.Fatalf("got %+v", state)
+	}
+}
+
+func TestSyncAndLogReportsTheOutcomeUnlessTheContextEnded(t *testing.T) {
+	unreachable := httptest.NewServer(http.NotFoundHandler())
+	unreachable.Close()
+	reachable := newMock()
+	reachable.set("light", lightJSON("aaaaaaaa-0000", "Desk", true, 40))
+
+	tests := []struct {
+		name      string
+		bridgeURL func(t *testing.T) string
+		cancelled bool
+		want      string
+	}{
+		{"a sync that works is logged with the light count", func(t *testing.T) string { return serve(t, reachable.handler()) }, false, "level=INFO msg=\"hue: synced lights\" count=1"},
+		{"a sync that fails is logged as a warning", func(*testing.T) string { return unreachable.URL }, false, "level=WARN msg=\"hue: sync failed\""},
+		{"a sync that fails because the context ended is not logged", func(*testing.T) string { return unreachable.URL }, true, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&logs, nil))
+			hue := NewIntegration(IntegrationConfig{
+				Client: NewClient(tt.bridgeURL(t), "key", Timing{}, quietLogger()),
+				Core:   newCore(t),
+				Logger: logger,
+			})
+			syncCtx, cancel := contextWithCancel()
+			defer cancel()
+			if tt.cancelled {
+				cancel()
+			}
+
+			hue.syncAndLog(syncCtx)
+
+			if tt.want == "" && logs.Len() != 0 {
+				t.Fatalf("got log %q, want none", logs.String())
+			}
+			if !strings.Contains(logs.String(), tt.want) {
+				t.Fatalf("got log %q, want it to contain %q", logs.String(), tt.want)
+			}
+		})
 	}
 }
 

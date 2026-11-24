@@ -717,6 +717,7 @@ func TestAConnectionThatIsNotUpgradedIsRefused(t *testing.T) {
 	rec := app.get(t, "/api/websocket")
 	equal(t, rec.Code, 400)
 	equal(t, rec.Body.String(), "Connection header did not include 'upgrade'")
+	equal(t, rec.Header().Get("Content-Type"), textType)
 	rec = app.do(t, request{method: "POST", path: "/api/websocket"})
 	equal(t, rec.Code, 405)
 }

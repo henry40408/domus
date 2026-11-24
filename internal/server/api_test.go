@@ -620,12 +620,13 @@ func TestVisibleStatesKeepsOnlyTheRequestedIDs(t *testing.T) {
 	equal(t, states[0].EntityID, "light.hue_b")
 }
 
-// The tests below pin behaviour of the Rust server that no Rust unit test
-// covers; the expectations come from the recorded goldens.
-
-func TestRestRoutesAnswerLikeTheRustServer(t *testing.T) {
+// The refusals of the token routes are plain text, like axum's, and a wrong
+// method on a known path names the allowed ones.
+func TestRestRoutesAnswerWithPlainTextRefusalsAndAllowHeaders(t *testing.T) {
 	app := newAPIApp(t)
 	bearer := map[string]string{"Authorization": "Bearer " + apiToken}
+	registrationBody, err := json.Marshal(registration())
+	noError(t, err)
 	cases := []struct {
 		name       string
 		req        request
@@ -639,6 +640,8 @@ func TestRestRoutesAnswerLikeTheRustServer(t *testing.T) {
 		{"lowercase scheme", request{path: "/api/states", headers: map[string]string{"Authorization": "bearer " + apiToken}}, 200, "", "", true},
 		{"wrong method with token", request{method: "POST", path: "/api/states", headers: bearer}, 405, "GET,HEAD", "", false},
 		{"wrong method without token", request{method: "POST", path: "/api/states"}, 401, "GET,HEAD", "401: Unauthorized", false},
+		{"service without token", request{method: "POST", path: "/api/services/light/turn_on", body: `{"entity_id":"light.hue_a"}`}, 401, "", "401: Unauthorized", false},
+		{"registration without token", request{method: "POST", path: registrationsPath, body: string(registrationBody)}, 401, "", "401: Unauthorized", false},
 		{"service with GET", request{path: "/api/services/light/turn_on", headers: bearer}, 405, "POST", "", false},
 		{"unknown domain falls through", request{method: "POST", path: "/api/services/switch/turn_on", headers: bearer, body: "{}"}, 404, "", "", false},
 		{"bad JSON", request{method: "POST", path: "/api/services/light/turn_on", headers: bearer, body: "{nope"}, 400, "", `{"message":"Invalid JSON."}`, true},
@@ -655,9 +658,10 @@ func TestRestRoutesAnswerLikeTheRustServer(t *testing.T) {
 		if c.bodyText == "" && !c.bodyIsJSON && rec.Body.Len() != 0 {
 			t.Errorf("%s: body %q, want empty", c.name, rec.Body)
 		}
+		if c.status == 401 && rec.Header().Get("Content-Type") != textType {
+			t.Errorf("%s: content type %q", c.name, rec.Header().Get("Content-Type"))
+		}
 	}
-	rec := app.do(t, request{path: "/api/states"})
-	equal(t, rec.Header().Get("Content-Type"), "text/plain; charset=utf-8")
 }
 
 func TestBearerToken(t *testing.T) {
