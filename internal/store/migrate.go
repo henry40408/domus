@@ -1,194 +1,216 @@
 package store
 
 import (
-	"bytes"
 	"cmp"
 	"context"
-	"crypto/sha512"
 	"database/sql"
 	"embed"
 	"errors"
 	"fmt"
 	"io/fs"
-	"maps"
+	"regexp"
 	"slices"
 	"strconv"
-	"strings"
-	"time"
 )
 
-// The Rust server ran these migrations with sqlx. Every existing database
-// carries sqlx's bookkeeping table, so the runner below reproduces its table,
-// description and checksum format exactly: both servers must accept the
-// other's database.
-
 //go:embed migrations/*.sql
-var migrationFiles embed.FS
+var embeddedMigrations embed.FS
 
-const createMigrationsTable = `
-CREATE TABLE IF NOT EXISTS _sqlx_migrations (
-    version BIGINT PRIMARY KEY,
-    description TEXT NOT NULL,
-    installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    success BOOLEAN NOT NULL,
-    checksum BLOB NOT NULL,
-    execution_time BIGINT NOT NULL
-);
-`
+// migrationFileName is `<version>_<description>.sql`.
+var migrationFileName = regexp.MustCompile(`^(\d+)_.+\.sql$`)
 
+// Either of two rows in _sqlx_migrations shows that a database reached the
+// baseline: the one releases up to 0.12 wrote for that version, or the one the
+// baseline itself writes. The descriptions count, because the numbers alone would
+// also match another program that uses sqlx.
+const (
+	oldBaselineRecord = "app sessions"
+	sentinelVersion   = 99999999999999
+	sentinelRecord    = "domus versions its schema with PRAGMA user_version"
+)
+
+// migration brings the schema to version, which `PRAGMA user_version` records.
 type migration struct {
-	version     int64
-	description string
-	sql         string
-	checksum    []byte
+	version int64
+	sql     string
 }
 
-// loadMigrations reads files named <version>_<description>.sql, sorted by
-// version. Other files are ignored, like sqlx does.
-func loadMigrations(fsys fs.FS, dir string) ([]migration, error) {
-	entries, err := fs.ReadDir(fsys, dir)
+func migrate(ctx context.Context, db *sql.DB) error {
+	files, err := fs.Sub(embeddedMigrations, "migrations")
 	if err != nil {
-		return nil, fmt.Errorf("read migrations: %w", err)
+		return err
 	}
-	var migrations []migration
-	for _, entry := range entries {
-		m, ok, err := loadMigration(fsys, dir, entry)
+	migrations, err := loadMigrations(files)
+	if err != nil {
+		return err
+	}
+	return applyMigrations(ctx, db, migrations)
+}
+
+// loadMigrations reads every `.sql` file in the root of fsys, ordered by version.
+// The first one is the baseline: it creates the whole schema of its version.
+func loadMigrations(fsys fs.FS) ([]migration, error) {
+	names, err := fs.Glob(fsys, "*.sql")
+	if err != nil {
+		return nil, err
+	}
+	if len(names) == 0 {
+		return nil, errors.New("no migration files")
+	}
+	migrations := make([]migration, 0, len(names))
+	for _, name := range names {
+		m, err := readMigration(fsys, name)
 		if err != nil {
 			return nil, err
 		}
-		if ok {
-			migrations = append(migrations, m)
+		migrations = append(migrations, m)
+	}
+	slices.SortFunc(migrations, func(a, b migration) int {
+		return cmp.Compare(a.version, b.version)
+	})
+	for i := 1; i < len(migrations); i++ {
+		if migrations[i].version == migrations[i-1].version {
+			return nil, fmt.Errorf("migrations share version %d", migrations[i].version)
 		}
 	}
-	slices.SortFunc(migrations, func(a, b migration) int { return cmp.Compare(a.version, b.version) })
 	return migrations, nil
 }
 
-func loadMigration(fsys fs.FS, dir string, entry fs.DirEntry) (migration, bool, error) {
-	name := entry.Name()
-	versionText, rest, found := strings.Cut(name, "_")
-	if entry.IsDir() || !found || !strings.HasSuffix(rest, ".sql") {
-		return migration{}, false, nil
+func readMigration(fsys fs.FS, name string) (migration, error) {
+	parts := migrationFileName.FindStringSubmatch(name)
+	if parts == nil {
+		return migration{}, fmt.Errorf("migration file %q is not named <version>_<description>.sql", name)
 	}
-	version, err := strconv.ParseInt(versionText, 10, 64)
+	// user_version is a signed 32-bit integer, and 0 means no migration yet.
+	version, err := strconv.ParseInt(parts[1], 10, 32)
 	if err != nil {
-		return migration{}, false, fmt.Errorf("migration file %q: version is not an integer", name)
+		return migration{}, fmt.Errorf("migration file %q: %w", name, err)
 	}
-	body, err := fs.ReadFile(fsys, dir+"/"+name)
+	if version == 0 {
+		return migration{}, fmt.Errorf("migration file %q: versions start at 1", name)
+	}
+	contents, err := fs.ReadFile(fsys, name)
 	if err != nil {
-		return migration{}, false, fmt.Errorf("read migration %q: %w", name, err)
+		return migration{}, err
 	}
-	sum := sha512.Sum384(body)
-	return migration{
-		version:     version,
-		description: strings.ReplaceAll(strings.TrimSuffix(rest, ".sql"), "_", " "),
-		sql:         string(body),
-		checksum:    sum[:],
-	}, true, nil
+	return migration{version: version, sql: string(contents)}, nil
 }
 
-// migrate applies the pending migrations in version order. Like sqlx it
-// refuses a database with a dirty row, with an applied migration that is not
-// in the source, or whose checksum changed.
-func migrate(ctx context.Context, db *sql.DB, migrations []migration) error {
-	if _, err := db.ExecContext(ctx, createMigrationsTable); err != nil {
-		return fmt.Errorf("create migrations table: %w", err)
+// versionRange holds the first and the latest schema version this build has.
+type versionRange struct {
+	baseline, latest int64
+}
+
+func (r versionRange) refuseNewer(current int64) error {
+	if current > r.latest {
+		return fmt.Errorf("database schema version %d is newer than %d, the latest this domus knows; run a newer domus",
+			current, r.latest)
 	}
-	if err := rejectDirty(ctx, db); err != nil {
-		return err
-	}
-	applied, err := appliedChecksums(ctx, db)
+	return nil
+}
+
+// applyMigrations applies the migrations newer than the database, one transaction
+// each. migrations is ordered and starts with the baseline.
+func applyMigrations(ctx context.Context, db *sql.DB, migrations []migration) error {
+	known := versionRange{baseline: migrations[0].version, latest: migrations[len(migrations)-1].version}
+	current, err := userVersion(ctx, db)
 	if err != nil {
 		return err
 	}
-	if err := rejectMissing(applied, migrations); err != nil {
+	if err := known.refuseNewer(current); err != nil {
 		return err
 	}
 	for _, m := range migrations {
-		checksum, done := applied[m.version]
-		if done && !bytes.Equal(checksum, m.checksum) {
-			return fmt.Errorf("migration %d was previously applied but has been modified", m.version)
-		}
-		if done {
+		if m.version <= current {
 			continue
 		}
-		if err := apply(ctx, db, m); err != nil {
+		if err := applyMigration(ctx, db, m, known); err != nil {
+			return fmt.Errorf("apply migration %d: %w", m.version, err)
+		}
+	}
+	return nil
+}
+
+// applyMigration runs the script and moves user_version in one transaction, so a
+// failure leaves neither half behind.
+func applyMigration(ctx context.Context, db *sql.DB, m migration, known versionRange) error {
+	// The DSN's _txlock=immediate takes the write lock here, not at the first write.
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	// Read again under the write lock: another process, maybe a newer domus, may
+	// have got here first.
+	current, err := userVersion(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if err := known.refuseNewer(current); err != nil {
+		return err
+	}
+	if current >= m.version {
+		return nil
+	}
+	if current < known.baseline {
+		// Inside the transaction, so an older domus starting at the same time cannot
+		// create old tables between this check and the baseline.
+		if err := checkBaselineApplies(ctx, tx, known.baseline); err != nil {
 			return err
 		}
 	}
-	return nil
+	if _, err := tx.ExecContext(ctx, m.sql); err != nil {
+		return err
+	}
+	// A PRAGMA takes no bound parameters.
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", m.version)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-func rejectDirty(ctx context.Context, db *sql.DB) error {
+// rowQuerier is what *sql.DB and *sql.Tx share to read one row.
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func userVersion(ctx context.Context, q rowQuerier) (int64, error) {
 	var version int64
-	err := db.QueryRowContext(ctx,
-		"SELECT version FROM _sqlx_migrations WHERE success = false ORDER BY version LIMIT 1").Scan(&version)
-	if errors.Is(err, sql.ErrNoRows) {
+	if err := q.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return 0, fmt.Errorf("read schema version: %w", err)
+	}
+	return version, nil
+}
+
+// checkBaselineApplies accepts an empty database, or one that reached the
+// baseline before: through the migrations of an older release, or through the
+// baseline itself if user_version was lost since (a restored dump). The baseline
+// only creates what is missing, so on an older schema it would leave old tables as
+// they are.
+func checkBaselineApplies(ctx context.Context, q rowQuerier, baseline int64) error {
+	var objects, records int
+	err := q.QueryRowContext(ctx, `SELECT count(*), count(*) FILTER (WHERE name = '_sqlx_migrations')
+		FROM sqlite_master WHERE name NOT LIKE 'sqlite\_%' ESCAPE '\'`).Scan(&objects, &records)
+	if err != nil {
+		return fmt.Errorf("inspect database: %w", err)
+	}
+	if objects == 0 {
 		return nil
 	}
-	if err != nil {
-		return fmt.Errorf("check dirty migrations: %w", err)
-	}
-	return fmt.Errorf("migration %d is partially applied; fix and remove row from `_sqlx_migrations` table", version)
-}
-
-func appliedChecksums(ctx context.Context, db *sql.DB) (map[int64][]byte, error) {
-	rows, err := db.QueryContext(ctx, "SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
-	if err != nil {
-		return nil, fmt.Errorf("list applied migrations: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	applied := map[int64][]byte{}
-	for rows.Next() {
-		var version int64
-		var checksum []byte
-		if err := rows.Scan(&version, &checksum); err != nil {
-			return nil, fmt.Errorf("list applied migrations: %w", err)
-		}
-		applied[version] = checksum
-	}
-	return applied, rows.Err()
-}
-
-func rejectMissing(applied map[int64][]byte, migrations []migration) error {
-	known := map[int64]bool{}
-	for _, m := range migrations {
-		known[m.version] = true
-	}
-	for _, version := range slices.Sorted(maps.Keys(applied)) {
-		if !known[version] {
-			return fmt.Errorf("migration %d was previously applied but is missing in the resolved migrations", version)
+	reached := false
+	if records > 0 {
+		err := q.QueryRowContext(ctx, `SELECT
+			EXISTS (SELECT 1 FROM _sqlx_migrations
+				WHERE (version = ?1 AND description = ?2) OR (version = ?3 AND description = ?4))
+			AND NOT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE success = FALSE)`,
+			baseline, oldBaselineRecord, sentinelVersion, sentinelRecord).Scan(&reached)
+		if err != nil {
+			return fmt.Errorf("read old migration records: %w", err)
 		}
 	}
-	return nil
-}
-
-// apply runs one migration and its bookkeeping row in one transaction. As in
-// sqlx the measured time can only be stored after the commit, so the row
-// first says -1.
-func apply(ctx context.Context, db *sql.DB, m migration) error {
-	start := time.Now()
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin migration %d: %w", m.version, err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, m.sql); err != nil {
-		return fmt.Errorf("while executing migration %d: %w", m.version, err)
-	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO _sqlx_migrations ( version, description, success, checksum, execution_time )
-		 VALUES ( ?1, ?2, TRUE, ?3, -1 )`,
-		m.version, m.description, m.checksum); err != nil {
-		return fmt.Errorf("record migration %d: %w", m.version, err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit migration %d: %w", m.version, err)
-	}
-	if _, err := db.ExecContext(ctx,
-		"UPDATE _sqlx_migrations SET execution_time = ?1 WHERE version = ?2",
-		time.Since(start).Nanoseconds(), m.version); err != nil {
-		return fmt.Errorf("record migration %d time: %w", m.version, err)
+	if !reached {
+		return fmt.Errorf("the database is not empty and has no complete record of schema version %d; "+
+			"if it is from an older domus, open it with domus 0.12 once, then upgrade", baseline)
 	}
 	return nil
 }
