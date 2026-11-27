@@ -115,15 +115,7 @@ func openPool(ctx context.Context, dsn string, maxOpenConns int) (*sql.DB, error
 }
 
 func initStore(ctx context.Context, db *sql.DB) (*Store, error) {
-	if err := upgradeUnversioned(ctx, db); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	migrations, err := loadMigrations(migrationFiles, "migrations")
-	if err == nil {
-		err = migrate(ctx, db, migrations)
-	}
-	if err != nil {
+	if err := migrate(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -166,7 +158,15 @@ func affected(res sql.Result, err error) error {
 
 // exists runs a query that selects 1 when the row exists.
 func (s *Store) exists(ctx context.Context, query string, args ...any) (bool, error) {
-	return rowExists(ctx, s.db, query, args...)
+	var one int64
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // inTx runs fn in a transaction: it commits when fn succeeds and rolls back

@@ -73,7 +73,7 @@ The admin page updates live: `GET /api/domus/events` is a server-sent event stre
 
 Admin page tabs: Dashboard, Groups (admin), Devices, Tokens, Users (admin), Settings. Regular users see Dashboard, Devices, Tokens and Settings, and only their own tokens.
 
-1. Create the admin account (setup code from the log, username and password; first start only). Add more users in Users; admins manage the bridge, groups and users, regular users control lights and manage their own tokens. Upgrading from v0.1.0 turns the old password into the user `admin`; everyone must log in again.
+1. Create the admin account (setup code from the log, username and password; first start only). Add more users in Users; admins manage the bridge, groups and users, regular users control lights and manage their own tokens. Upgrading from v0.1.0 (by way of 0.12, see [Database and upgrades](#database-and-upgrades)) turns the old password into the user `admin`; everyone must log in again.
 2. Pair the Hue Bridge (Settings): enter its IP, press the bridge's link button, click **Pair**.
 3. Create a group (e.g. `Garmin`, Groups), tick lights and scenes, order them, and save. A watch preview shows what hasscontrol will list.
 4. Create a long-lived access token (Tokens; shown once, only its hash is stored; "last used" is tracked). Tokens look like `domus_` + 32 hex characters. Optionally limit a token to chosen groups: it can then only reach those groups, their members and the group's light switch. Out-of-scope reads return 404 and out-of-scope service targets are skipped. Tokens without a scope keep full access. Tokens can also be read-only (state reads work, light and scene calls get 403) and can expire after 7 days to a year. In Users, an admin can limit a regular user to chosen groups: their Groups, Lights and Devices views shrink to those groups, and their tokens can only use a subset of them (a token without a scope inherits the user's). A token's effective scope is the intersection of its own scope and its owner's, so narrowing a user narrows their existing tokens too. Admins are never limited.
@@ -184,10 +184,22 @@ The page is served with `Cache-Control: no-cache` and every asset URL in it carr
 
 ### Production Notes
 
-- Mount `/data` so the SQLite database persists, and back it up: the Hue application key is stored in plaintext.
+- Mount `/data` so the SQLite database persists, and back it up (see [Database and upgrades](#database-and-upgrades)); protect the copies too, because the Hue application key is stored in plaintext.
 - The container runs as root so a bind-mounted `/data` stays writable without a permissions change.
 - Terminate TLS at a reverse proxy; see [TLS / reverse proxy](#tls--reverse-proxy).
 - Port 8123 is also Home Assistant's default; change the published port (e.g. `-p 8124:8123`) if both run on one host.
+
+## Database and upgrades
+
+The database is `domus.db` in `DOMUS_DATA_DIR`. SQLite runs in WAL mode, so `domus.db-wal` and `domus.db-shm` appear next to it while it is open. Back up with SQLite's backup API (`sqlite3 domus.db ".backup copy.db"`), or copy the files together while domus is stopped. A SQL dump (`.dump`) leaves out the schema version: read it from the original (`sqlite3 domus.db "PRAGMA user_version"`) and set the same number on the restored database (for example `sqlite3 restored.db "PRAGMA user_version = 8"`), otherwise domus runs the migrations again from the start, which can fail and stop it.
+
+### Upgrading from 0.12 or earlier
+
+Releases after 0.12 record the schema version differently. To upgrade:
+
+1. Stop domus and back up the database. Going back to an old version needs this copy: after the next steps it refuses to start, saying that a migration `was previously applied but is missing in the resolved migrations`. 0.1.0 does not check at all, so never start it on an upgraded database.
+2. If domus 0.8 or later has never run on the database, start domus 0.12 (`ghcr.io/henry40408/domus:0.12`) on it once, then stop it. Newer releases refuse such a database and leave its schema and data unchanged.
+3. Start the new release.
 
 ## TLS / reverse proxy
 
