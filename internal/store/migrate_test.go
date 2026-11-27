@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io/fs"
 	"maps"
@@ -574,6 +575,74 @@ func TestFailedMigrationLeavesNothingBehind(t *testing.T) {
 	}
 	if got := schemaVersion(t, db); got != 9 {
 		t.Fatalf("user_version = %d, want the last migration that succeeded", got)
+	}
+}
+
+func TestAVersionThatCannotBeRecordedRollsTheMigrationBack(t *testing.T) {
+	db := newRawDatabase(t)
+	// query_only makes the write of user_version fail after the script ran.
+	unrecordable := []migration{{version: 8, sql: "CREATE TABLE unrecorded (id INTEGER); PRAGMA query_only = 1"}}
+
+	if err := applyMigrations(context.Background(), db, unrecordable); err == nil {
+		t.Fatal("the migration was reported as applied")
+	}
+	if _, ok := schemaOf(t, db)["unrecorded"]; ok {
+		t.Fatal("the table survived without its version")
+	}
+}
+
+func TestApplyMigrationsReportsADatabaseItCannotRead(t *testing.T) {
+	db := newRawDatabase(t)
+	noError(t, db.Close())
+	err := applyMigrations(context.Background(), db, onlyBaseline(t))
+	if err == nil || !strings.Contains(err.Error(), "read schema version") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestApplyMigrationStopsWhenCancelled(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	known := versionRange{baseline: baselineVersion, latest: baselineVersion}
+	err := applyMigration(cancelled, newRawDatabase(t), onlyBaseline(t)[0], known)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// Another program's table of the same name, without the columns sqlx gives it.
+func TestOpenRefusesOldRecordsItCannotRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "other.db")
+	raw := openRaw(t, path)
+	mustExec(t, raw, "CREATE TABLE _sqlx_migrations (version INTEGER)")
+	before := schemaOf(t, raw)
+
+	s, err := Open(ctx, path)
+	if err == nil {
+		_ = s.Close()
+		t.Fatal("the database was opened")
+	}
+	if !strings.Contains(err.Error(), "read old migration records") {
+		t.Fatalf("err = %v", err)
+	}
+	if after := schemaOf(t, raw); !maps.Equal(after, before) || schemaVersion(t, raw) != 0 {
+		t.Fatalf("database changed: %q", after)
+	}
+}
+
+// A database error must not read as "no such row".
+func TestExistenceChecksReportDatabaseErrors(t *testing.T) {
+	s := openMemory(t)
+	noError(t, s.Close())
+	if found, err := s.GroupExists(ctx, "garmin"); err == nil || found {
+		t.Fatalf("found = %v err = %v", found, err)
+	}
+}
+
+func TestLoadMigrationsReportsAFileItCannotRead(t *testing.T) {
+	// A directory named like a migration.
+	if _, err := loadMigrations(fstest.MapFS{"0001_directory.sql/nested": {}}); err == nil {
+		t.Fatal("the directory was loaded")
 	}
 }
 
